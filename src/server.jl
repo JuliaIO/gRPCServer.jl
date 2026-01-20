@@ -899,7 +899,28 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         @warn "Invalid TE header in gRPC request" method=method_path te=te_header expected="trailers"
     end
 
-    # Read one gRPC message
+    # Look up method to determine type BEFORE reading message
+    # This allows us to handle streaming methods differently
+    result = lookup_method(server.dispatcher.registry, method_path)
+    if result === nothing
+        send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method not found: $method_path"; content_type=response_content_type)
+        return
+    end
+
+    service, method_desc = result
+
+    # For client streaming and bidirectional streaming, we must wait for END_STREAM
+    # before processing because all client messages need to be collected first.
+    # Note: True bidirectional streaming with interleaved send/receive would require
+    # async task handling, which is not implemented yet.
+    if (method_desc.method_type == MethodType.CLIENT_STREAMING ||
+        method_desc.method_type == MethodType.BIDI_STREAMING) && !stream.end_stream_received
+        @debug "Streaming: waiting for END_STREAM" method=method_path type=method_desc.method_type
+        return  # Don't process yet, wait for END_STREAM
+    end
+
+    # Read one gRPC message (for unary/server-streaming this is the request,
+    # for client-streaming this is the first of many messages already in buffer)
     grpc_data = read_grpc_message!(stream)
     if grpc_data === nothing
         grpc_data = UInt8[]
@@ -915,15 +936,6 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         @info "gRPC request" method=method_path peer=peer
     end
 
-    # Look up method to determine type
-    result = lookup_method(server.dispatcher.registry, method_path)
-    if result === nothing
-        send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method not found: $method_path"; content_type=response_content_type)
-        return
-    end
-
-    service, method_desc = result
-
     # Dispatch based on method type
     if method_desc.method_type == MethodType.UNARY
         status, message, response_data = dispatch_unary(server.dispatcher, ctx, grpc_data)
@@ -934,12 +946,14 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         # Handle server streaming - multiple responses to one request
         handle_server_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
 
-    elseif method_desc.method_type == MethodType.BIDI_STREAMING ||
-           method_desc.method_type == MethodType.CLIENT_STREAMING
-        # For streaming methods, handle one message at a time
-        status, message, response_data = dispatch_streaming_message(server.dispatcher, ctx, grpc_data, method_desc, service)
-        @debug "gRPC response" status=status response_len=length(response_data)
-        send_grpc_response(conn, io, stream.id, status, message, response_data; content_type=response_content_type)
+    elseif method_desc.method_type == MethodType.CLIENT_STREAMING
+        # Handle client streaming - multiple requests, single response
+        # At this point, end_stream_received is true, so all messages are in the buffer
+        handle_client_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
+
+    elseif method_desc.method_type == MethodType.BIDI_STREAMING
+        # Handle bidirectional streaming - multiple requests and responses
+        handle_bidi_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
 
     else
         send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method type $(method_desc.method_type) not supported"; content_type=response_content_type)
@@ -1039,6 +1053,320 @@ function handle_server_streaming(
     end
     trailer_frames = send_trailers(conn, stream.id, trailers)
     write_frames(io, trailer_frames)
+end
+
+"""
+    wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io::IO) -> Bool
+
+Wait for either a complete gRPC message or end of stream.
+Returns true if message available, false if stream ended.
+Uses polling with yield() to allow other tasks to run.
+"""
+function wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io::IO)::Bool
+    max_iterations = 10000  # Safety limit
+    iteration = 0
+
+    while iteration < max_iterations
+        # Check if we have a complete message
+        if has_complete_grpc_message(stream)
+            return true
+        end
+
+        # Check if stream has ended (client half-closed)
+        if stream.end_stream_received
+            # Check one more time for any remaining data
+            return has_complete_grpc_message(stream)
+        end
+
+        # Check if stream was reset
+        if stream.state == StreamState.CLOSED
+            return false
+        end
+
+        # Process any pending frames from the connection
+        # This reads more data if available
+        try
+            if eof(io)
+                return false
+            end
+            # Try to read and process any waiting frames
+            frame = try_read_frame(io, conn)
+            if frame !== nothing
+                process_frame!(conn, frame)
+            end
+        catch e
+            if !(e isa EOFError)
+                @debug "Error reading frame while waiting for message" exception=e
+            end
+            return false
+        end
+
+        iteration += 1
+        yield()  # Allow other tasks to run
+    end
+
+    @warn "Exceeded max iterations waiting for message" stream_id=stream.id
+    return false
+end
+
+"""
+    try_read_frame(io::IO, conn::HTTP2Connection) -> Union{Frame, Nothing}
+
+Try to read a frame without blocking. Returns nothing if no complete frame available.
+"""
+function try_read_frame(io::IO, conn::HTTP2Connection)::Union{Frame, Nothing}
+    # Check if there's enough data for a frame header (9 bytes)
+    if bytesavailable(io) < 9
+        return nothing
+    end
+
+    try
+        return read_frame(io)
+    catch e
+        if e isa EOFError
+            return nothing
+        end
+        rethrow()
+    end
+end
+
+"""
+    handle_client_streaming(server, conn, io, stream, ctx, first_message, method_desc, service)
+
+Handle a client streaming RPC where the client sends multiple requests and
+the server sends a single response after processing all requests.
+
+Note: This function is called only after end_stream_received is true,
+meaning all client messages are already in the stream buffer.
+"""
+function handle_client_streaming(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    first_message::Vector{UInt8},
+    method_desc::MethodDescriptor,
+    _service::ServiceDescriptor  # Unused but kept for API consistency
+)
+    # Check if stream is still sendable before attempting to send
+    # Stream should be in HALF_CLOSED_REMOTE state (client has finished sending)
+    if !can_send(stream)
+        @warn "Cannot start client streaming, stream not in sendable state" stream_id=stream.id state=stream.state
+        return
+    end
+
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Track status for response
+    final_status = StatusCode.OK
+    final_message = ""
+    response_data = UInt8[]
+
+    try
+        # Collect all messages from buffer
+        # The first message was already read by process_stream_request!
+        # Remaining messages are still in the stream buffer
+        messages = Vector{UInt8}[]
+
+        # Add first message if not empty
+        if !isempty(first_message)
+            push!(messages, first_message)
+        end
+
+        # Read all remaining messages from buffer
+        # Since end_stream_received is true, all data is already buffered
+        while has_complete_grpc_message(stream)
+            msg = read_grpc_message!(stream)
+            if msg !== nothing
+                push!(messages, msg)
+            end
+        end
+
+        @debug "Client streaming collected messages" count=length(messages) stream_id=stream.id
+
+        # Create receive callback that yields collected messages
+        message_index = Ref(1)
+        receive_callback = function()
+            if message_index[] > length(messages)
+                return nothing
+            end
+            msg_data = messages[message_index[]]
+            message_index[] += 1
+            # Deserialize message
+            return deserialize_message(msg_data, method_desc.input_type)
+        end
+
+        # Create is_cancelled callback
+        is_cancelled_callback = function()
+            return ctx.cancelled || stream.state == StreamState.CLOSED
+        end
+
+        # Call dispatcher which handles the handler execution
+        status, message, resp_data = dispatch_client_streaming(
+            server.dispatcher, ctx, receive_callback, is_cancelled_callback
+        )
+
+        final_status = status
+        final_message = message
+        response_data = resp_data
+
+    catch e
+        if e isa GRPCError
+            final_status = e.code
+            final_message = e.message
+        elseif e isa StreamCancelledError
+            final_status = StatusCode.CANCELLED
+            final_message = "Stream cancelled"
+        else
+            @error "Error in client streaming handler" exception=(e, catch_backtrace())
+            final_status = StatusCode.INTERNAL
+            final_message = server.dispatcher.debug_mode ? sprint(showerror, e) : "Internal server error"
+        end
+    end
+
+    # Send response with status
+    send_grpc_response(conn, io, stream.id, final_status, final_message, response_data; content_type=response_content_type)
+end
+
+"""
+    handle_bidi_streaming(server, conn, io, stream, ctx, first_message, method_desc, service)
+
+Handle a bidirectional streaming RPC where both client and server can send
+multiple messages simultaneously.
+
+Note: Currently implemented in "batch" mode - waits for all client messages before
+processing. True interleaved bidirectional streaming would require async task handling.
+"""
+function handle_bidi_streaming(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    first_message::Vector{UInt8},
+    method_desc::MethodDescriptor,
+    _service::ServiceDescriptor  # Unused but kept for API consistency
+)
+    # Check if stream is still sendable before attempting to send
+    if !can_send(stream)
+        @warn "Cannot start bidi streaming, stream not in sendable state" stream_id=stream.id state=stream.state
+        return
+    end
+
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Send response headers first (before any data)
+    response_headers = [
+        (":status", "200"),
+        ("content-type", response_content_type),
+        ("grpc-encoding", "identity"),
+    ]
+    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
+    write_frames(io, header_frames)
+
+    # Track status for trailers
+    final_status = StatusCode.OK
+    final_message = ""
+    trailers_sent = Ref(false)
+
+    try
+        # Collect all messages from buffer (since we wait for END_STREAM)
+        messages = Vector{UInt8}[]
+        if !isempty(first_message)
+            push!(messages, first_message)
+        end
+
+        # Read all remaining messages from buffer
+        while has_complete_grpc_message(stream)
+            msg = read_grpc_message!(stream)
+            if msg !== nothing
+                push!(messages, msg)
+            end
+        end
+
+        @debug "Bidi streaming collected messages" count=length(messages) stream_id=stream.id
+
+        # Create receive callback that yields collected messages
+        message_index = Ref(1)
+        receive_callback = function()
+            if message_index[] > length(messages)
+                return nothing
+            end
+            msg_data = messages[message_index[]]
+            message_index[] += 1
+            return deserialize_message(msg_data, method_desc.input_type)
+        end
+
+        # Create send callback for responses
+        send_callback = function(message, _compress)
+            if trailers_sent[]
+                @warn "Attempted to send message after stream closed" stream_id=stream.id
+                return
+            end
+            response_data = serialize_message(message)
+            grpc_message = encode_grpc_message(response_data; compressed=false)
+            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
+            write_frames(io, data_frames)
+        end
+
+        # Create close callback that sends trailers
+        close_callback = function()
+            if trailers_sent[]
+                return
+            end
+            trailers_sent[] = true
+            trailers = [
+                ("grpc-status", string(Int(final_status))),
+            ]
+            if !isempty(final_message)
+                push!(trailers, ("grpc-message", final_message))
+            end
+            trailer_frames = send_trailers(conn, stream.id, trailers)
+            write_frames(io, trailer_frames)
+        end
+
+        # Create is_cancelled callback
+        is_cancelled_callback = function()
+            return ctx.cancelled || stream.state == StreamState.CLOSED
+        end
+
+        # Call dispatcher which handles the handler execution
+        status, message = dispatch_bidi_streaming(
+            server.dispatcher, ctx, receive_callback, send_callback, close_callback, is_cancelled_callback
+        )
+
+        final_status = status
+        final_message = message
+
+    catch e
+        if e isa GRPCError
+            final_status = e.code
+            final_message = e.message
+        elseif e isa StreamCancelledError
+            final_status = StatusCode.CANCELLED
+            final_message = "Stream cancelled"
+        else
+            @error "Error in bidi streaming handler" exception=(e, catch_backtrace())
+            final_status = StatusCode.INTERNAL
+            final_message = server.dispatcher.debug_mode ? sprint(showerror, e) : "Internal server error"
+        end
+    end
+
+    # Send trailers with final status if not already sent
+    if !trailers_sent[]
+        trailers_sent[] = true
+        trailers = [
+            ("grpc-status", string(Int(final_status))),
+        ]
+        if !isempty(final_message)
+            push!(trailers, ("grpc-message", final_message))
+        end
+        trailer_frames = send_trailers(conn, stream.id, trailers)
+        write_frames(io, trailer_frames)
+    end
 end
 
 """

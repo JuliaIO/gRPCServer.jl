@@ -640,8 +640,10 @@ function dispatch_client_streaming(
     end
 
     try
-        # Create client stream
-        stream = ClientStream{Any}(receive_callback, is_cancelled_callback)
+        # Create client stream with the correct input type
+        # Use the Julia type if available, otherwise fall back to Any
+        input_type = method.input_julia_type !== nothing ? method.input_julia_type : Any
+        stream = ClientStream{input_type}(receive_callback, is_cancelled_callback)
 
         # Build interceptor chain
         info = MethodInfo(service.name, method.name, method.method_type)
@@ -659,6 +661,7 @@ function dispatch_client_streaming(
         return (StatusCode.OK, "", response_data)
 
     catch e
+        @error "Error in client streaming handler" exception=(e, catch_backtrace())
         return handle_exception(e, dispatcher.debug_mode)
     end
 end
@@ -699,8 +702,11 @@ function dispatch_bidi_streaming(
     end
 
     try
-        # Create bidi stream
-        stream = BidiStream{Any, Any}(receive_callback, send_callback, close_callback, is_cancelled_callback)
+        # Create bidi stream with the correct input/output types
+        # Use the Julia types if available, otherwise fall back to Any
+        input_type = method.input_julia_type !== nothing ? method.input_julia_type : Any
+        output_type = method.output_julia_type !== nothing ? method.output_julia_type : Any
+        stream = BidiStream{input_type, output_type}(receive_callback, send_callback, close_callback, is_cancelled_callback)
 
         # Build interceptor chain
         info = MethodInfo(service.name, method.name, method.method_type)
