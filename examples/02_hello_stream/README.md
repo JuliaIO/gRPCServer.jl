@@ -1,17 +1,28 @@
-# Hello World Example
+# Hello Stream Example - Server Streaming RPC
 
-A simple gRPC server demonstrating unary and server streaming RPC patterns.
+This example builds on `01_hello_world` by adding server streaming RPC, where a single request receives multiple responses.
+
+## What This Example Shows
+
+- Defining a proto service with both unary and streaming RPC methods
+- Implementing a server streaming handler using `ServerStream`
+- Handling client cancellation in streaming responses
+- Sending multiple responses for a single request
+
+## Prerequisites
+
+Before this example, complete `01_hello_world` to understand basic unary RPC.
 
 ## Files
 
-- `greeter.proto` - Protocol buffer service definition
-- `server.jl` - Julia server implementation
+- `greeter.proto` - Protocol buffer service definition (includes streaming RPC)
+- `server.jl` - Julia server implementation with streaming handler
 - `generated/` - Auto-generated Julia types from protobuf
 
 ## Running the Server
 
 ```bash
-cd examples/hello_world
+cd examples/02_hello_stream
 julia --project=../.. server.jl
 ```
 
@@ -19,7 +30,7 @@ The server listens on port 50051 with reflection and health checking enabled.
 
 ## Testing with grpcurl
 
-All commands below should be run from the `examples/hello_world` directory.
+All commands below assume the server is running.
 
 ### List Available Services
 
@@ -85,11 +96,15 @@ Expected output:
 }
 ```
 
+## Next Steps
+
+After understanding streaming, proceed to `03_calculator` to see a multi-method service with different operations.
+
 ## Regenerating Types
 
 If you modify `greeter.proto`, regenerate the Julia types:
 
 ```julia
 using ProtoBuf
-ProtoBuf.protojl("greeter.proto", ".", "generated")
+protojl("greeter.proto", ".", "generated")
 ```

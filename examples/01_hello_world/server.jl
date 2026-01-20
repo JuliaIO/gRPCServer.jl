@@ -4,26 +4,10 @@ using gRPCServer
 include("generated/helloworld/helloworld.jl")
 using .helloworld
 
-# Handlers
+# Handler for unary RPC
 function say_hello(ctx::ServerContext, request::HelloRequest)::HelloReply
     @info "Received request" name=request.name request_id=ctx.request_id
-    HelloReply(message = "Hello, $(request.name)!")
-end
-
-function say_hello_stream(
-    ctx::ServerContext,
-    request::HelloRequest,
-    stream::ServerStream{HelloReply}
-)::Nothing
-    for i in 1:5
-        if ctx.cancelled
-            @warn "Stream cancelled by client"
-            return nothing
-        end
-        send!(stream, HelloReply(message = "Hello $(i), $(request.name)!"))
-        sleep(0.5)
-    end
-    return nothing
+    HelloReply("Hello, $(request.name)!")
 end
 
 # Service definition
@@ -35,13 +19,8 @@ function gRPCServer.service_descriptor(::GreeterService)
         Dict(
             "SayHello" => MethodDescriptor(
                 "SayHello", MethodType.UNARY,
-                "helloworld.HelloRequest", "helloworld.HelloReply",
+                HelloRequest, HelloReply,
                 say_hello
-            ),
-            "SayHelloStream" => MethodDescriptor(
-                "SayHelloStream", MethodType.SERVER_STREAMING,
-                "helloworld.HelloRequest", "helloworld.HelloReply",
-                say_hello_stream
             )
         ),
         nothing

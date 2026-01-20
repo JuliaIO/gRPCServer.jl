@@ -12,8 +12,8 @@ Server streaming RPC methods now work correctly via grpcurl.
 
 **Completed**:
 - [x] Implement server streaming support in HTTP/2 response handling
-- [x] Test with hello_world SayHelloStream example
-- [x] Update examples/hello_world/README.md with streaming grpcurl commands
+- [x] Test with 02_hello_stream SayHelloStream example
+- [x] Update examples/02_hello_stream/README.md with streaming grpcurl commands
 
 ### gRPCClient.jl Integration Tests
 

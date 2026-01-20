@@ -1100,7 +1100,16 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
     elseif request.message_request !== nothing && request.message_request.name === :file_containing_symbol
         symbol = request.message_request[]::String
         service = get_service(registry, symbol)
-        if service !== nothing && service.file_descriptor !== nothing && !isempty(service.file_descriptor)
+        if service === nothing
+            # Service truly doesn't exist
+            error_response = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
+            ServerReflectionResponse(
+                request.host,
+                request,
+                OneOf(:error_response, error_response)
+            )
+        elseif service.file_descriptor !== nothing && !isempty(service.file_descriptor)
+            # Service has an explicit file descriptor
             fd_response = FileDescriptorResponse(service.file_descriptor)
             ServerReflectionResponse(
                 request.host,
@@ -1108,11 +1117,14 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
                 OneOf(:file_descriptor_response, fd_response)
             )
         else
-            error_response = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
+            # Service exists but has no file descriptor - generate a minimal one
+            @debug "Generating minimal file descriptor for service" service=service.name
+            fd = generate_minimal_file_descriptor(service)
+            fd_response = FileDescriptorResponse([fd])
             ServerReflectionResponse(
                 request.host,
                 request,
-                OneOf(:error_response, error_response)
+                OneOf(:file_descriptor_response, fd_response)
             )
         end
     elseif request.message_request !== nothing && request.message_request.name === :file_by_filename
@@ -1136,6 +1148,230 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
     buf = IOBuffer()
     encoder = PB.ProtoEncoder(buf)
     PB.encode(encoder, response)
+    return take!(buf)
+end
+
+"""
+    generate_minimal_file_descriptor(service::ServiceDescriptor) -> Vector{UInt8}
+
+Generate a minimal FileDescriptorProto for a service that doesn't have an explicit
+file descriptor. This allows the gRPC reflection service to provide basic information
+about services even when full proto file descriptors aren't available.
+
+The generated descriptor includes:
+- Package name (extracted from service name)
+- Message types with field definitions (extracted from Julia types via ProtoBuf.jl)
+- Service definition with method names
+- Input/output type references
+
+Note: This is a minimal descriptor for reflection compatibility. For full schema
+information, services should provide complete file descriptors. Field definitions
+are extracted from Julia types when available via ProtoBuf.field_numbers().
+"""
+function generate_minimal_file_descriptor(service::ServiceDescriptor)::Vector{UInt8}
+    # Extract package name and service name from fully-qualified name
+    # e.g., "helloworld.Greeter" -> package="helloworld", service="Greeter"
+    parts = split(service.name, ".")
+    package_name = length(parts) > 1 ? join(parts[1:end-1], ".") : ""
+    service_short_name = String(parts[end])
+
+    # Generate a synthetic filename
+    filename = isempty(package_name) ? "$(service_short_name).proto" : "$(package_name)/$(service_short_name).proto"
+
+    # Build the FileDescriptorProto using raw protobuf encoding
+    # FileDescriptorProto fields:
+    #   1: name (string)
+    #   2: package (string)
+    #   4: message_type (repeated DescriptorProto)
+    #   6: service (repeated ServiceDescriptorProto)
+
+    buf = IOBuffer()
+
+    # Helper to write varint
+    function write_varint(io::IO, value::Integer)
+        value = Int(value)
+        while value >= 0x80
+            write(io, UInt8((value & 0x7F) | 0x80))
+            value >>= 7
+        end
+        write(io, UInt8(value))
+    end
+
+    # Helper to write length-prefixed string
+    function write_string_field(io::IO, field_num::Int, value::AbstractString)
+        tag = UInt8((field_num << 3) | 0x02)  # wire type 2 = length-delimited
+        write(io, tag)
+        write_varint(io, sizeof(value))
+        write(io, value)
+    end
+
+    # Helper to write int32 field
+    function write_int32_field(io::IO, field_num::Int, value::Integer)
+        tag = UInt8((field_num << 3) | 0x00)  # wire type 0 = varint
+        write(io, tag)
+        write_varint(io, value)
+    end
+
+    # Helper to write length-prefixed bytes
+    function write_bytes_field(io::IO, field_num::Int, data::Vector{UInt8})
+        tag = UInt8((field_num << 3) | 0x02)  # wire type 2 = length-delimited
+        write(io, tag)
+        write_varint(io, length(data))
+        write(io, data)
+    end
+
+    # Map Julia types to protobuf field types
+    # FieldDescriptorProto.Type enum values
+    TYPE_STRING = 9
+    TYPE_BYTES = 12
+    TYPE_BOOL = 8
+    TYPE_INT32 = 5
+    TYPE_INT64 = 3
+    TYPE_UINT32 = 13
+    TYPE_UINT64 = 4
+    TYPE_FLOAT = 2
+    TYPE_DOUBLE = 1
+
+    function julia_to_proto_type(jtype::Type)
+        if jtype == String
+            TYPE_STRING
+        elseif jtype == Vector{UInt8}
+            TYPE_BYTES
+        elseif jtype == Bool
+            TYPE_BOOL
+        elseif jtype == Int32
+            TYPE_INT32
+        elseif jtype == Int64 || jtype == Int
+            TYPE_INT64
+        elseif jtype == UInt32
+            TYPE_UINT32
+        elseif jtype == UInt64
+            TYPE_UINT64
+        elseif jtype == Float32
+            TYPE_FLOAT
+        elseif jtype == Float64
+            TYPE_DOUBLE
+        else
+            TYPE_STRING  # Default to string for unknown types
+        end
+    end
+
+    # Helper to build a DescriptorProto for a message type
+    function build_message_descriptor(msg_type::AbstractString, julia_type::Union{Type, Nothing})
+        msg_buf = IOBuffer()
+
+        # Extract short name from fully-qualified name
+        msg_parts = split(msg_type, ".")
+        msg_short_name = String(msg_parts[end])
+
+        # DescriptorProto field 1: name
+        write_string_field(msg_buf, 1, msg_short_name)
+
+        # DescriptorProto field 2: field (repeated FieldDescriptorProto)
+        # Try to extract field info from Julia type
+        if julia_type !== nothing
+            try
+                field_names = fieldnames(julia_type)
+                field_nums = PB.field_numbers(julia_type)
+
+                for fname in field_names
+                    field_buf = IOBuffer()
+                    fname_str = String(fname)
+
+                    # FieldDescriptorProto field 1: name
+                    write_string_field(field_buf, 1, fname_str)
+
+                    # FieldDescriptorProto field 3: number
+                    fnum = getfield(field_nums, fname)
+                    write_int32_field(field_buf, 3, fnum)
+
+                    # FieldDescriptorProto field 4: label (LABEL_OPTIONAL = 1)
+                    write_int32_field(field_buf, 4, 1)
+
+                    # FieldDescriptorProto field 5: type
+                    ftype = fieldtype(julia_type, fname)
+                    proto_type = julia_to_proto_type(ftype)
+                    write_int32_field(field_buf, 5, proto_type)
+
+                    # Write field to message buffer (field 2)
+                    field_data = take!(field_buf)
+                    write_bytes_field(msg_buf, 2, field_data)
+                end
+            catch e
+                @debug "Could not extract field info from Julia type" type=julia_type error=e
+            end
+        end
+
+        return take!(msg_buf)
+    end
+
+    # Collect unique message types from all methods with their Julia types
+    message_types = Dict{String, Union{Type, Nothing}}()
+    for (_, method) in service.methods
+        if !haskey(message_types, method.input_type)
+            message_types[method.input_type] = method.input_julia_type
+        end
+        if !haskey(message_types, method.output_type)
+            message_types[method.output_type] = method.output_julia_type
+        end
+    end
+
+    # Field 1: name (filename)
+    write_string_field(buf, 1, filename)
+
+    # Field 2: package
+    if !isempty(package_name)
+        write_string_field(buf, 2, package_name)
+    end
+
+    # Field 4: message_type (DescriptorProto for each unique message)
+    for (msg_type, julia_type) in message_types
+        msg_data = build_message_descriptor(msg_type, julia_type)
+        write_bytes_field(buf, 4, msg_data)
+    end
+
+    # Field 6: service (ServiceDescriptorProto)
+    service_buf = IOBuffer()
+
+    # ServiceDescriptorProto field 1: name
+    write_string_field(service_buf, 1, service_short_name)
+
+    # ServiceDescriptorProto field 2: method (repeated MethodDescriptorProto)
+    for (method_name, method) in service.methods
+        method_buf = IOBuffer()
+
+        # MethodDescriptorProto field 1: name
+        write_string_field(method_buf, 1, String(method_name))
+
+        # MethodDescriptorProto field 2: input_type (fully qualified with leading dot)
+        input_type = "." * method.input_type
+        write_string_field(method_buf, 2, input_type)
+
+        # MethodDescriptorProto field 3: output_type (fully qualified with leading dot)
+        output_type = "." * method.output_type
+        write_string_field(method_buf, 3, output_type)
+
+        # MethodDescriptorProto field 5: client_streaming (bool)
+        if method.method_type == MethodType.CLIENT_STREAMING || method.method_type == MethodType.BIDI_STREAMING
+            write(method_buf, UInt8(0x28))  # tag for field 5, wire type 0 (varint)
+            write(method_buf, UInt8(0x01))  # true
+        end
+
+        # MethodDescriptorProto field 6: server_streaming (bool)
+        if method.method_type == MethodType.SERVER_STREAMING || method.method_type == MethodType.BIDI_STREAMING
+            write(method_buf, UInt8(0x30))  # tag for field 6, wire type 0 (varint)
+            write(method_buf, UInt8(0x01))  # true
+        end
+
+        # Write method to service buffer (field 2)
+        method_data = take!(method_buf)
+        write_bytes_field(service_buf, 2, method_data)
+    end
+
+    # Write service to main buffer (field 6)
+    service_data = take!(service_buf)
+    write_bytes_field(buf, 6, service_data)
+
     return take!(buf)
 end
 

@@ -273,4 +273,67 @@ end
             @test occursin("not found", lowercase(response.message_response[].error_message))
         end
     end
+
+    @testset "Reflection for Server Streaming Service" begin
+        # T011: Test that reflection works correctly for server streaming methods
+        # This validates that services with streaming methods get proper file descriptors
+        using ProtoBuf
+
+        struct StreamRequest
+            name::String
+        end
+        ProtoBuf.default_values(::Type{StreamRequest}) = (;name = "")
+        ProtoBuf.field_numbers(::Type{StreamRequest}) = (;name = 1)
+
+        struct StreamResponse
+            message::String
+        end
+        ProtoBuf.default_values(::Type{StreamResponse}) = (;message = "")
+        ProtoBuf.field_numbers(::Type{StreamResponse}) = (;message = 1)
+
+        # Create handler that yields multiple responses
+        handler = (ctx, req, stream) -> begin
+            for i in 1:5
+                send!(stream, StreamResponse("Message $i"))
+            end
+        end
+
+        descriptor = ServiceDescriptor(
+            "test.StreamingService",
+            Dict(
+                "StreamMethod" => MethodDescriptor(
+                    "StreamMethod",
+                    MethodType.SERVER_STREAMING,
+                    StreamRequest,
+                    StreamResponse,
+                    handler
+                )
+            ),
+            nothing  # No explicit file descriptor
+        )
+
+        with_test_server(enable_reflection=true) do ts
+            gRPCServer.register_service!(ts.server.dispatcher, descriptor)
+
+            # Request file containing symbol for streaming service
+            request = gRPCServer.ServerReflectionRequest(
+                "localhost",
+                OneOf(:file_containing_symbol, "test.StreamingService")
+            )
+
+            response = gRPCServer.handle_reflection_request(
+                request,
+                ts.server.dispatcher.registry
+            )
+
+            # Should return a file descriptor, not an error
+            @test response.message_response !== nothing
+            @test response.message_response.name === :file_descriptor_response
+
+            # Verify we got a non-empty file descriptor
+            fd_resp = response.message_response[]
+            @test length(fd_resp.file_descriptor_proto) >= 1
+            @test length(fd_resp.file_descriptor_proto[1]) > 0
+        end
+    end
 end

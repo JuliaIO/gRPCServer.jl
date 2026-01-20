@@ -11,12 +11,13 @@ This guide demonstrates how to create a gRPC server in Julia using gRPCServer.jl
 
 ```julia
 using Pkg
-Pkg.add("gRPCServer")
+Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
+# Pkg.add("gRPCServer")  # when registered
 ```
 
 ## Step 1: Define Your Service
 
-This example is available in `examples/hello_world`.
+This example is based on `examples/01_hello_world` (basic unary) and `examples/02_hello_stream` (streaming).
 
 Create a `.proto` file defining your service:
 
@@ -52,7 +53,16 @@ using ProtoBuf
 protojl("greeter.proto", ".", "generated")
 ```
 
-This creates `generated/helloworld/helloworld.jl` with `HelloRequest` and `HelloReply` structs.
+This creates the following file structure:
+
+```
+generated/
+└── helloworld/
+    ├── helloworld.jl      # Module with message types
+    └── greeter_pb.jl      # Generated protobuf definitions
+```
+
+The `helloworld.jl` file exports `HelloRequest` and `HelloReply` structs that you'll use in your handlers.
 
 ## Step 3: Implement Handlers
 
@@ -126,6 +136,16 @@ register!(server, GreeterService())
 @info "Starting gRPC server" host=host port=port
 run(server)
 ```
+
+When the server starts successfully, you'll see:
+
+```
+[ Info: gRPC server starting
+│   host = "127.0.0.1"
+│   port = 50051
+```
+
+The server is now listening for connections. Keep this terminal running.
 
 ## Complete Example
 
@@ -207,17 +227,59 @@ julia server.jl
 
 ## Testing with grpcurl
 
+> **Note**: [grpcurl](https://github.com/fullstorydev/grpcurl) is a command-line tool for interacting with gRPC servers. See the [installation instructions](https://github.com/fullstorydev/grpcurl#installation) for your platform.
+
 ```bash
 # List services (requires reflection enabled)
 grpcurl -plaintext localhost:50051 list
+```
 
+Expected output:
+
+```
+grpc.health.v1.Health
+grpc.reflection.v1alpha.ServerReflection
+helloworld.Greeter
+```
+
+```bash
 # Call unary RPC
 grpcurl -plaintext -d '{"name": "Julia"}' \
   localhost:50051 helloworld.Greeter/SayHello
+```
 
+Expected output:
+
+```json
+{
+  "message": "Hello, Julia!"
+}
+```
+
+```bash
 # Call streaming RPC
 grpcurl -plaintext -d '{"name": "Julia"}' \
   localhost:50051 helloworld.Greeter/SayHelloStream
+```
+
+Expected output (5 messages streamed):
+
+```json
+{
+  "message": "Hello 1, Julia!"
+}
+{
+  "message": "Hello 2, Julia!"
+}
+{
+  "message": "Hello 3, Julia!"
+}
+{
+  "message": "Hello 4, Julia!"
+}
+{
+  "message": "Hello 5, Julia!"
+}
 ```
 
 ## Testing with gRPCClient.jl
