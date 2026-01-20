@@ -140,7 +140,7 @@ Proto `double` maps to Julia `Float64`. The generated types handle serialization
 ### Run the Server
 
 ```bash
-cd examples/03_calculator
+cd examples/05_calculator
 julia --project=../.. server.jl
 ```
 

@@ -4,12 +4,14 @@ This guide walks you through gRPCServer.jl examples in progressive order, from b
 
 ## Learning Path
 
-| Example | Concepts | Directory |
-|---------|----------|-----------|
-| [Hello World](01_hello_world.md) | Unary RPC, service definition, basic server | `examples/01_hello_world/` |
-| [Hello Stream](02_hello_stream.md) | Server streaming, cancellation handling | `examples/02_hello_stream/` |
-| [Calculator](03_calculator.md) | Multiple methods, error handling | `examples/03_calculator/` |
-| [Advanced Topics](advanced.md) | Interceptors, TLS, compression, health checks | (documentation only) |
+| Example | RPC Pattern | Concepts | Directory |
+|---------|-------------|----------|-----------|
+| [Hello World](01_hello_world.md) | Unary | Service definition, basic server | `examples/01_hello_world/` |
+| [Hello Stream](02_hello_stream.md) | Server Streaming | Multiple responses, cancellation | `examples/02_hello_stream/` |
+| [Sum Numbers](03_sum_numbers.md) | Client Streaming | Multiple requests, aggregation | `examples/03_sum_numbers/` |
+| [Chat](04_chat.md) | Bidirectional | Real-time messaging | `examples/04_chat/` |
+| [Calculator](05_calculator.md) | Unary (multi-method) | Error handling, multiple methods | `examples/05_calculator/` |
+| [Advanced Topics](advanced.md) | All patterns | Interceptors, TLS, compression | (documentation only) |
 
 ## Getting Started
 
@@ -47,10 +49,12 @@ julia --project=../.. server.jl
 
 ### Example Workflow
 
-1. **Start simple**: Begin with `01_hello_world` to understand the basic structure
-2. **Add streaming**: Move to `02_hello_stream` to learn server streaming patterns
-3. **Multiple methods**: Explore `03_calculator` for multi-method services with error handling
-4. **Advanced topics**: Read the advanced documentation for production features
+1. **Start simple**: Begin with `01_hello_world` to understand basic unary RPC
+2. **Server streaming**: Move to `02_hello_stream` to learn single request → multiple responses
+3. **Client streaming**: Try `03_sum_numbers` for multiple requests → single response
+4. **Bidirectional**: Explore `04_chat` for simultaneous bidirectional streaming
+5. **Multi-method**: See `05_calculator` for multiple methods with error handling
+6. **Production**: Read advanced documentation for interceptors, TLS, compression
 
 ## Quick Reference
 
@@ -77,7 +81,34 @@ function handler(ctx::ServerContext, request::RequestType, stream::ServerStream{
 end
 ```
 
-### Error Handling (03_calculator)
+### Client Streaming (03_sum_numbers)
+
+Multiple requests, single response:
+
+```julia
+function handler(ctx::ServerContext, stream::ClientStream{RequestType})
+    for request in stream
+        # Process each request
+    end
+    return ResponseType(...)
+end
+```
+
+### Bidirectional Streaming (04_chat)
+
+Multiple requests and responses:
+
+```julia
+function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseType})
+    for request in stream
+        send!(stream, ResponseType(...))
+    end
+    close!(stream)
+    return nothing
+end
+```
+
+### Error Handling (05_calculator)
 
 Return appropriate gRPC status codes:
 
@@ -86,6 +117,18 @@ if invalid_input
     throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Error message"))
 end
 ```
+
+## Port Assignments
+
+Each example uses a different port:
+
+| Example | Port |
+|---------|------|
+| 01_hello_world | 50051 |
+| 02_hello_stream | 50051 |
+| 03_sum_numbers | 50053 |
+| 04_chat | 50054 |
+| 05_calculator | 50052 |
 
 ## Next Steps
 

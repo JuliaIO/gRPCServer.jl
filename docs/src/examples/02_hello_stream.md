@@ -235,4 +235,4 @@ Method type: `MethodType.BIDI_STREAMING`
 
 ## Next Steps
 
-Proceed to [Calculator](03_calculator.md) to see a service with multiple methods and error handling.
+Proceed to [Sum Numbers](03_sum_numbers.md) to learn about client streaming, where multiple requests produce a single response.

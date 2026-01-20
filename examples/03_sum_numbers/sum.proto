@@ -1,0 +1,21 @@
+// sum.proto - Client streaming example
+syntax = "proto3";
+
+package math;
+
+// Math service demonstrating client streaming RPC
+service Math {
+  // Sum receives a stream of numbers and returns their total
+  rpc Sum (stream SumRequest) returns (SumResponse);
+}
+
+// A single number to be summed
+message SumRequest {
+  double value = 1;
+}
+
+// The total sum of all received numbers
+message SumResponse {
+  double total = 1;
+  int32 count = 2;  // Number of values summed
+}

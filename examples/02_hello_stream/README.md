@@ -98,7 +98,7 @@ Expected output:
 
 ## Next Steps
 
-After understanding streaming, proceed to `03_calculator` to see a multi-method service with different operations.
+After understanding server streaming, proceed to `03_sum_numbers` to learn client streaming (multiple requests → single response).
 
 ## Regenerating Types
 

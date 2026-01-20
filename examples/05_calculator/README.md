@@ -11,7 +11,7 @@ This example demonstrates a gRPC service with multiple RPC methods and proper er
 
 ## Prerequisites
 
-Before this example, complete `01_hello_world` and `02_hello_stream` to understand basic RPC patterns.
+Before this example, complete the streaming examples (`01_hello_world`, `02_hello_stream`, `03_sum_numbers`, `04_chat`) to understand all RPC patterns.
 
 ## Files
 
@@ -22,7 +22,7 @@ Before this example, complete `01_hello_world` and `02_hello_stream` to understa
 ## Running the Server
 
 ```bash
-cd examples/03_calculator
+cd examples/05_calculator
 julia --project=../.. server.jl
 ```
 
