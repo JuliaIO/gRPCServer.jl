@@ -1,17 +1,28 @@
-# Calculator Example
+# Calculator Example - Multi-Method Service
 
-A gRPC server demonstrating arithmetic operations with error handling.
+This example demonstrates a gRPC service with multiple RPC methods and proper error handling.
+
+## What This Example Shows
+
+- Defining a proto service with multiple RPC methods (Add, Subtract, Multiply, Divide)
+- Implementing multiple handlers for a single service
+- Using gRPC error codes for error handling (division by zero)
+- Working with numeric proto types (double)
+
+## Prerequisites
+
+Before this example, complete the streaming examples (`01_hello_world`, `02_hello_stream`, `03_sum_numbers`, `04_chat`) to understand all RPC patterns.
 
 ## Files
 
-- `calculator.proto` - Protocol buffer service definition
-- `server.jl` - Julia server implementation
+- `calculator.proto` - Protocol buffer service definition with 4 methods
+- `server.jl` - Julia server implementation with error handling
 - `generated/` - Auto-generated Julia types from protobuf
 
 ## Running the Server
 
 ```bash
-cd examples/calculator
+cd examples/05_calculator
 julia --project=../.. server.jl
 ```
 
@@ -19,7 +30,7 @@ The server listens on port 50052 with reflection and health checking enabled.
 
 ## Testing with grpcurl
 
-All commands below should be run from the `examples/calculator` directory.
+All commands below assume the server is running.
 
 ### List Available Services
 
@@ -125,11 +136,15 @@ Expected output:
 }
 ```
 
+## Next Steps
+
+For more advanced topics like interceptors, TLS, and compression, see the main documentation.
+
 ## Regenerating Types
 
 If you modify `calculator.proto`, regenerate the Julia types:
 
 ```julia
 using ProtoBuf
-ProtoBuf.protojl("calculator.proto", ".", "generated")
+protojl("calculator.proto", ".", "generated")
 ```

@@ -59,22 +59,32 @@ function handle_reflection_request(
 
         # Look up service
         service = get_service(registry, symbol)
-        if service !== nothing && service.file_descriptor !== nothing
+        if service === nothing
+            # Symbol truly not found
+            error_resp = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
+            return ServerReflectionResponse(
+                request.host,
+                request,
+                OneOf(:error_response, error_resp)
+            )
+        elseif service.file_descriptor !== nothing && !isempty(service.file_descriptor)
+            # Service has an explicit file descriptor
             fd_response = FileDescriptorResponse(service.file_descriptor)
             return ServerReflectionResponse(
                 request.host,
                 request,
                 OneOf(:file_descriptor_response, fd_response)
             )
+        else
+            # Service exists but has no file descriptor - generate a minimal one
+            fd = generate_minimal_file_descriptor(service)
+            fd_response = FileDescriptorResponse([fd])
+            return ServerReflectionResponse(
+                request.host,
+                request,
+                OneOf(:file_descriptor_response, fd_response)
+            )
         end
-
-        # Symbol not found
-        error_resp = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
-        return ServerReflectionResponse(
-            request.host,
-            request,
-            OneOf(:error_response, error_resp)
-        )
     elseif request.message_request !== nothing && request.message_request.name === :file_by_filename
         # Find file descriptor by filename
         filename = request.message_request[]::String

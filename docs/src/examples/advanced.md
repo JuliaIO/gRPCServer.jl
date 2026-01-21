@@ -1,134 +1,10 @@
-# Examples
+# Advanced Topics
 
-## Basic Unary RPC
+This page covers production-ready features for gRPCServer.jl: interceptors, TLS, compression, and more.
 
-A simple echo service that returns the input message:
+## Interceptors
 
-```julia
-using gRPCServer
-
-function echo_handler(ctx::ServerContext, request)
-    return request  # Echo back the request
-end
-
-host = "127.0.0.1"
-port = 50051
-server = GRPCServer(host, port)
-
-descriptor = ServiceDescriptor(
-    "example.Echo",
-    Dict(
-        "Echo" => MethodDescriptor(
-            "Echo",
-            MethodType.UNARY,
-            "example.Message",
-            "example.Message",
-            echo_handler
-        )
-    ),
-    nothing
-)
-
-gRPCServer.register_service!(server.dispatcher, descriptor)
-run(server)
-```
-
-## Server Streaming
-
-A service that streams multiple responses:
-
-```julia
-function stream_numbers(ctx::ServerContext, request, stream::ServerStream{NumberResponse})
-    for i in 1:request.count
-        if is_cancelled(ctx)
-            return nothing
-        end
-        send!(stream, NumberResponse(value = i))
-        sleep(0.1)
-    end
-    return nothing
-end
-
-descriptor = ServiceDescriptor(
-    "example.Numbers",
-    Dict(
-        "StreamNumbers" => MethodDescriptor(
-            "StreamNumbers",
-            MethodType.SERVER_STREAMING,
-            "example.CountRequest",
-            "example.NumberResponse",
-            stream_numbers
-        )
-    ),
-    nothing
-)
-```
-
-## Client Streaming
-
-A service that receives multiple requests and returns a single response:
-
-```julia
-function sum_numbers(ctx::ServerContext, stream::ClientStream{NumberRequest})
-    total = 0
-    for request in stream
-        total += request.value
-    end
-    return SumResponse(total = total)
-end
-
-descriptor = ServiceDescriptor(
-    "example.Math",
-    Dict(
-        "Sum" => MethodDescriptor(
-            "Sum",
-            MethodType.CLIENT_STREAMING,
-            "example.NumberRequest",
-            "example.SumResponse",
-            sum_numbers
-        )
-    ),
-    nothing
-)
-```
-
-## Bidirectional Streaming
-
-A chat-like service with two-way streaming:
-
-```julia
-function chat(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMessage})
-    for message in stream
-        if is_cancelled(ctx)
-            break
-        end
-        # Echo back with prefix
-        response = ChatMessage(
-            user = "Server",
-            text = "You said: $(message.text)"
-        )
-        send!(stream, response)
-    end
-    close!(stream)
-    return nothing
-end
-
-descriptor = ServiceDescriptor(
-    "example.Chat",
-    Dict(
-        "Chat" => MethodDescriptor(
-            "Chat",
-            MethodType.BIDI_STREAMING,
-            "example.ChatMessage",
-            "example.ChatMessage",
-            chat
-        )
-    ),
-    nothing
-)
-```
-
-## Using Interceptors
+Interceptors allow you to add cross-cutting concerns like logging, authentication, and rate limiting.
 
 ### Logging Interceptor
 
@@ -137,7 +13,6 @@ host = "127.0.0.1"
 port = 50051
 server = GRPCServer(host, port)
 
-# Add logging for all requests
 add_interceptor!(server, LoggingInterceptor(
     log_requests = true,
     log_responses = true,
@@ -230,9 +105,9 @@ add_interceptor!(server, RateLimitInterceptor(100))
 
 ## Health Checking
 
+Health checks allow load balancers and orchestrators to monitor server status.
+
 ```julia
-host = "127.0.0.1"
-port = 50051
 server = GRPCServer(host, port;
     enable_health_check = true
 )
@@ -245,6 +120,19 @@ set_health!(server, "my.Service", HealthStatus.SERVING)
 
 # Mark service as not ready (e.g., during maintenance)
 set_health!(server, "my.Service", HealthStatus.NOT_SERVING)
+```
+
+### Testing Health Check
+
+```bash
+grpcurl -plaintext -d '{"service": ""}' localhost:50051 grpc.health.v1.Health/Check
+```
+
+Expected output:
+```json
+{
+  "status": "SERVING"
+}
 ```
 
 ## TLS Configuration
@@ -278,6 +166,30 @@ server = GRPCServer(host, port; tls = tls_config)
 ```julia
 # Reload certificates without restarting server
 reload_tls!(server)
+```
+
+## Compression
+
+### Server-side Compression
+
+```julia
+server = GRPCServer(host, port;
+    enabled_compression = [CompressionCodec.GZIP, CompressionCodec.DEFLATE]
+)
+```
+
+### Manual Compression
+
+```julia
+using gRPCServer: compress, decompress, CompressionCodec
+
+data = Vector{UInt8}("Large data to compress...")
+
+# Compress with GZIP
+compressed = compress(data, CompressionCodec.GZIP)
+
+# Decompress
+original = decompress(compressed, CompressionCodec.GZIP)
 ```
 
 ## Error Handling
@@ -361,37 +273,73 @@ function my_handler(ctx::ServerContext, request)
 end
 ```
 
-## Compression
+## Client Streaming
 
-### Server-side Compression
+A service that receives multiple requests and returns a single response:
 
 ```julia
-host = "127.0.0.1"
-port = 50051
-server = GRPCServer(host, port;
-    enabled_compression = [CompressionCodec.GZIP, CompressionCodec.DEFLATE]
+function sum_numbers(ctx::ServerContext, stream::ClientStream{NumberRequest})
+    total = 0
+    for request in stream
+        total += request.value
+    end
+    return SumResponse(total = total)
+end
+
+descriptor = ServiceDescriptor(
+    "example.Math",
+    Dict(
+        "Sum" => MethodDescriptor(
+            "Sum",
+            MethodType.CLIENT_STREAMING,
+            NumberRequest,
+            SumResponse,
+            sum_numbers
+        )
+    ),
+    nothing
 )
 ```
 
-### Manual Compression
+## Bidirectional Streaming
+
+A chat-like service with two-way streaming:
 
 ```julia
-using gRPCServer: compress, decompress, CompressionCodec
+function chat(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMessage})
+    for message in stream
+        if is_cancelled(ctx)
+            break
+        end
+        # Echo back with prefix
+        response = ChatMessage(
+            user = "Server",
+            text = "You said: $(message.text)"
+        )
+        send!(stream, response)
+    end
+    close!(stream)
+    return nothing
+end
 
-data = Vector{UInt8}("Large data to compress...")
-
-# Compress with GZIP
-compressed = compress(data, CompressionCodec.GZIP)
-
-# Decompress
-original = decompress(compressed, CompressionCodec.GZIP)
+descriptor = ServiceDescriptor(
+    "example.Chat",
+    Dict(
+        "Chat" => MethodDescriptor(
+            "Chat",
+            MethodType.BIDI_STREAMING,
+            ChatMessage,
+            ChatMessage,
+            chat
+        )
+    ),
+    nothing
+)
 ```
 
 ## Graceful Shutdown
 
 ```julia
-host = "127.0.0.1"
-port = 50051
 server = GRPCServer(host, port)
 register!(server, MyService())
 
@@ -406,3 +354,8 @@ stop!(server; timeout = 30.0)
 wait(server_task)
 @info "Server stopped"
 ```
+
+## Next Steps
+
+- [API Reference](../api.md) - Complete API documentation
+- [Quick Start](../quickstart.md) - Getting started guide

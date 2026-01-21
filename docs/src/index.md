@@ -26,47 +26,14 @@ Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
 # Pkg.add("gRPCServer")  # when registered
 ```
 
-## Quick Example
+## Getting Started
 
-```julia
-using gRPCServer
-
-# Define a simple handler
-function my_handler(ctx::ServerContext, request)
-    return "Hello, $(request.name)!"
-end
-
-# Create server
-host = "127.0.0.1"
-port = 50051
-server = GRPCServer(host, port)
-
-# Register service
-descriptor = ServiceDescriptor(
-    "my.Service",
-    Dict(
-        "MyMethod" => MethodDescriptor(
-            "MyMethod",
-            MethodType.UNARY,
-            "my.Request",
-            "my.Response",
-            my_handler
-        )
-    ),
-    nothing
-)
-gRPCServer.register_service!(server.dispatcher, descriptor)
-
-# Start server
-run(server)
-```
-
-See the [Quick Start](@ref) guide for a complete walkthrough.
+See the [Quick Start](@ref) guide for a complete walkthrough from defining your `.proto` file to running a gRPC server and testing it with grpcurl.
 
 ## Table of Contents
 
 ```@contents
-Pages = ["quickstart.md", "api.md", "examples.md"]
+Pages = ["quickstart.md", "api.md", "examples/index.md"]
 Depth = 2
 ```
 

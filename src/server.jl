@@ -899,7 +899,42 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         @warn "Invalid TE header in gRPC request" method=method_path te=te_header expected="trailers"
     end
 
-    # Read one gRPC message
+    # Look up method to determine type BEFORE reading message
+    # This allows us to handle streaming methods differently
+    result = lookup_method(server.dispatcher.registry, method_path)
+    if result === nothing
+        send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method not found: $method_path"; content_type=response_content_type)
+        return
+    end
+
+    service, method_desc = result
+
+    # For client streaming, we must wait for END_STREAM before processing
+    # because all client messages need to be collected first.
+    if method_desc.method_type == MethodType.CLIENT_STREAMING && !stream.end_stream_received
+        @debug "Client streaming: waiting for END_STREAM" method=method_path
+        return  # Don't process yet, wait for END_STREAM
+    end
+
+    # For bidirectional streaming, check if this is a "system" service that needs
+    # incremental message processing (like reflection) vs user-defined handlers
+    # that expect batch mode (iterate over all messages).
+    if method_desc.method_type == MethodType.BIDI_STREAMING
+        # Reflection service needs incremental processing - respond to each request immediately
+        if service.name == "grpc.reflection.v1alpha.ServerReflection"
+            bidi_ctx = create_server_context(stream, peer, method_path)
+            handle_bidi_streaming_incremental(server, conn, io, stream, bidi_ctx, method_desc, service)
+            return
+        end
+        # User-defined bidi streaming handlers need batch mode - wait for END_STREAM
+        if !stream.end_stream_received
+            @debug "Bidi streaming: waiting for END_STREAM" method=method_path
+            return  # Don't process yet, wait for END_STREAM
+        end
+    end
+
+    # Read one gRPC message (for unary/server-streaming this is the request,
+    # for client-streaming this is the first of many messages already in buffer)
     grpc_data = read_grpc_message!(stream)
     if grpc_data === nothing
         grpc_data = UInt8[]
@@ -915,15 +950,6 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         @info "gRPC request" method=method_path peer=peer
     end
 
-    # Look up method to determine type
-    result = lookup_method(server.dispatcher.registry, method_path)
-    if result === nothing
-        send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method not found: $method_path"; content_type=response_content_type)
-        return
-    end
-
-    service, method_desc = result
-
     # Dispatch based on method type
     if method_desc.method_type == MethodType.UNARY
         status, message, response_data = dispatch_unary(server.dispatcher, ctx, grpc_data)
@@ -934,12 +960,14 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         # Handle server streaming - multiple responses to one request
         handle_server_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
 
-    elseif method_desc.method_type == MethodType.BIDI_STREAMING ||
-           method_desc.method_type == MethodType.CLIENT_STREAMING
-        # For streaming methods, handle one message at a time
-        status, message, response_data = dispatch_streaming_message(server.dispatcher, ctx, grpc_data, method_desc, service)
-        @debug "gRPC response" status=status response_len=length(response_data)
-        send_grpc_response(conn, io, stream.id, status, message, response_data; content_type=response_content_type)
+    elseif method_desc.method_type == MethodType.CLIENT_STREAMING
+        # Handle client streaming - multiple requests, single response
+        # At this point, end_stream_received is true, so all messages are in the buffer
+        handle_client_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
+
+    elseif method_desc.method_type == MethodType.BIDI_STREAMING
+        # Handle bidirectional streaming - multiple requests and responses
+        handle_bidi_streaming(server, conn, io, stream, ctx, grpc_data, method_desc, service)
 
     else
         send_error_response(conn, io, stream.id, StatusCode.UNIMPLEMENTED, "Method type $(method_desc.method_type) not supported"; content_type=response_content_type)
@@ -1042,6 +1070,395 @@ function handle_server_streaming(
 end
 
 """
+    wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io::IO) -> Bool
+
+Wait for either a complete gRPC message or end of stream.
+Returns true if message available, false if stream ended.
+Uses polling with yield() to allow other tasks to run.
+"""
+function wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io::IO)::Bool
+    max_iterations = 10000  # Safety limit
+    iteration = 0
+
+    while iteration < max_iterations
+        # Check if we have a complete message
+        if has_complete_grpc_message(stream)
+            return true
+        end
+
+        # Check if stream has ended (client half-closed)
+        if stream.end_stream_received
+            # Check one more time for any remaining data
+            return has_complete_grpc_message(stream)
+        end
+
+        # Check if stream was reset
+        if stream.state == StreamState.CLOSED
+            return false
+        end
+
+        # Process any pending frames from the connection
+        # This reads more data if available
+        try
+            if eof(io)
+                return false
+            end
+            # Try to read and process any waiting frames
+            frame = try_read_frame(io, conn)
+            if frame !== nothing
+                process_frame!(conn, frame)
+            end
+        catch e
+            if !(e isa EOFError)
+                @debug "Error reading frame while waiting for message" exception=e
+            end
+            return false
+        end
+
+        iteration += 1
+        yield()  # Allow other tasks to run
+    end
+
+    @warn "Exceeded max iterations waiting for message" stream_id=stream.id
+    return false
+end
+
+"""
+    try_read_frame(io::IO, conn::HTTP2Connection) -> Union{Frame, Nothing}
+
+Try to read a frame without blocking. Returns nothing if no complete frame available.
+"""
+function try_read_frame(io::IO, conn::HTTP2Connection)::Union{Frame, Nothing}
+    # Check if there's enough data for a frame header (9 bytes)
+    if bytesavailable(io) < 9
+        return nothing
+    end
+
+    try
+        return read_frame(io)
+    catch e
+        if e isa EOFError
+            return nothing
+        end
+        rethrow()
+    end
+end
+
+"""
+    handle_client_streaming(server, conn, io, stream, ctx, first_message, method_desc, service)
+
+Handle a client streaming RPC where the client sends multiple requests and
+the server sends a single response after processing all requests.
+
+Note: This function is called only after end_stream_received is true,
+meaning all client messages are already in the stream buffer.
+"""
+function handle_client_streaming(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    first_message::Vector{UInt8},
+    method_desc::MethodDescriptor,
+    _service::ServiceDescriptor  # Unused but kept for API consistency
+)
+    # Check if stream is still sendable before attempting to send
+    # Stream should be in HALF_CLOSED_REMOTE state (client has finished sending)
+    if !can_send(stream)
+        @warn "Cannot start client streaming, stream not in sendable state" stream_id=stream.id state=stream.state
+        return
+    end
+
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Track status for response
+    final_status = StatusCode.OK
+    final_message = ""
+    response_data = UInt8[]
+
+    try
+        # Collect all messages from buffer
+        # The first message was already read by process_stream_request!
+        # Remaining messages are still in the stream buffer
+        messages = Vector{UInt8}[]
+
+        # Add first message if not empty
+        if !isempty(first_message)
+            push!(messages, first_message)
+        end
+
+        # Read all remaining messages from buffer
+        # Since end_stream_received is true, all data is already buffered
+        while has_complete_grpc_message(stream)
+            msg = read_grpc_message!(stream)
+            if msg !== nothing
+                push!(messages, msg)
+            end
+        end
+
+        @debug "Client streaming collected messages" count=length(messages) stream_id=stream.id
+
+        # Create receive callback that yields collected messages
+        message_index = Ref(1)
+        receive_callback = function()
+            if message_index[] > length(messages)
+                return nothing
+            end
+            msg_data = messages[message_index[]]
+            message_index[] += 1
+            # Deserialize message
+            return deserialize_message(msg_data, method_desc.input_type)
+        end
+
+        # Create is_cancelled callback
+        is_cancelled_callback = function()
+            return ctx.cancelled || stream.state == StreamState.CLOSED
+        end
+
+        # Call dispatcher which handles the handler execution
+        status, message, resp_data = dispatch_client_streaming(
+            server.dispatcher, ctx, receive_callback, is_cancelled_callback
+        )
+
+        final_status = status
+        final_message = message
+        response_data = resp_data
+
+    catch e
+        if e isa GRPCError
+            final_status = e.code
+            final_message = e.message
+        elseif e isa StreamCancelledError
+            final_status = StatusCode.CANCELLED
+            final_message = "Stream cancelled"
+        else
+            @error "Error in client streaming handler" exception=(e, catch_backtrace())
+            final_status = StatusCode.INTERNAL
+            final_message = server.dispatcher.debug_mode ? sprint(showerror, e) : "Internal server error"
+        end
+    end
+
+    # Send response with status
+    send_grpc_response(conn, io, stream.id, final_status, final_message, response_data; content_type=response_content_type)
+end
+
+"""
+    handle_bidi_streaming_incremental(server, conn, io, stream, ctx, method_desc, service)
+
+Handle a bidirectional streaming RPC incrementally - process each message as it arrives
+and send responses immediately. This is "request-response" style bidi streaming.
+
+This is used for services like reflection where each request should get an immediate response.
+"""
+function handle_bidi_streaming_incremental(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    method_desc::MethodDescriptor,
+    service::ServiceDescriptor
+)
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Check if we need to send headers first (only once per stream)
+    if !stream.headers_sent
+        stream.headers_sent = true
+        response_headers = [
+            (":status", "200"),
+            ("content-type", response_content_type),
+            ("grpc-encoding", "identity"),
+        ]
+        header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
+        write_frames(io, header_frames)
+    end
+
+    # Process all complete messages currently in the buffer
+    while has_complete_grpc_message(stream)
+        grpc_data = read_grpc_message!(stream)
+        if grpc_data === nothing
+            break
+        end
+
+        # Dispatch this single message and get response
+        status, message, response_data = dispatch_streaming_message(
+            server.dispatcher, ctx, grpc_data, method_desc, service
+        )
+
+        if status != StatusCode.OK
+            # Error - send trailers with error status
+            trailers = [
+                ("grpc-status", string(Int(status))),
+            ]
+            if !isempty(message)
+                push!(trailers, ("grpc-message", message))
+            end
+            trailer_frames = send_trailers(conn, stream.id, trailers)
+            write_frames(io, trailer_frames)
+            return
+        end
+
+        # Send response data
+        if !isempty(response_data)
+            grpc_message = encode_grpc_message(response_data; compressed=false)
+            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
+            write_frames(io, data_frames)
+        end
+    end
+
+    # If END_STREAM received and no more messages, send trailers to close
+    if stream.end_stream_received && !has_complete_grpc_message(stream)
+        trailers = [
+            ("grpc-status", string(Int(StatusCode.OK))),
+        ]
+        trailer_frames = send_trailers(conn, stream.id, trailers)
+        write_frames(io, trailer_frames)
+    end
+end
+
+"""
+    handle_bidi_streaming(server, conn, io, stream, ctx, first_message, method_desc, service)
+
+Handle a bidirectional streaming RPC where both client and server can send
+multiple messages simultaneously.
+
+Note: Currently implemented in "batch" mode - waits for all client messages before
+processing. True interleaved bidirectional streaming would require async task handling.
+"""
+function handle_bidi_streaming(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    first_message::Vector{UInt8},
+    method_desc::MethodDescriptor,
+    _service::ServiceDescriptor  # Unused but kept for API consistency
+)
+    # Check if stream is still sendable before attempting to send
+    if !can_send(stream)
+        @warn "Cannot start bidi streaming, stream not in sendable state" stream_id=stream.id state=stream.state
+        return
+    end
+
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Send response headers first (before any data)
+    response_headers = [
+        (":status", "200"),
+        ("content-type", response_content_type),
+        ("grpc-encoding", "identity"),
+    ]
+    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
+    write_frames(io, header_frames)
+
+    # Track status for trailers
+    final_status = StatusCode.OK
+    final_message = ""
+    trailers_sent = Ref(false)
+
+    try
+        # Collect all messages from buffer (since we wait for END_STREAM)
+        messages = Vector{UInt8}[]
+        if !isempty(first_message)
+            push!(messages, first_message)
+        end
+
+        # Read all remaining messages from buffer
+        while has_complete_grpc_message(stream)
+            msg = read_grpc_message!(stream)
+            if msg !== nothing
+                push!(messages, msg)
+            end
+        end
+
+        @debug "Bidi streaming collected messages" count=length(messages) stream_id=stream.id
+
+        # Create receive callback that yields collected messages
+        message_index = Ref(1)
+        receive_callback = function()
+            if message_index[] > length(messages)
+                return nothing
+            end
+            msg_data = messages[message_index[]]
+            message_index[] += 1
+            return deserialize_message(msg_data, method_desc.input_type)
+        end
+
+        # Create send callback for responses
+        send_callback = function(message, _compress)
+            if trailers_sent[]
+                @warn "Attempted to send message after stream closed" stream_id=stream.id
+                return
+            end
+            response_data = serialize_message(message)
+            grpc_message = encode_grpc_message(response_data; compressed=false)
+            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
+            write_frames(io, data_frames)
+        end
+
+        # Create close callback that sends trailers
+        close_callback = function()
+            if trailers_sent[]
+                return
+            end
+            trailers_sent[] = true
+            trailers = [
+                ("grpc-status", string(Int(final_status))),
+            ]
+            if !isempty(final_message)
+                push!(trailers, ("grpc-message", final_message))
+            end
+            trailer_frames = send_trailers(conn, stream.id, trailers)
+            write_frames(io, trailer_frames)
+        end
+
+        # Create is_cancelled callback
+        is_cancelled_callback = function()
+            return ctx.cancelled || stream.state == StreamState.CLOSED
+        end
+
+        # Call dispatcher which handles the handler execution
+        status, message = dispatch_bidi_streaming(
+            server.dispatcher, ctx, receive_callback, send_callback, close_callback, is_cancelled_callback
+        )
+
+        final_status = status
+        final_message = message
+
+    catch e
+        if e isa GRPCError
+            final_status = e.code
+            final_message = e.message
+        elseif e isa StreamCancelledError
+            final_status = StatusCode.CANCELLED
+            final_message = "Stream cancelled"
+        else
+            @error "Error in bidi streaming handler" exception=(e, catch_backtrace())
+            final_status = StatusCode.INTERNAL
+            final_message = server.dispatcher.debug_mode ? sprint(showerror, e) : "Internal server error"
+        end
+    end
+
+    # Send trailers with final status if not already sent
+    if !trailers_sent[]
+        trailers_sent[] = true
+        trailers = [
+            ("grpc-status", string(Int(final_status))),
+        ]
+        if !isempty(final_message)
+            push!(trailers, ("grpc-message", final_message))
+        end
+        trailer_frames = send_trailers(conn, stream.id, trailers)
+        write_frames(io, trailer_frames)
+    end
+end
+
+"""
     dispatch_streaming_message(dispatcher::RequestDispatcher, ctx::ServerContext,
                                 request_data::Vector{UInt8}, method::MethodDescriptor,
                                 service::ServiceDescriptor)
@@ -1100,7 +1517,16 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
     elseif request.message_request !== nothing && request.message_request.name === :file_containing_symbol
         symbol = request.message_request[]::String
         service = get_service(registry, symbol)
-        if service !== nothing && service.file_descriptor !== nothing && !isempty(service.file_descriptor)
+        if service === nothing
+            # Service truly doesn't exist
+            error_response = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
+            ServerReflectionResponse(
+                request.host,
+                request,
+                OneOf(:error_response, error_response)
+            )
+        elseif service.file_descriptor !== nothing && !isempty(service.file_descriptor)
+            # Service has an explicit file descriptor
             fd_response = FileDescriptorResponse(service.file_descriptor)
             ServerReflectionResponse(
                 request.host,
@@ -1108,11 +1534,14 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
                 OneOf(:file_descriptor_response, fd_response)
             )
         else
-            error_response = ErrorResponse(Int32(5), "Symbol not found: $symbol")  # NOT_FOUND = 5
+            # Service exists but has no file descriptor - generate a minimal one
+            @debug "Generating minimal file descriptor for service" service=service.name
+            fd = generate_minimal_file_descriptor(service)
+            fd_response = FileDescriptorResponse([fd])
             ServerReflectionResponse(
                 request.host,
                 request,
-                OneOf(:error_response, error_response)
+                OneOf(:file_descriptor_response, fd_response)
             )
         end
     elseif request.message_request !== nothing && request.message_request.name === :file_by_filename
@@ -1136,6 +1565,230 @@ function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceReg
     buf = IOBuffer()
     encoder = PB.ProtoEncoder(buf)
     PB.encode(encoder, response)
+    return take!(buf)
+end
+
+"""
+    generate_minimal_file_descriptor(service::ServiceDescriptor) -> Vector{UInt8}
+
+Generate a minimal FileDescriptorProto for a service that doesn't have an explicit
+file descriptor. This allows the gRPC reflection service to provide basic information
+about services even when full proto file descriptors aren't available.
+
+The generated descriptor includes:
+- Package name (extracted from service name)
+- Message types with field definitions (extracted from Julia types via ProtoBuf.jl)
+- Service definition with method names
+- Input/output type references
+
+Note: This is a minimal descriptor for reflection compatibility. For full schema
+information, services should provide complete file descriptors. Field definitions
+are extracted from Julia types when available via ProtoBuf.field_numbers().
+"""
+function generate_minimal_file_descriptor(service::ServiceDescriptor)::Vector{UInt8}
+    # Extract package name and service name from fully-qualified name
+    # e.g., "helloworld.Greeter" -> package="helloworld", service="Greeter"
+    parts = split(service.name, ".")
+    package_name = length(parts) > 1 ? join(parts[1:end-1], ".") : ""
+    service_short_name = String(parts[end])
+
+    # Generate a synthetic filename
+    filename = isempty(package_name) ? "$(service_short_name).proto" : "$(package_name)/$(service_short_name).proto"
+
+    # Build the FileDescriptorProto using raw protobuf encoding
+    # FileDescriptorProto fields:
+    #   1: name (string)
+    #   2: package (string)
+    #   4: message_type (repeated DescriptorProto)
+    #   6: service (repeated ServiceDescriptorProto)
+
+    buf = IOBuffer()
+
+    # Helper to write varint
+    function write_varint(io::IO, value::Integer)
+        value = Int(value)
+        while value >= 0x80
+            write(io, UInt8((value & 0x7F) | 0x80))
+            value >>= 7
+        end
+        write(io, UInt8(value))
+    end
+
+    # Helper to write length-prefixed string
+    function write_string_field(io::IO, field_num::Int, value::AbstractString)
+        tag = UInt8((field_num << 3) | 0x02)  # wire type 2 = length-delimited
+        write(io, tag)
+        write_varint(io, sizeof(value))
+        write(io, value)
+    end
+
+    # Helper to write int32 field
+    function write_int32_field(io::IO, field_num::Int, value::Integer)
+        tag = UInt8((field_num << 3) | 0x00)  # wire type 0 = varint
+        write(io, tag)
+        write_varint(io, value)
+    end
+
+    # Helper to write length-prefixed bytes
+    function write_bytes_field(io::IO, field_num::Int, data::Vector{UInt8})
+        tag = UInt8((field_num << 3) | 0x02)  # wire type 2 = length-delimited
+        write(io, tag)
+        write_varint(io, length(data))
+        write(io, data)
+    end
+
+    # Map Julia types to protobuf field types
+    # FieldDescriptorProto.Type enum values
+    TYPE_STRING = 9
+    TYPE_BYTES = 12
+    TYPE_BOOL = 8
+    TYPE_INT32 = 5
+    TYPE_INT64 = 3
+    TYPE_UINT32 = 13
+    TYPE_UINT64 = 4
+    TYPE_FLOAT = 2
+    TYPE_DOUBLE = 1
+
+    function julia_to_proto_type(jtype::Type)
+        if jtype == String
+            TYPE_STRING
+        elseif jtype == Vector{UInt8}
+            TYPE_BYTES
+        elseif jtype == Bool
+            TYPE_BOOL
+        elseif jtype == Int32
+            TYPE_INT32
+        elseif jtype == Int64 || jtype == Int
+            TYPE_INT64
+        elseif jtype == UInt32
+            TYPE_UINT32
+        elseif jtype == UInt64
+            TYPE_UINT64
+        elseif jtype == Float32
+            TYPE_FLOAT
+        elseif jtype == Float64
+            TYPE_DOUBLE
+        else
+            TYPE_STRING  # Default to string for unknown types
+        end
+    end
+
+    # Helper to build a DescriptorProto for a message type
+    function build_message_descriptor(msg_type::AbstractString, julia_type::Union{Type, Nothing})
+        msg_buf = IOBuffer()
+
+        # Extract short name from fully-qualified name
+        msg_parts = split(msg_type, ".")
+        msg_short_name = String(msg_parts[end])
+
+        # DescriptorProto field 1: name
+        write_string_field(msg_buf, 1, msg_short_name)
+
+        # DescriptorProto field 2: field (repeated FieldDescriptorProto)
+        # Try to extract field info from Julia type
+        if julia_type !== nothing
+            try
+                field_names = fieldnames(julia_type)
+                field_nums = PB.field_numbers(julia_type)
+
+                for fname in field_names
+                    field_buf = IOBuffer()
+                    fname_str = String(fname)
+
+                    # FieldDescriptorProto field 1: name
+                    write_string_field(field_buf, 1, fname_str)
+
+                    # FieldDescriptorProto field 3: number
+                    fnum = getfield(field_nums, fname)
+                    write_int32_field(field_buf, 3, fnum)
+
+                    # FieldDescriptorProto field 4: label (LABEL_OPTIONAL = 1)
+                    write_int32_field(field_buf, 4, 1)
+
+                    # FieldDescriptorProto field 5: type
+                    ftype = fieldtype(julia_type, fname)
+                    proto_type = julia_to_proto_type(ftype)
+                    write_int32_field(field_buf, 5, proto_type)
+
+                    # Write field to message buffer (field 2)
+                    field_data = take!(field_buf)
+                    write_bytes_field(msg_buf, 2, field_data)
+                end
+            catch e
+                @debug "Could not extract field info from Julia type" type=julia_type error=e
+            end
+        end
+
+        return take!(msg_buf)
+    end
+
+    # Collect unique message types from all methods with their Julia types
+    message_types = Dict{String, Union{Type, Nothing}}()
+    for (_, method) in service.methods
+        if !haskey(message_types, method.input_type)
+            message_types[method.input_type] = method.input_julia_type
+        end
+        if !haskey(message_types, method.output_type)
+            message_types[method.output_type] = method.output_julia_type
+        end
+    end
+
+    # Field 1: name (filename)
+    write_string_field(buf, 1, filename)
+
+    # Field 2: package
+    if !isempty(package_name)
+        write_string_field(buf, 2, package_name)
+    end
+
+    # Field 4: message_type (DescriptorProto for each unique message)
+    for (msg_type, julia_type) in message_types
+        msg_data = build_message_descriptor(msg_type, julia_type)
+        write_bytes_field(buf, 4, msg_data)
+    end
+
+    # Field 6: service (ServiceDescriptorProto)
+    service_buf = IOBuffer()
+
+    # ServiceDescriptorProto field 1: name
+    write_string_field(service_buf, 1, service_short_name)
+
+    # ServiceDescriptorProto field 2: method (repeated MethodDescriptorProto)
+    for (method_name, method) in service.methods
+        method_buf = IOBuffer()
+
+        # MethodDescriptorProto field 1: name
+        write_string_field(method_buf, 1, String(method_name))
+
+        # MethodDescriptorProto field 2: input_type (fully qualified with leading dot)
+        input_type = "." * method.input_type
+        write_string_field(method_buf, 2, input_type)
+
+        # MethodDescriptorProto field 3: output_type (fully qualified with leading dot)
+        output_type = "." * method.output_type
+        write_string_field(method_buf, 3, output_type)
+
+        # MethodDescriptorProto field 5: client_streaming (bool)
+        if method.method_type == MethodType.CLIENT_STREAMING || method.method_type == MethodType.BIDI_STREAMING
+            write(method_buf, UInt8(0x28))  # tag for field 5, wire type 0 (varint)
+            write(method_buf, UInt8(0x01))  # true
+        end
+
+        # MethodDescriptorProto field 6: server_streaming (bool)
+        if method.method_type == MethodType.SERVER_STREAMING || method.method_type == MethodType.BIDI_STREAMING
+            write(method_buf, UInt8(0x30))  # tag for field 6, wire type 0 (varint)
+            write(method_buf, UInt8(0x01))  # true
+        end
+
+        # Write method to service buffer (field 2)
+        method_data = take!(method_buf)
+        write_bytes_field(service_buf, 2, method_data)
+    end
+
+    # Write service to main buffer (field 6)
+    service_data = take!(service_buf)
+    write_bytes_field(buf, 6, service_data)
+
     return take!(buf)
 end
 

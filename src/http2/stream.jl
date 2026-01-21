@@ -81,6 +81,7 @@ mutable struct HTTP2Stream
     end_stream_received::Bool
     end_stream_sent::Bool
     reset::Bool
+    headers_sent::Bool  # Track if response headers have been sent (for incremental streaming)
 
     function HTTP2Stream(id::Integer, initial_window_size::Int=DEFAULT_INITIAL_WINDOW_SIZE)
         new(
@@ -92,6 +93,7 @@ mutable struct HTTP2Stream
             Tuple{String, String}[],
             Tuple{String, String}[],
             IOBuffer(),
+            false,
             false,
             false,
             false,
