@@ -916,15 +916,21 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
         return  # Don't process yet, wait for END_STREAM
     end
 
-    # For bidirectional streaming, we process messages incrementally as they arrive.
-    # This allows services like reflection to respond to each request immediately.
-    # Note: This is "request-response" style bidi streaming, not true interleaved streaming.
+    # For bidirectional streaming, check if this is a "system" service that needs
+    # incremental message processing (like reflection) vs user-defined handlers
+    # that expect batch mode (iterate over all messages).
     if method_desc.method_type == MethodType.BIDI_STREAMING
-        # Create context early for incremental streaming
-        bidi_ctx = create_server_context(stream, peer, method_path)
-        # Process each message as it arrives using the incremental handler
-        handle_bidi_streaming_incremental(server, conn, io, stream, bidi_ctx, method_desc, service)
-        return
+        # Reflection service needs incremental processing - respond to each request immediately
+        if service.name == "grpc.reflection.v1alpha.ServerReflection"
+            bidi_ctx = create_server_context(stream, peer, method_path)
+            handle_bidi_streaming_incremental(server, conn, io, stream, bidi_ctx, method_desc, service)
+            return
+        end
+        # User-defined bidi streaming handlers need batch mode - wait for END_STREAM
+        if !stream.end_stream_received
+            @debug "Bidi streaming: waiting for END_STREAM" method=method_path
+            return  # Don't process yet, wait for END_STREAM
+        end
     end
 
     # Read one gRPC message (for unary/server-streaming this is the request,
