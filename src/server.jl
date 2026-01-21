@@ -909,14 +909,22 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
 
     service, method_desc = result
 
-    # For client streaming and bidirectional streaming, we must wait for END_STREAM
-    # before processing because all client messages need to be collected first.
-    # Note: True bidirectional streaming with interleaved send/receive would require
-    # async task handling, which is not implemented yet.
-    if (method_desc.method_type == MethodType.CLIENT_STREAMING ||
-        method_desc.method_type == MethodType.BIDI_STREAMING) && !stream.end_stream_received
-        @debug "Streaming: waiting for END_STREAM" method=method_path type=method_desc.method_type
+    # For client streaming, we must wait for END_STREAM before processing
+    # because all client messages need to be collected first.
+    if method_desc.method_type == MethodType.CLIENT_STREAMING && !stream.end_stream_received
+        @debug "Client streaming: waiting for END_STREAM" method=method_path
         return  # Don't process yet, wait for END_STREAM
+    end
+
+    # For bidirectional streaming, we process messages incrementally as they arrive.
+    # This allows services like reflection to respond to each request immediately.
+    # Note: This is "request-response" style bidi streaming, not true interleaved streaming.
+    if method_desc.method_type == MethodType.BIDI_STREAMING
+        # Create context early for incremental streaming
+        bidi_ctx = create_server_context(stream, peer, method_path)
+        # Process each message as it arrives using the incremental handler
+        handle_bidi_streaming_incremental(server, conn, io, stream, bidi_ctx, method_desc, service)
+        return
     end
 
     # Read one gRPC message (for unary/server-streaming this is the request,
@@ -1228,6 +1236,81 @@ function handle_client_streaming(
 
     # Send response with status
     send_grpc_response(conn, io, stream.id, final_status, final_message, response_data; content_type=response_content_type)
+end
+
+"""
+    handle_bidi_streaming_incremental(server, conn, io, stream, ctx, method_desc, service)
+
+Handle a bidirectional streaming RPC incrementally - process each message as it arrives
+and send responses immediately. This is "request-response" style bidi streaming.
+
+This is used for services like reflection where each request should get an immediate response.
+"""
+function handle_bidi_streaming_incremental(
+    server::GRPCServer,
+    conn::HTTP2Connection,
+    io::IO,
+    stream::HTTP2Stream,
+    ctx::ServerContext,
+    method_desc::MethodDescriptor,
+    service::ServiceDescriptor
+)
+    # Get content-type from request to mirror in response
+    response_content_type = get_response_content_type(stream)
+
+    # Check if we need to send headers first (only once per stream)
+    if !stream.headers_sent
+        stream.headers_sent = true
+        response_headers = [
+            (":status", "200"),
+            ("content-type", response_content_type),
+            ("grpc-encoding", "identity"),
+        ]
+        header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
+        write_frames(io, header_frames)
+    end
+
+    # Process all complete messages currently in the buffer
+    while has_complete_grpc_message(stream)
+        grpc_data = read_grpc_message!(stream)
+        if grpc_data === nothing
+            break
+        end
+
+        # Dispatch this single message and get response
+        status, message, response_data = dispatch_streaming_message(
+            server.dispatcher, ctx, grpc_data, method_desc, service
+        )
+
+        if status != StatusCode.OK
+            # Error - send trailers with error status
+            trailers = [
+                ("grpc-status", string(Int(status))),
+            ]
+            if !isempty(message)
+                push!(trailers, ("grpc-message", message))
+            end
+            trailer_frames = send_trailers(conn, stream.id, trailers)
+            write_frames(io, trailer_frames)
+            return
+        end
+
+        # Send response data
+        if !isempty(response_data)
+            grpc_message = encode_grpc_message(response_data; compressed=false)
+            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
+            write_frames(io, data_frames)
+        end
+    end
+
+    # If END_STREAM received and no more messages, send trailers to close
+    if stream.end_stream_received && !has_complete_grpc_message(stream)
+        trailers = [
+            ("grpc-status", string(Int(StatusCode.OK))),
+        ]
+        trailer_frames = send_trailers(conn, stream.id, trailers)
+        write_frames(io, trailer_frames)
+    end
 end
 
 """
