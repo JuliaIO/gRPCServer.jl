@@ -6,6 +6,7 @@ DocMeta.setdocmeta!(gRPCServer, :DocTestSetup, :(using gRPCServer); recursive=tr
 makedocs(
     sitename = "gRPCServer.jl",
     modules = [gRPCServer],
+    repo = Documenter.Remotes.GitHub("s-celles", "gRPCServer.jl"),
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical = "https://s-celles.github.io/gRPCServer.jl",
@@ -27,7 +28,6 @@ makedocs(
     ],
     doctest = false,  # Disable doctests for now
     checkdocs = :exports,
-    remotes = nothing,  # Disable repo lookup when no git history
 )
 
 deploydocs(
