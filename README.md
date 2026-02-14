@@ -1,5 +1,6 @@
 # gRPCServer.jl
 
+[![DOI](https://zenodo.org/badge/1131647982.svg)](https://doi.org/10.5281/zenodo.18642866)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/s-celles/gRPCServer.jl)
 [![Build Status](https://github.com/s-celles/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/s-celles/gRPCServer.jl/actions/workflows/CI.yml)
 [![Coverage](https://codecov.io/gh/s-celles/gRPCServer.jl/branch/develop/graph/badge.svg)](https://codecov.io/gh/s-celles/gRPCServer.jl)
