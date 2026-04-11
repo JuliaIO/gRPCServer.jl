@@ -46,6 +46,9 @@ using .TestUtils
     include("integration/test_health.jl")
     include("integration/test_tls.jl")
 
+    # gRPCClient integration tests
+    include("integration/test_grpcclient.jl")
+
     # Contract tests
     include("contract/test_grpcurl.jl")
 

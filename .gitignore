@@ -74,6 +74,12 @@ benchmark/*.json
 !test/interop/
 !test/interop/**/*.jl
 
+# gRPCClient integration test support files
+!test/integration/grpcclient/
+!test/integration/grpcclient/**
+!test/integration/grpcclient/**/*.jl
+!test/integration/grpcclient/**/*.proto
+
 # Exception for examples
 !examples/
 !examples/**

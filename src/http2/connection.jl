@@ -113,9 +113,13 @@ end
 Create a SETTINGS frame from connection settings.
 """
 function to_frame(settings::ConnectionSettings)::Frame
+    # Note: ENABLE_PUSH is a client-only setting per RFC 9113 Section 8.4:
+    # "A server MUST NOT send a SETTINGS frame with SETTINGS_ENABLE_PUSH
+    # set to any value other than 0."
+    # We omit it entirely from server SETTINGS frames to avoid protocol errors
+    # with strict HTTP/2 implementations (e.g., nghttp2/libcurl).
     params = Tuple{UInt16, UInt32}[
         (UInt16(SettingsParameter.HEADER_TABLE_SIZE), UInt32(settings.header_table_size)),
-        (UInt16(SettingsParameter.ENABLE_PUSH), UInt32(settings.enable_push ? 1 : 0)),
         (UInt16(SettingsParameter.MAX_CONCURRENT_STREAMS), UInt32(settings.max_concurrent_streams)),
         (UInt16(SettingsParameter.INITIAL_WINDOW_SIZE), UInt32(settings.initial_window_size)),
         (UInt16(SettingsParameter.MAX_FRAME_SIZE), UInt32(settings.max_frame_size)),

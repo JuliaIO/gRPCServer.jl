@@ -17,17 +17,22 @@ Server streaming RPC methods now work correctly via grpcurl.
 
 ### gRPCClient.jl Integration Tests
 
-**Status**: Not Started
+**Status**: Complete
 
-The constitution requires integration tests against [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) to validate client-server interoperability within the Julia gRPC ecosystem.
+Integration tests against [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) validate client-server interoperability within the Julia gRPC ecosystem.
 
-**Tasks**:
-- [ ] Add gRPCClient.jl as a test dependency
-- [ ] Create `test/integration/test_grpcclient.jl`
-- [ ] Test all RPC patterns (unary, server streaming, client streaming, bidirectional)
-- [ ] Test error handling and status code propagation
-- [ ] Test metadata/header passing
-- [ ] Test compression negotiation
+**Completed**:
+- [x] Add gRPCClient.jl as a test dependency
+- [x] Create `test/integration/test_grpcclient.jl`
+- [x] Test all RPC patterns (unary, server streaming, client streaming, bidirectional)
+- [x] Test error handling and status code propagation
+- [x] Test compression negotiation
+
+**Notes**:
+- Streaming tests (server, client, bidi) require Julia >= 1.12 and are version-gated
+- Unary and error tests run on all Julia versions (1.10+)
+- Fixed HTTP/2 ENABLE_PUSH compliance (RFC 9113) discovered during testing
+- Metadata/header passing tests deferred to a follow-up
 
 ### Full mTLS Client Verification
 
