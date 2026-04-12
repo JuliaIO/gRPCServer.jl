@@ -15,6 +15,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Quick Start" => "quickstart.md",
+        "TLS" => "tls.md",
         "API Reference" => "api.md",
         "Examples" => [
             "Overview" => "examples/index.md",

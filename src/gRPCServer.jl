@@ -35,7 +35,7 @@ using ProtoBuf
 using CodecZlib
 using TranscodingStreams
 using PrecompileTools
-using OpenSSL
+using Reseau
 
 # Include source files in dependency order
 
@@ -72,12 +72,13 @@ include("proto/grpc/reflection/v1alpha/reflection_pb.jl")
 # 8b. Proto descriptors (compiled .pb files for reflection service)
 include("proto/descriptors.jl")
 
-# 9. Main server (depends on everything above including proto types)
+# 8c. TLS transport (must come before server.jl — GRPCServer holds a TLSTransport)
+include("tls/transport.jl")
+
+# 9. Main server (depends on everything above including proto types and TLSTransport)
 include("server.jl")
 
-# 10. TLS implementation (optional, depends on server, config)
-include("tls/config.jl")
-include("tls/alpn.jl")
+# 10. TLS certificate reload (depends on server for watcher wiring)
 include("tls/reload.jl")
 
 # 11. Built-in services (depend on server, dispatch)

@@ -326,15 +326,19 @@ port = 50051
 tls_config = TLSConfig(
     cert_chain = "/path/to/server.crt",
     private_key = "/path/to/server.key",
-    client_ca = nothing,  # Set for mTLS
+    client_ca = nothing,          # Set for mTLS
     require_client_cert = false,
-    min_version = :TLSv1_2
+    min_version = :TLSv1_2,
+    alpn_protocols = ["h2"],      # Default; shown for clarity
 )
 
 server = GRPCServer(host, port;
     tls = tls_config
 )
 ```
+
+See the TLS documentation page for a full walkthrough including ALPN behavior,
+mTLS, and certificate reload.
 
 ## Error Handling
 
