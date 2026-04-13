@@ -58,8 +58,8 @@ mutable struct GRPCServer
     last_error::Union{Exception, Nothing}
 
     # TLS state
-    """Cached SSL context for TLS mode. Created at server startup when TLS is configured."""
-    ssl_context::Any  # Union{OpenSSL.SSLContext, Nothing} - using Any to avoid type dep
+    """TLS transport for TLS mode. Created at server startup when TLS is configured."""
+    tls_transport::Union{TLSTransport, Nothing}
 
     function GRPCServer(
         host::String,
@@ -123,7 +123,7 @@ mutable struct GRPCServer
             ReentrantLock(),
             Condition(),
             nothing,
-            nothing  # ssl_context - initialized in start!() when TLS configured
+            nothing  # tls_transport - initialized in start!() when TLS configured
         )
 
         # Add logging interceptor if requested
@@ -242,44 +242,37 @@ function start!(server::GRPCServer)
     server.last_error = nothing
 
     try
-        # Initialize TLS if configured
-        if server.config.tls !== nothing
-            @info "Initializing TLS..." cert=server.config.tls.cert_chain
-            # Verify TLS configuration first
-            if !verify_tls_config(server.config.tls)
-                throw(TLSError("Invalid TLS configuration - certificate or key files not found"))
-            end
-            # Create and cache SSL context
-            server.ssl_context = create_ssl_context(server.config.tls)
-            @info "TLS initialized successfully"
-        end
-
         # Auto-register built-in services if enabled
         register_builtin_services!(server)
 
-        # Parse host
-        addr = if server.host == "0.0.0.0" || server.host == ""
-            IPv4(0)
-        elseif server.host == "::"
-            IPv6(0)
+        if server.config.tls !== nothing
+            @info "Initializing TLS..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
+            server.tls_transport = TLSTransport(server.config.tls, server.host, server.port)
+            server.status = ServerStatus.RUNNING
+            @info "gRPC server started (TLS)" host=server.host port=server.port alpn=server.config.tls.alpn_protocols
         else
-            try
-                parse(IPv4, server.host)
-            catch
+            # Parse host
+            addr = if server.host == "0.0.0.0" || server.host == ""
+                IPv4(0)
+            elseif server.host == "::"
+                IPv6(0)
+            else
                 try
-                    parse(IPv6, server.host)
+                    parse(IPv4, server.host)
                 catch
-                    # Try DNS resolution
-                    getaddrinfo(server.host)
+                    try
+                        parse(IPv6, server.host)
+                    catch
+                        # Try DNS resolution
+                        getaddrinfo(server.host)
+                    end
                 end
             end
+
+            server.socket = listen(addr, server.port)
+            server.status = ServerStatus.RUNNING
+            @info "gRPC server started" host=server.host port=server.port tls=false
         end
-
-        # Bind socket
-        server.socket = listen(addr, server.port)
-        server.status = ServerStatus.RUNNING
-
-        @info "gRPC server started" host=server.host port=server.port tls=(server.config.tls !== nothing)
 
         # Start accept loop in background
         @async accept_loop(server)
@@ -287,6 +280,9 @@ function start!(server::GRPCServer)
     catch e
         server.status = ServerStatus.STOPPED
         server.last_error = e
+        if e isa TLSHandshakeError
+            rethrow()
+        end
         throw(BindError("Failed to bind to $(server.host):$(server.port)", e))
     end
 end
@@ -358,6 +354,10 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
             close(server.socket)
             server.socket = nothing
         end
+        if server.tls_transport !== nothing
+            close(server.tls_transport)
+            server.tls_transport = nothing
+        end
         server.status = ServerStatus.STOPPED
     else
         # Graceful shutdown
@@ -367,6 +367,10 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
         if server.socket !== nothing
             close(server.socket)
             server.socket = nothing
+        end
+        if server.tls_transport !== nothing
+            close(server.tls_transport)
+            server.tls_transport = nothing
         end
 
         # Wait for in-flight requests
@@ -493,47 +497,50 @@ function reload_tls!(server::GRPCServer)
     end
 
     @info "Reloading TLS certificates"
-    # TLS reload implementation would go here
-    # This requires OpenSSL.jl integration
+    if server.tls_transport !== nothing
+        reload!(server.tls_transport, server.config.tls)
+    end
 end
 
 # Internal functions
 
 function accept_loop(server::GRPCServer)
+    if server.tls_transport !== nothing
+        _tls_accept_loop(server)
+    else
+        _plain_accept_loop(server)
+    end
+end
+
+function _plain_accept_loop(server::GRPCServer)
     while server.status == ServerStatus.RUNNING && server.socket !== nothing
         try
             client = accept(server.socket)
-
-            # Wrap with TLS if configured
-            if server.ssl_context !== nothing
-                try
-                    # Wrap socket with TLS
-                    ssl_socket = wrap_socket_tls(client, server.ssl_context)
-
-                    # Verify ALPN negotiated HTTP/2
-                    if !verify_http2_negotiated(ssl_socket)
-                        @warn "ALPN negotiation failed - h2 protocol not negotiated"
-                        close_tls_socket(ssl_socket)
-                        continue
-                    end
-
-                    @async handle_connection(server, ssl_socket)
-                catch tls_err
-                    @warn "TLS handshake failed" exception=tls_err
-                    try
-                        close(client)
-                    catch
-                    end
-                    continue  # Continue accepting new connections
-                end
-            else
-                @async handle_connection(server, client)
-            end
+            @async handle_connection(server, client)
         catch e
             if server.status != ServerStatus.RUNNING
                 break  # Expected during shutdown
             end
             @error "Error accepting connection" exception=e
+        end
+    end
+end
+
+function _tls_accept_loop(server::GRPCServer)
+    transport = server.tls_transport
+    while server.status == ServerStatus.RUNNING && isopen(transport)
+        try
+            neg = accept_one(transport)
+            @async handle_connection(server, neg.io)
+        catch e
+            if e isa TLSHandshakeError
+                _log_tls_handshake_error(e)
+                continue
+            elseif server.status != ServerStatus.RUNNING
+                break
+            else
+                @error "Error accepting TLS connection" exception=e
+            end
         end
     end
 end
@@ -1954,7 +1961,7 @@ function Base.show(io::IO, server::GRPCServer)
     print(io, "GRPCServer($(server.host):$(server.port), status=$(server.status)")
     print(io, ", services=$(length(services(server)))")
     if server.config.tls !== nothing
-        tls_status = server.ssl_context !== nothing ? "active" : "configured"
+        tls_status = server.tls_transport !== nothing ? "active" : "configured"
         print(io, ", TLS=$tls_status")
     end
     print(io, ")")

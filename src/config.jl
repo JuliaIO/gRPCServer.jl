@@ -33,6 +33,8 @@ TLS/mTLS configuration for secure connections.
 - `client_ca::Union{String, Nothing}`: Path to client CA certificate for mTLS
 - `require_client_cert::Bool`: Whether to require client certificates
 - `min_version::Symbol`: Minimum TLS version (`:TLSv1_2` or `:TLSv1_3`)
+- `alpn_protocols::Vector{String}`: Ordered ALPN protocol preference list (default `["h2"]`)
+- `handshake_timeout_ns::Int64`: Optional per-handshake timeout in nanoseconds; `0` leaves it unset
 
 # Example
 ```julia
@@ -41,7 +43,8 @@ tls = TLSConfig(
     private_key = "/path/to/server.key",
     client_ca = "/path/to/ca.crt",  # For mTLS
     require_client_cert = true,
-    min_version = :TLSv1_2
+    min_version = :TLSv1_2,
+    alpn_protocols = ["h2"],
 )
 ```
 """
@@ -51,18 +54,45 @@ struct TLSConfig
     client_ca::Union{String, Nothing}
     require_client_cert::Bool
     min_version::Symbol
+    alpn_protocols::Vector{String}
+    handshake_timeout_ns::Int64
 
     function TLSConfig(;
         cert_chain::String,
         private_key::String,
         client_ca::Union{String, Nothing}=nothing,
         require_client_cert::Bool=false,
-        min_version::Symbol=:TLSv1_2
+        min_version::Symbol=:TLSv1_2,
+        alpn_protocols::Vector{String}=["h2"],
+        handshake_timeout_ns::Integer=0,
     )
         if min_version ∉ (:TLSv1_2, :TLSv1_3)
             throw(ArgumentError("min_version must be :TLSv1_2 or :TLSv1_3"))
         end
-        new(cert_chain, private_key, client_ca, require_client_cert, min_version)
+        if isempty(alpn_protocols)
+            throw(ArgumentError("alpn_protocols must not be empty — set [\"h2\"] for gRPC"))
+        end
+        for proto in alpn_protocols
+            bytes = codeunits(proto)
+            if isempty(bytes) || length(bytes) > 255
+                throw(ArgumentError("alpn_protocols entries must be non-empty and ≤ 255 bytes"))
+            end
+        end
+        if require_client_cert && client_ca === nothing
+            throw(ArgumentError("require_client_cert = true requires client_ca to be set"))
+        end
+        if handshake_timeout_ns < 0
+            throw(ArgumentError("handshake_timeout_ns must be non-negative"))
+        end
+        new(
+            cert_chain,
+            private_key,
+            client_ca,
+            require_client_cert,
+            min_version,
+            copy(alpn_protocols),
+            Int64(handshake_timeout_ns),
+        )
     end
 end
 

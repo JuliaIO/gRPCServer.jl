@@ -1,5 +1,4 @@
 # TLS certificate hot-reload for gRPCServer.jl
-# Placeholder - full implementation will use OpenSSL.jl
 
 """
     CertificateWatcher
