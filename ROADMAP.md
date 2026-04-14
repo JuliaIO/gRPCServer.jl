@@ -101,8 +101,8 @@ The in-tree `src/http2/` module duplicates code that has since been extracted in
 - PureHTTP2: zero migration cost, but inherits the same bugs gRPCServer would inherit anyway.
 
 **References**:
-- [PureHTTP2.jl](https://github.com/) (extracted from this module)
-- [Nghttp2Wrapper.jl](https://github.com/)
+- [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (extracted from this module)
+- [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl)
 - [JuliaWeb/HTTP.jl#1248 — HTTP/2 support](https://github.com/JuliaWeb/HTTP.jl/pull/1248)
 
 ### Code Coverage Improvements
