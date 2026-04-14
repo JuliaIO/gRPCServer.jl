@@ -36,23 +36,29 @@ Integration tests against [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.
 
 ### Full mTLS Client Verification
 
-**Status**: ✅ Complete (via Reseau.jl)
+**Status**: Not Started (blocked on upstream)
 
-The OpenSSL.jl backend was replaced with [Reseau.jl](https://github.com/) (feature 018-reseau-tls-alpn), which exposes the verification primitives that OpenSSL.jl lacked. Full mTLS client certificate verification is now enforced at the handshake layer by `Reseau.TLS.ClientAuthMode.RequireAndVerifyClientCert` (see `src/tls/transport.jl:101-102`), with the client CA bundle loaded via `client_ca_file` on the TLS config.
+OpenSSL.jl does not expose `ssl_set_verify` and `ssl_load_client_ca_file`, so full mTLS client certificate verification is not currently possible.
 
-**Completed**:
-- [x] Replace OpenSSL.jl with Reseau.jl for the TLS backend
-- [x] Enforce client certificate verification via `RequireAndVerifyClientCert`
-- [x] Load client CA bundle through Reseau's `client_ca_file` option
-- [x] Surface verification failures as TLS handshake errors
+**Current state**: Client CA can be loaded but verification is not enforced (see `src/tls/config.jl:66-68`).
 
-**Follow-ups** (optional polish, not blockers):
-- [ ] Add explicit tests for mTLS with valid/invalid/expired client certificates
-- [ ] Document mTLS configuration end-to-end in `docs/`
-- [ ] Expose a typed accessor for the peer certificate subject (currently noted as TODO at `src/tls/transport.jl:237`)
+**Approach**: Contribute missing bindings upstream to [OpenSSL.jl](https://github.com/JuliaWeb/OpenSSL.jl) rather than implementing local ccall workarounds.
+
+**Upstream Tasks**:
+- [ ] Open issue on OpenSSL.jl requesting mTLS verification support
+- [ ] Contribute `SSL_CTX_set_verify` binding to OpenSSL.jl
+- [ ] Contribute `SSL_CTX_load_verify_locations` binding to OpenSSL.jl
+- [ ] Contribute `SSL_get_verify_result` binding to OpenSSL.jl
+
+**Local Tasks** (after upstream merge):
+- [ ] Update gRPCServer.jl to use new OpenSSL.jl bindings
+- [ ] Add tests for mTLS with valid/invalid client certificates
+- [ ] Update documentation with mTLS configuration examples
 
 **References**:
-- [Reseau.jl](https://github.com/)
+- [OpenSSL.jl GitHub](https://github.com/JuliaWeb/OpenSSL.jl)
+- [OpenSSL.jl Issues](https://github.com/JuliaWeb/OpenSSL.jl/issues) (no existing mTLS issue as of 2026-01-15)
+- [OpenSSL SSL_CTX_set_verify](https://www.openssl.org/docs/man3.0/man3/SSL_CTX_set_verify.html)
 - [gRPC Authentication Guide](https://grpc.io/docs/guides/auth/)
 
 ### Documentation Build Strictness
@@ -73,7 +79,7 @@ The documentation build now runs in strict mode with no `warnonly` exceptions.
 
 **Status**: Under Consideration
 
-The in-tree `src/http2/` module duplicates code that has since been extracted into [PureHTTP2.jl](https://github.com/) (PureHTTP2.jl's provenance is this module). Maintaining two copies is wasted effort, and depending on an external HTTP/2 implementation would also open the door to alternative backends like [Nghttp2Wrapper.jl](https://github.com/) or HTTP.jl once [JuliaWeb/HTTP.jl#1248](https://github.com/JuliaWeb/HTTP.jl/pull/1248) lands.
+The in-tree `src/http2/` module duplicates code that has since been extracted into [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (PureHTTP2.jl's provenance is this module). Maintaining two copies is wasted effort, and depending on an external HTTP/2 implementation would also open the door to alternative backends like [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) or [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) once [JuliaWeb/HTTP.jl#1248](https://github.com/JuliaWeb/HTTP.jl/pull/1248) lands.
 
 **Why HTTP/2 is harder than the TLS swap (Reseau.jl):** TLS was a leaf concern with a small surface. HTTP/2 leaks much more state into the gRPC layer — HPACK, flow control windows, GOAWAY, trailers, settings — so any abstraction must cover all of it.
 
