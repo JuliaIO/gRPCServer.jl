@@ -35,6 +35,7 @@ using .TestUtils
     include("unit/test_error_mapping.jl")
     include("unit/test_connection_management.jl")
     include("unit/test_timeout_handling.jl")
+    include("unit/test_http2_backend.jl")
 
     # Integration tests
     include("integration/test_unary.jl")

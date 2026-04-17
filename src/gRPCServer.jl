@@ -36,6 +36,11 @@ using CodecZlib
 using TranscodingStreams
 using PrecompileTools
 using Reseau
+using PureHTTP2
+
+# Import functions from PureHTTP2 that gRPCServer also defines methods for,
+# so the method tables merge (allows dispatch on both PureHTTP2 and gRPCServer types).
+import PureHTTP2: get_metadata, set_header!, is_closed
 
 # Include source files in dependency order
 
@@ -48,12 +53,8 @@ include("compression.jl")
 # 3. Configuration (depends on compression for CompressionCodec)
 include("config.jl")
 
-# 4. HTTP/2 implementation (internal dependencies handled by include order)
-include("http2/frames.jl")
-include("http2/hpack.jl")
-include("http2/stream.jl")
-include("http2/flow_control.jl")
-include("http2/connection.jl")
+# 4. HTTP/2 backend abstraction (delegates to PureHTTP2.jl)
+include("http2_backend.jl")
 
 # 5. Context and streams (depend on config, errors)
 include("context.jl")
@@ -134,6 +135,9 @@ export compress, decompress, codec_name, parse_codec, negotiate_compression
 # Proto Descriptors (for reflection service)
 export HEALTH_DESCRIPTOR, REFLECTION_DESCRIPTOR
 export has_health_descriptor, has_reflection_descriptor
+
+# HTTP/2 Backend Abstraction
+export AbstractHTTP2Backend, PureHTTP2Backend, create_connection
 
 # HTTP/2 Stream State (for advanced use cases)
 export can_send, StreamError

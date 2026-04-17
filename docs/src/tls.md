@@ -19,7 +19,7 @@ minutes.
 
 ## The `TLSConfig` type
 
-The full docstring is in the [API Reference](@ref). Fields:
+The full docstring is in the [API Reference](api.md). Fields:
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|

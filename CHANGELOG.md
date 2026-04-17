@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Pluggable HTTP/2 backend architecture via `AbstractHTTP2Backend` abstract type
+  and `PureHTTP2Backend` default implementation. The `GRPCServer` constructor
+  accepts an `http2_backend` keyword argument to select a backend at construction
+  time. The `create_connection(backend)` method is the single extension point
+  for implementing future backends (e.g., Nghttp2Wrapper.jl, HTTP.jl). See
+  `docs/src/http2-backends.md`.
+- New `PureHTTP2.jl` runtime dependency — the externalized HTTP/2 protocol
+  implementation (frames, HPACK, streams, flow control, connection management)
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
 - ROADMAP.md with planned improvements
 - CHANGELOG.md for tracking changes
@@ -40,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinguishable log lines per SC-008
 - `GRPCServer.ssl_context` replaced by `GRPCServer.tls_transport`; `stop!` now
   closes both the plain socket and the TLS transport when present
+- HTTP/2 protocol implementation (frames, HPACK, streams, flow control,
+  connection management) now delegated to the external `PureHTTP2.jl` package.
+  Types `HTTP2Connection`, `HTTP2Stream`, `Frame`, `StreamError`, etc. now
+  come from PureHTTP2.jl. All previously exported symbols remain available
+  via `gRPCServer.X` for backward compatibility.
 
 ### Removed
 - Removed `OpenSSL` from runtime `[deps]` and `[compat]` in `Project.toml`
@@ -49,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `verify_http2_negotiated`) — all replaced by `src/tls/transport.jl`
 - Removed the "OpenSSL.jl does not currently expose ..." workaround comments
   from the TLS layer; the behavior they described no longer applies
+- Removed `src/http2/` directory (~3,100 lines: frames.jl, hpack.jl, stream.jl,
+  flow_control.jl, connection.jl) — now provided by PureHTTP2.jl
 
 ## [0.1.0] - 2026-01-11
 

@@ -61,6 +61,9 @@ mutable struct GRPCServer
     """TLS transport for TLS mode. Created at server startup when TLS is configured."""
     tls_transport::Union{TLSTransport, Nothing}
 
+    # HTTP/2 backend (pluggable)
+    http2_backend::AbstractHTTP2Backend
+
     function GRPCServer(
         host::String,
         port::Int;
@@ -84,7 +87,8 @@ mutable struct GRPCServer
             CompressionCodec.GZIP,
             CompressionCodec.DEFLATE,
             CompressionCodec.IDENTITY
-        ]
+        ],
+        http2_backend::AbstractHTTP2Backend=PureHTTP2Backend()
     )
         # Validate host and port
         if port < 1 || port > 65535
@@ -123,7 +127,8 @@ mutable struct GRPCServer
             ReentrantLock(),
             Condition(),
             nothing,
-            nothing  # tls_transport - initialized in start!() when TLS configured
+            nothing,  # tls_transport - initialized in start!() when TLS configured
+            http2_backend
         )
 
         # Add logging interceptor if requested
@@ -557,8 +562,8 @@ function handle_connection(server::GRPCServer, client)
 
         @debug "New connection" peer=peer
 
-        # Create HTTP/2 connection manager
-        conn = HTTP2Connection()
+        # Create HTTP/2 connection manager via backend
+        conn = create_connection(server.http2_backend)
 
         # Read and validate client connection preface
         preface_data = read_connection_preface(client)
@@ -1113,7 +1118,7 @@ function wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io:
             # Try to read and process any waiting frames
             frame = try_read_frame(io, conn)
             if frame !== nothing
-                process_frame!(conn, frame)
+                process_frame(conn, frame)
             end
         catch e
             if !(e isa EOFError)

@@ -5,6 +5,7 @@ module TestUtils
 
 using Sockets
 using gRPCServer
+using PureHTTP2
 
 export MockGRPCClient, connect!, disconnect!, is_connected
 export send_preface!, build_grpc_message, parse_grpc_message
@@ -293,7 +294,7 @@ end
 Create a mock HTTP2Stream from a mock request for testing.
 """
 function create_mock_stream(request::MockHTTP2Request; stream_id::UInt32=UInt32(1))
-    stream = gRPCServer.HTTP2Stream(stream_id)
+    stream = PureHTTP2.HTTP2Stream(stream_id)
     stream.request_headers = create_mock_headers(request)
     stream.headers_complete = true
 
@@ -302,7 +303,7 @@ function create_mock_stream(request::MockHTTP2Request; stream_id::UInt32=UInt32(
     end
 
     # Set stream state to OPEN (simulating headers received)
-    stream.state = gRPCServer.StreamState.OPEN
+    stream.state = PureHTTP2.StreamState.OPEN
 
     return stream
 end
