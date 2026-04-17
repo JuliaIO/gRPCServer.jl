@@ -1,6 +1,6 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.4"
+julia_version = "1.12.6"
 manifest_format = "2.0"
 project_hash = "5594f8505eba27cc7244519a8cd51a353a69ab6c"
 
@@ -17,11 +17,6 @@ deps = ["Compat", "JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
 git-tree-sha1 = "7fecfb1123b8d0232218e2da0c213004ff15358d"
 uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 version = "1.6.3"
-
-[[deps.BitFlags]]
-git-tree-sha1 = "0691e34b3bb8be9307330f88d1a3c3f25466c24d"
-uuid = "d1d4a3ce-64b1-5f1a-9ba4-7e7e69966f35"
-version = "0.1.9"
 
 [[deps.BufferedStreams]]
 git-tree-sha1 = "6863c5b7fc997eadcabdbaf6c5f201dc30032643"
@@ -99,10 +94,6 @@ deps = ["Base64", "JuliaSyntaxHighlighting", "StyledStrings"]
 uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
 version = "1.11.0"
 
-[[deps.MozillaCACerts_jll]]
-uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
-version = "2025.11.4"
-
 [[deps.NetworkOptions]]
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 version = "1.3.0"
@@ -111,12 +102,6 @@ version = "1.3.0"
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl"]
 uuid = "4536629a-c528-5b80-bd46-f80d51c5b363"
 version = "0.3.29+0"
-
-[[deps.OpenSSL]]
-deps = ["BitFlags", "Dates", "MozillaCACerts_jll", "NetworkOptions", "OpenSSL_jll", "Sockets"]
-git-tree-sha1 = "1d1aaa7d449b58415f97d2839c318b70ffb525a0"
-uuid = "4d8831e6-92b7-49fb-bdf8-b643e874388c"
-version = "1.6.1"
 
 [[deps.OpenSSL_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -157,10 +142,31 @@ git-tree-sha1 = "eabdb811dbacadc9d7e0dee9ac11c1a12705e12a"
 uuid = "3349acd9-ac6a-5e09-bcdb-63829b23a429"
 version = "1.2.0"
 
+[[deps.PureHTTP2]]
+git-tree-sha1 = "77a5335f3cece72a07103f543da88df9972311e8"
+repo-rev = "main"
+repo-url = "https://github.com/s-celles/PureHTTP2.jl"
+uuid = "7d1e1b98-28e7-4969-8df9-5a308937986a"
+version = "0.5.0"
+
+    [deps.PureHTTP2.extensions]
+    PureHTTP2OpenSSLExt = "OpenSSL"
+    PureHTTP2ReseauExt = "Reseau"
+
+    [deps.PureHTTP2.weakdeps]
+    OpenSSL = "4d8831e6-92b7-49fb-bdf8-b643e874388c"
+    Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
+
 [[deps.Random]]
 deps = ["SHA"]
 uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 version = "1.11.0"
+
+[[deps.Reseau]]
+deps = ["NetworkOptions", "OpenSSL_jll", "PrecompileTools"]
+git-tree-sha1 = "4aaa1ae7034c2a37c25f672923a2620976062909"
+uuid = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
+version = "1.0.1"
 
 [[deps.SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
@@ -235,7 +241,7 @@ uuid = "83775a58-1f1d-513f-b197-d71354ab007a"
 version = "1.3.1+2"
 
 [[deps.gRPCServer]]
-deps = ["Base64", "CodecZlib", "Dates", "Logging", "OpenSSL", "PrecompileTools", "ProtoBuf", "Sockets", "TranscodingStreams", "UUIDs"]
+deps = ["Base64", "CodecZlib", "Dates", "Logging", "PrecompileTools", "ProtoBuf", "PureHTTP2", "Reseau", "Sockets", "TranscodingStreams", "UUIDs"]
 path = ".."
 uuid = "f97f078e-81a3-449b-8443-3b3ae5ba1c89"
 version = "0.1.0"
