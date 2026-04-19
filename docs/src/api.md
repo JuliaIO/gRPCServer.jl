@@ -123,24 +123,20 @@ parse_codec
 negotiate_compression
 ```
 
+## HTTP/2 Backend Abstraction
+
+gRPCServer.jl supports pluggable HTTP/2 backends via an abstract type and a
+connection-factory method. See [HTTP/2 Backends](@ref) for the full guide.
+
+```@docs
+AbstractHTTP2Backend
+PureHTTP2Backend
+create_connection
+```
+
 ## HTTP/2 Stream State
 
-These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection.
+These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection. They come from [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) and are re-exported by gRPCServer.
 
-```@docs
-can_send
-StreamError
-```
-
-## Internal Types
-
-These are internal types used by the HTTP/2 implementation. They are documented for reference but are not part of the public API.
-
-```@docs
-gRPCServer.FrameType
-gRPCServer.FrameFlags
-gRPCServer.ErrorCode
-gRPCServer.SettingsParameter
-gRPCServer.StreamState
-gRPCServer.ConnectionState
-```
+- `can_send(stream)` — check whether a stream is in a state that accepts outbound data
+- `StreamError` — exception type for HTTP/2 stream-level errors
