@@ -966,7 +966,7 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
     if method_desc.method_type == MethodType.UNARY
         status, message, response_data = dispatch_unary(server.dispatcher, ctx, grpc_data)
         @debug "gRPC response" status=status response_len=length(response_data)
-        send_grpc_response(conn, io, stream.id, status, message, response_data; content_type=response_content_type)
+        send_grpc_response(PureHTTP2GRPCStream(conn, io, stream), status, message, response_data; content_type=response_content_type)
 
     elseif method_desc.method_type == MethodType.SERVER_STREAMING
         # Handle server streaming - multiple responses to one request
@@ -1253,7 +1253,7 @@ function handle_client_streaming(
     end
 
     # Send response with status
-    send_grpc_response(conn, io, stream.id, final_status, final_message, response_data; content_type=response_content_type)
+    send_grpc_response(PureHTTP2GRPCStream(conn, io, stream), final_status, final_message, response_data; content_type=response_content_type)
 end
 
 """
@@ -1856,36 +1856,33 @@ function get_response_content_type(stream::HTTP2Stream)::String
 end
 
 """
-    send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
+    send_grpc_response(s::PureHTTP2GRPCStream,
                        status::StatusCode.T, message::String, data::Vector{UInt8};
                        content_type::String="application/grpc")
 
-Send a complete gRPC response (headers, data, trailers).
+Send a complete gRPC response (headers, data, trailers) through the
+[`AbstractGRPCStream`](@ref) contract.
 Checks stream state before sending - if stream is not sendable, logs a warning and returns.
 """
-function send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
+function send_grpc_response(s::PureHTTP2GRPCStream,
                             status::StatusCode.T, message::String, data::Vector{UInt8};
                             content_type::String="application/grpc")
     # Check if stream is still sendable before attempting to send
-    if !can_send_on_stream(conn, stream_id)
-        @warn "Cannot send gRPC response, stream not in sendable state" stream_id
+    if !can_send_on_stream(s.conn, s.stream.id)
+        @warn "Cannot send gRPC response, stream not in sendable state" stream_id=s.stream.id
         return
     end
 
     # Send response headers
-    response_headers = [
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream_id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Send response data (with gRPC framing)
     if !isempty(data)
-        grpc_message = encode_grpc_message(data)
-        data_frames = send_data(conn, stream_id, grpc_message; end_stream=false)
-        write_frames(io, data_frames)
+        send_message!(s, data)
     end
 
     # Send trailers with status
@@ -1895,8 +1892,7 @@ function send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
     if !isempty(message)
         push!(trailers, ("grpc-message", message))
     end
-    trailer_frames = send_trailers(conn, stream_id, trailers)
-    write_frames(io, trailer_frames)
+    send_trailers!(s, trailers)
 end
 
 """
