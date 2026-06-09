@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Types `HTTP2Connection`, `HTTP2Stream`, `Frame`, `StreamError`, etc. now
   come from PureHTTP2.jl. All previously exported symbols remain available
   via `gRPCServer.X` for backward compatibility.
+- Bumped `Reseau` from 1.0.x to `>= 1.1.1` (resolves to 1.2.1) as required by the
+  forthcoming HTTP.jl HTTP/2 backend (HTTP.jl 2.x depends on Reseau >= 1.1.1).
+  Refined ALPN-mismatch classification in `src/tls/transport.jl`: Reseau >= 1.1
+  completes the TLS handshake on an ALPN mismatch and returns an empty/unexpected
+  negotiated protocol (Reseau 1.0 failed the handshake outright); a missing,
+  empty, or non-configured negotiated protocol is now uniformly classified as
+  `ALPN_MISMATCH`.
+
+### Known Issues
+- mTLS client-certificate authentication does not work when a connection
+  negotiates **TLS 1.2** with Reseau >= 1.1 (it works over **TLS 1.3**). The
+  client certificate is not presented during a TLS 1.2 handshake — an upstream
+  Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
+  affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
+  pending an upstream fix.
 
 ### Removed
 - Removed `OpenSSL` from runtime `[deps]` and `[compat]` in `Project.toml`

@@ -132,6 +132,19 @@ connection-factory method. See [HTTP/2 Backends](@ref) for the full guide.
 AbstractHTTP2Backend
 PureHTTP2Backend
 create_connection
+HTTPjlBackend
+```
+
+### Raised stream-handler contract (HTTP.jl backend)
+
+The HTTP.jl backend requires a higher-level contract than the connection
+factory: the backend owns the serve loop and presents each gRPC call as an
+[`AbstractGRPCStream`](@ref). This contract is introduced for the HTTP.jl
+backend; the request-path integration is in progress.
+
+```@docs
+AbstractGRPCStream
+serve_grpc
 ```
 
 ## HTTP/2 Stream State

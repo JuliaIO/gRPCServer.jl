@@ -37,6 +37,9 @@ using .TestUtils
     include("unit/test_timeout_handling.jl")
     include("unit/test_http2_backend.jl")
 
+    # HTTP/2 backend tests (feature 020)
+    include("backends/test_httpjl_backend.jl")
+
     # Integration tests
     include("integration/test_unary.jl")
     include("integration/test_server_streaming.jl")

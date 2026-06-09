@@ -145,6 +145,9 @@ _HAVE_INTEROP_CERTS = isfile(_INTEROP_SERVER_CERT) && isfile(_INTEROP_SERVER_KEY
                         private_key = _INTEROP_SERVER_KEY,
                     ),
                     enable_health_check = true,
+                    # grpcurl discovers the method via server reflection (no
+                    # protoset is passed), so reflection must be enabled.
+                    enable_reflection = true,
                 )
                 try
                     start!(server)
