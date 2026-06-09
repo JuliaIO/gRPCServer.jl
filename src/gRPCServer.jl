@@ -61,6 +61,9 @@ include("config.jl")
 # 4. HTTP/2 backend abstraction (delegates to PureHTTP2.jl)
 include("http2_backend.jl")
 
+# 4a. PureHTTP2 adapter for the raised AbstractGRPCStream contract (feature 020)
+include("backends/purehttp2.jl")
+
 # 4b. HTTP.jl HTTP/2 backend adapter (feature 020)
 include("backends/httpjl.jl")
 
