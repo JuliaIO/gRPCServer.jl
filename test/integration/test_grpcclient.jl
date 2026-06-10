@@ -320,6 +320,40 @@ end
                         end
                         @test length(got) == 3
                     end
+
+                    @testset "Client streaming over HTTP.jl" begin
+                        client = InteropTestService_CollectRequests_Client("127.0.0.1", ts.port)
+                        request_c = Channel{InteropRequest}(16)
+                        req = grpc_async_request(client, request_c)
+                        for i in Int32(1):Int32(5)
+                            put!(request_c, InteropRequest(i, "item$i"))
+                        end
+                        close(request_c)
+                        response = grpc_async_await(client, req)
+                        @test response.id == Int32(5)
+                        @test response.result == "item1,item2,item3,item4,item5"
+                    end
+
+                    @testset "Bidirectional streaming over HTTP.jl" begin
+                        client = InteropTestService_BiDiExchange_Client("127.0.0.1", ts.port)
+                        request_c = Channel{InteropRequest}(16)
+                        response_c = Channel{InteropResponse}(16)
+                        req = grpc_async_request(client, request_c, response_c)
+                        for i in Int32(1):Int32(5)
+                            put!(request_c, InteropRequest(i, "echo$i"))
+                        end
+                        close(request_c)
+                        responses = InteropResponse[]
+                        for resp in response_c
+                            push!(responses, resp)
+                        end
+                        grpc_async_await(req)
+                        @test length(responses) == 5
+                        for (i, resp) in enumerate(responses)
+                            @test resp.id == Int32(i)
+                            @test resp.result == "echo$i"
+                        end
+                    end
                 end
             end
         end
