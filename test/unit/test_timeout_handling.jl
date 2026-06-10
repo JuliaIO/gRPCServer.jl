@@ -157,7 +157,11 @@ using .ConformanceData
             formatted = gRPCServer.format_grpc_timeout(deadline)
             @test endswith(formatted, "m")
             value = parse(Int, formatted[1:end-1])
-            @test value >= 490 && value <= 510
+            # Some wall-clock elapses between constructing the deadline and
+            # formatting it, so the remaining time is <= 500ms; under CPU load
+            # that gap can be tens of ms. Use a tolerant lower bound to avoid a
+            # flaky failure (the value can never meaningfully exceed 500).
+            @test value >= 450 && value <= 510
         end
 
         @testset "Format past deadline" begin
