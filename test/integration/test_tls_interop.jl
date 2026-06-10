@@ -159,6 +159,30 @@ _HAVE_INTEROP_CERTS = isfile(_INTEROP_SERVER_CERT) && isfile(_INTEROP_SERVER_KEY
                     stop!(server; force = true)
                 end
             end
+
+            @testset "grpcurl -insecure issues a real RPC (HTTP.jl backend)" begin
+                # Same TLS interop, but served by HTTPjlBackend (HTTP.jl owns the
+                # TLS/ALPN handshake and negotiates h2).
+                port = rand(53200:53299)
+                server = GRPCServer("127.0.0.1", port;
+                    http2_backend = HTTPjlBackend(),
+                    tls = TLSConfig(
+                        cert_chain = _INTEROP_SERVER_CERT,
+                        private_key = _INTEROP_SERVER_KEY,
+                    ),
+                    enable_health_check = true,
+                    enable_reflection = true,
+                )
+                try
+                    start!(server)
+                    out = read(pipeline(`grpcurl -insecure -d "{\"service\": \"\"}"
+                        127.0.0.1:$port grpc.health.v1.Health/Check`,
+                        stdin = devnull, stderr = devnull), String)
+                    @test occursin("SERVING", out)
+                finally
+                    stop!(server; force = true)
+                end
+            end
         else
             @warn "Skipping grpcurl interop — grpcurl not found on PATH"
         end

@@ -162,9 +162,11 @@ end
 """
     serve_grpc(::HTTPjlBackend, server, on_call) -> HTTP.Server
 
-Start a non-blocking HTTP.jl HTTP/2 server (cleartext h2c) that invokes
-`on_call(gstream::HTTPjlGRPCStream, peer)` for each incoming request. Returns the
-`HTTP.Server` handle (stored on the GRPCServer and closed by `stop!`).
+Start a non-blocking HTTP.jl HTTP/2 server that invokes
+`on_call(gstream::HTTPjlGRPCStream, peer)` for each incoming request. Serves
+cleartext h2c by default, or TLS (ALPN `h2`) when the server is configured with a
+`TLSConfig`. Returns the `HTTP.Server` handle (stored on the GRPCServer and
+closed by `stop!`).
 """
 function serve_grpc(::HTTPjlBackend, server, on_call)
     handler = function (http_stream)
@@ -173,6 +175,15 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         peer = PeerInfo(IPv4(0), 0)
         on_call(gs, peer)
         return nothing
+    end
+    if server.config.tls !== nothing
+        # HTTP.jl owns the TLS/ALPN handshake. HTTP.jl 2.x is built on Reseau, so
+        # its TLS.Listener is a Reseau.TLS.Listener — build one from the gRPCServer
+        # TLSConfig (with ALPN "h2") using the same helper as the PureHTTP2 path.
+        reseau_cfg = _to_reseau_config(server.config.tls)
+        listener = Reseau.TLS.listen("tcp", string(server.host, ":", server.port),
+                                     reseau_cfg; backlog=128, reuseaddr=true)
+        return HTTP.listen!(handler, listener)
     end
     return HTTP.listen!(handler, server.host, server.port)
 end

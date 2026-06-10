@@ -254,11 +254,11 @@ function start!(server::GRPCServer)
         # Auto-register built-in services if enabled
         register_builtin_services!(server)
 
-        # HTTP.jl backend: HTTP.jl owns the listener/serve loop (non-blocking).
+        # HTTP.jl backend: HTTP.jl owns the listener/serve loop (non-blocking),
+        # including the TLS/ALPN handshake when a TLSConfig is configured.
         if server.http2_backend isa HTTPjlBackend
             if server.config.tls !== nothing
-                server.status = ServerStatus.STOPPED
-                throw(ArgumentError("TLS is not yet supported on HTTPjlBackend; use PureHTTP2Backend() for TLS"))
+                @info "Initializing TLS (HTTP.jl backend)..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
             end
             # serve_grpc (HTTP.listen!) blocks until the listen loop is ready, so
             # only mark RUNNING once the port is actually bound and accepting —
@@ -268,7 +268,7 @@ function start!(server::GRPCServer)
                 (gs, peer) -> dispatch_grpc_call(server, gs, peer),
             )
             server.status = ServerStatus.RUNNING
-            @info "gRPC server started (HTTP.jl backend)" host=server.host port=server.port
+            @info "gRPC server started (HTTP.jl backend)" host=server.host port=server.port tls=(server.config.tls !== nothing)
             return
         end
 
