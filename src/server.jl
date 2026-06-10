@@ -91,7 +91,7 @@ mutable struct GRPCServer
             CompressionCodec.DEFLATE,
             CompressionCodec.IDENTITY
         ],
-        http2_backend::AbstractHTTP2Backend=PureHTTP2Backend()
+        http2_backend::AbstractHTTP2Backend=HTTPjlBackend()
     )
         # Validate host and port
         if port < 1 || port > 65535
@@ -2131,7 +2131,10 @@ function Base.show(io::IO, server::GRPCServer)
     print(io, "GRPCServer($(server.host):$(server.port), status=$(server.status)")
     print(io, ", services=$(length(services(server)))")
     if server.config.tls !== nothing
-        tls_status = server.tls_transport !== nothing ? "active" : "configured"
+        # "active" once TLS is actually serving: PureHTTP2 sets tls_transport,
+        # the HTTP.jl backend sets httpjl_server (it owns its own TLS listener).
+        tls_active = server.tls_transport !== nothing || server.httpjl_server !== nothing
+        tls_status = tls_active ? "active" : "configured"
         print(io, ", TLS=$tls_status")
     end
     print(io, ")")

@@ -319,7 +319,9 @@ end
                 alpn_protocols = ["h2"],
             )
             port = rand(51100:51199)
-            server = GRPCServer("127.0.0.1", port; tls = tls_config)
+            # This exercises the PureHTTP2 TLSTransport accept loop specifically
+            # (server.tls_transport); the HTTP.jl backend owns its own TLS path.
+            server = GRPCServer("127.0.0.1", port; tls = tls_config, http2_backend = PureHTTP2Backend())
             try
                 start!(server)
                 @test server.status == ServerStatus.RUNNING

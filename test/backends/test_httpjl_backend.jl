@@ -33,13 +33,12 @@ using gRPCServer
         @test occursin("PureHTTP2Backend()", msg)
     end
 
-    @testset "backend selection is opt-in (default unchanged for now)" begin
-        # Until serve_grpc(::HTTPjlBackend) is wired in, the default remains
-        # PureHTTP2Backend; HTTPjlBackend is explicitly selectable.
+    @testset "backend selection: HTTP.jl is default, PureHTTP2 is opt-in" begin
+        # HTTP.jl is the default backend; PureHTTP2 is explicitly selectable.
         default_server = GRPCServer("127.0.0.1", 50051)
-        @test default_server.http2_backend isa PureHTTP2Backend
+        @test default_server.http2_backend isa HTTPjlBackend
 
-        httpjl_server = GRPCServer("127.0.0.1", 50051; http2_backend = HTTPjlBackend())
-        @test httpjl_server.http2_backend isa HTTPjlBackend
+        pure_server = GRPCServer("127.0.0.1", 50051; http2_backend = PureHTTP2Backend())
+        @test pure_server.http2_backend isa PureHTTP2Backend
     end
 end
