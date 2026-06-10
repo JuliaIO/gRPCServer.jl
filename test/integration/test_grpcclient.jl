@@ -373,6 +373,31 @@ end
             end
         end
 
+        # =============================================
+        # Feature 020 — US2: two backends serving concurrently in one process
+        # =============================================
+        @testset "Two backends serve independently (US2)" begin
+            with_test_server(; http2_backend=PureHTTP2Backend()) do pure_ts
+                gRPCServer.register_service!(pure_ts.server.dispatcher, make_interop_descriptor())
+                pure_ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
+                with_test_server(; port=52626, http2_backend=HTTPjlBackend()) do http_ts
+                    gRPCServer.register_service!(http_ts.server.dispatcher, make_interop_descriptor())
+                    http_ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
+
+                    @test pure_ts.server.http2_backend isa PureHTTP2Backend
+                    @test http_ts.server.http2_backend isa HTTPjlBackend
+
+                    pure_client = InteropTestService_Echo_Client("127.0.0.1", pure_ts.port)
+                    r1 = grpc_sync_request(pure_client, InteropRequest(Int32(1), "pure"))
+                    @test r1.result == "pure"
+
+                    http_client = InteropTestService_Echo_Client("127.0.0.1", http_ts.port)
+                    r2 = grpc_sync_request(http_client, InteropRequest(Int32(2), "httpjl"))
+                    @test r2.result == "httpjl"
+                end
+            end
+        end
+
     finally
         grpc_shutdown()
     end
