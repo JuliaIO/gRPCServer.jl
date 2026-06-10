@@ -1012,13 +1012,12 @@ function handle_server_streaming(
     response_content_type = get_response_content_type(stream)
 
     # Send response headers first (before any data)
-    response_headers = [
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", response_content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Track status for trailers
     final_status = StatusCode.OK
@@ -1033,10 +1032,7 @@ function handle_server_streaming(
 
         # Create send callback for the ServerStream
         send_callback = function(message, compress)
-            response_data = serialize_message(message)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, serialize_message(message))
         end
 
         # Create close callback (no-op for server streaming, trailers sent after)
@@ -1077,8 +1073,7 @@ function handle_server_streaming(
     if !isempty(final_message)
         push!(trailers, ("grpc-message", final_message))
     end
-    trailer_frames = send_trailers(conn, stream.id, trailers)
-    write_frames(io, trailer_frames)
+    send_trailers!(s, trailers)
 end
 
 """
@@ -1275,17 +1270,16 @@ function handle_bidi_streaming_incremental(
 )
     # Get content-type from request to mirror in response
     response_content_type = get_response_content_type(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
 
     # Check if we need to send headers first (only once per stream)
     if !stream.headers_sent
         stream.headers_sent = true
-        response_headers = [
+        send_response_headers!(s, [
             (":status", "200"),
             ("content-type", response_content_type),
             ("grpc-encoding", "identity"),
-        ]
-        header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-        write_frames(io, header_frames)
+        ])
     end
 
     # Process all complete messages currently in the buffer
@@ -1308,16 +1302,13 @@ function handle_bidi_streaming_incremental(
             if !isempty(message)
                 push!(trailers, ("grpc-message", message))
             end
-            trailer_frames = send_trailers(conn, stream.id, trailers)
-            write_frames(io, trailer_frames)
+            send_trailers!(s, trailers)
             return
         end
 
         # Send response data
         if !isempty(response_data)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, response_data)
         end
     end
 
@@ -1326,8 +1317,7 @@ function handle_bidi_streaming_incremental(
         trailers = [
             ("grpc-status", string(Int(StatusCode.OK))),
         ]
-        trailer_frames = send_trailers(conn, stream.id, trailers)
-        write_frames(io, trailer_frames)
+        send_trailers!(s, trailers)
     end
 end
 
@@ -1360,13 +1350,12 @@ function handle_bidi_streaming(
     response_content_type = get_response_content_type(stream)
 
     # Send response headers first (before any data)
-    response_headers = [
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", response_content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Track status for trailers
     final_status = StatusCode.OK
@@ -1407,10 +1396,7 @@ function handle_bidi_streaming(
                 @warn "Attempted to send message after stream closed" stream_id=stream.id
                 return
             end
-            response_data = serialize_message(message)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, serialize_message(message))
         end
 
         # Create close callback that sends trailers
@@ -1425,8 +1411,7 @@ function handle_bidi_streaming(
             if !isempty(final_message)
                 push!(trailers, ("grpc-message", final_message))
             end
-            trailer_frames = send_trailers(conn, stream.id, trailers)
-            write_frames(io, trailer_frames)
+            send_trailers!(s, trailers)
         end
 
         # Create is_cancelled callback
@@ -1465,8 +1450,7 @@ function handle_bidi_streaming(
         if !isempty(final_message)
             push!(trailers, ("grpc-message", final_message))
         end
-        trailer_frames = send_trailers(conn, stream.id, trailers)
-        write_frames(io, trailer_frames)
+        send_trailers!(s, trailers)
     end
 end
 
