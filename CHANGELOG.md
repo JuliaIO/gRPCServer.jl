@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **HTTP.jl HTTP/2 backend, now the default.** `HTTPjlBackend` serves gRPC over
+  HTTP.jl (≥ 2.1) — cleartext h2c and TLS (ALPN `h2`), across all four RPC types
+  plus server reflection. A `GRPCServer` constructed without naming a backend now
+  uses HTTP.jl; select the previous implementation with
+  `GRPCServer(...; http2_backend = PureHTTP2Backend())`. Observable gRPC behavior
+  is unchanged (the full integration suite passes on both backends).
+- Raised, backend-agnostic HTTP/2 backend contract: `AbstractGRPCStream` (a
+  per-call stream handle with `grpc_path`/`request_metadata`/`read_message!`/
+  `send_response_headers!`/`send_message!`/`send_trailers!`/`reset!`) plus
+  `serve_grpc(backend, server, on_call)`, complementing the existing
+  `create_connection` factory. Both `PureHTTP2Backend` and `HTTPjlBackend`
+  implement it.
 - Pluggable HTTP/2 backend architecture via `AbstractHTTP2Backend` abstract type
-  and `PureHTTP2Backend` default implementation. The `GRPCServer` constructor
-  accepts an `http2_backend` keyword argument to select a backend at construction
-  time. The `create_connection(backend)` method is the single extension point
-  for implementing future backends (e.g., Nghttp2Wrapper.jl, HTTP.jl). See
-  `docs/src/http2-backends.md`.
+  and `PureHTTP2Backend` implementation. The `GRPCServer` constructor accepts an
+  `http2_backend` keyword argument to select a backend at construction time.
+  See `docs/src/http2-backends.md`.
 - New `PureHTTP2.jl` runtime dependency — the externalized HTTP/2 protocol
   implementation (frames, HPACK, streams, flow control, connection management)
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
@@ -68,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
   affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
   pending an upstream fix.
+- `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
+  - Live TLS certificate reload (`reload_tls!`) is not supported.
+  - No configurable max-concurrent-streams limit (HTTP.jl advertises none).
+  Select `PureHTTP2Backend()` if you need either capability.
 
 ### Removed
 - Removed `OpenSSL` from runtime `[deps]` and `[compat]` in `Project.toml`

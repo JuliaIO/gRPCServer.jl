@@ -5,24 +5,41 @@ protocol implementation (frames, HPACK, streams, flow control, connection
 management) is delegated to an external backend package, which is selected
 at server construction time via the `http2_backend` keyword argument.
 
-The default backend is `PureHTTP2Backend`, which uses the
-[PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) package — a
-pure-Julia implementation of RFC 7540 (HTTP/2) and RFC 7541 (HPACK).
+The **default backend is `HTTPjlBackend`**, which serves gRPC over
+[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.1) — cleartext h2c and TLS
+(ALPN `h2`), across all four RPC types plus server reflection. The previous
+backend, `PureHTTP2Backend` (the pure-Julia
+[PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) implementation of
+RFC 7540/7541), remains a fully-supported, opt-in alternative. Observable gRPC
+behavior is identical across backends.
 
 ## Selecting a Backend
 
 ```julia
 using gRPCServer
 
-# Default: uses PureHTTP2Backend
+# Default: uses HTTPjlBackend (HTTP.jl)
 server = GRPCServer("127.0.0.1", 50051)
 
-# Explicit: same as default
+# Opt in to the PureHTTP2 backend
 server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 ```
 
-The selected backend is stored on the server and used to create a new
-HTTP/2 connection for each incoming client.
+### When to choose which
+
+| You need… | Use |
+|-----------|-----|
+| The default, on the widely-used Julia HTTP stack | `HTTPjlBackend` (default) |
+| Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
+| A configurable max-concurrent-streams limit | `PureHTTP2Backend` |
+| A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
+
+!!! note "HTTP.jl backend limitations"
+    Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
+    not support live TLS certificate reload (`reload_tls!`) or a configurable
+    max-concurrent-streams limit. mTLS over TLS 1.2 is also currently broken
+    upstream in Reseau (it works over TLS 1.3). Select `PureHTTP2Backend()` if
+    you need any of these.
 
 ## The Backend Interface
 
