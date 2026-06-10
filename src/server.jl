@@ -1562,13 +1562,11 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
 
     result = lookup_method(server.dispatcher.registry, path)
     if result === nothing
-        # Trailers-only UNIMPLEMENTED.
-        send_response_headers!(gs, [
-            (":status", "200"),
-            ("content-type", content_type),
-            ("grpc-status", string(Int(StatusCode.UNIMPLEMENTED))),
-            ("grpc-message", "Method not found: $path"),
-        ])
+        # UNIMPLEMENTED as headers + trailers (grpc-status in a trailing HEADERS
+        # block) — universally parsed by gRPC clients, so e.g. grpcurl falls back
+        # from reflection v1 to v1alpha cleanly.
+        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Method not found: $path"))
         return nothing
     end
     service, method_desc = result
@@ -1595,34 +1593,39 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         send_trailers!(gs, _grpc_status_trailers(status, message))
 
     elseif mt == MethodType.CLIENT_STREAMING
-        msgs = Vector{UInt8}[]
-        while (m = read_message!(gs)) !== nothing
-            push!(msgs, m)
-        end
-        idx = Ref(1)
+        # Lazy receive: read one request at a time (the client half-closes when done).
         recv_cb = function()
-            idx[] > length(msgs) && return nothing
-            m = deserialize_message(msgs[idx[]], method_desc.input_type)
-            idx[] += 1
-            return m
+            m = read_message!(gs)
+            m === nothing && return nothing
+            return deserialize_message(m, method_desc.input_type)
         end
         cancel_cb = () -> is_cancelled(gs)
         status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
         send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
 
     elseif mt == MethodType.BIDI_STREAMING
-        msgs = Vector{UInt8}[]
-        while (m = read_message!(gs)) !== nothing
-            push!(msgs, m)
-        end
-        idx = Ref(1)
-        recv_cb = function()
-            idx[] > length(msgs) && return nothing
-            m = deserialize_message(msgs[idx[]], method_desc.input_type)
-            idx[] += 1
-            return m
-        end
         send_response_headers!(gs, _grpc_ok_headers(content_type))
+        if service.name == "grpc.reflection.v1alpha.ServerReflection"
+            # Reflection is request-response: handle each request incrementally and
+            # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
+            while (m = read_message!(gs)) !== nothing
+                status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
+                if status != StatusCode.OK
+                    send_trailers!(gs, _grpc_status_trailers(status, message))
+                    return nothing
+                end
+                isempty(resp) || send_message!(gs, resp)
+            end
+            send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
+            return nothing
+        end
+        # User-defined bidi: read each request lazily and emit responses live, so
+        # request-response exchanges are not deadlocked.
+        recv_cb = function()
+            m = read_message!(gs)
+            m === nothing && return nothing
+            return deserialize_message(m, method_desc.input_type)
+        end
         send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
         close_cb = () -> nothing
         cancel_cb = () -> is_cancelled(gs)
@@ -1630,12 +1633,8 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         send_trailers!(gs, _grpc_status_trailers(status, message))
 
     else
-        send_response_headers!(gs, [
-            (":status", "200"),
-            ("content-type", content_type),
-            ("grpc-status", string(Int(StatusCode.UNIMPLEMENTED))),
-            ("grpc-message", "Unsupported method type"),
-        ])
+        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Unsupported method type"))
     end
     return nothing
 end

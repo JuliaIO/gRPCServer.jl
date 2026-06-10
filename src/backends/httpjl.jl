@@ -90,11 +90,9 @@ HTTP.jl backend. The request body is read once (lazily) and drained as gRPC
 length-prefixed messages; this matches the server's existing batch handling of
 client/bidi streaming.
 """
-mutable struct HTTPjlGRPCStream <: AbstractGRPCStream
+struct HTTPjlGRPCStream <: AbstractGRPCStream
     stream::HTTP.Stream
-    _body::Union{Nothing, IOBuffer}
 end
-HTTPjlGRPCStream(s::HTTP.Stream) = HTTPjlGRPCStream(s, nothing)
 
 # --- Request side ---
 
@@ -109,18 +107,20 @@ end
 is_cancelled(s::HTTPjlGRPCStream)::Bool = !isopen(s.stream)
 
 function read_message!(s::HTTPjlGRPCStream)
-    if s._body === nothing
-        # Read the full request body once; for unary/client/bidi (batch mode)
-        # all messages are present after the request completes.
-        s._body = IOBuffer(read(s.stream))
-    end
-    buf = s._body
-    bytesavailable(buf) < 5 && return nothing
-    compressed = read(buf, UInt8)
-    len = (UInt32(read(buf, UInt8)) << 24) | (UInt32(read(buf, UInt8)) << 16) |
-          (UInt32(read(buf, UInt8)) << 8) | UInt32(read(buf, UInt8))
-    bytesavailable(buf) < Int(len) && return nothing
-    return read(buf, Int(len))
+    # Read ONE gRPC length-prefixed message incrementally from the request body.
+    # `read(io, n)` blocks until n bytes arrive (one message) or the client ends
+    # its send side — so request-response bidi (e.g. reflection) is not deadlocked
+    # waiting for the whole body, and responses (live h2 writes) reach the client
+    # between requests.
+    io = s.stream
+    prefix = read(io, 5)
+    length(prefix) < 5 && return nothing  # end of request stream
+    len = (UInt32(prefix[2]) << 24) | (UInt32(prefix[3]) << 16) |
+          (UInt32(prefix[4]) << 8) | UInt32(prefix[5])
+    len == 0 && return UInt8[]
+    msg = read(io, Int(len))
+    length(msg) < Int(len) && return nothing  # truncated
+    return msg
 end
 
 # --- Response side ---
