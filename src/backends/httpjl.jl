@@ -156,3 +156,23 @@ function reset!(s::HTTPjlGRPCStream, code)
     end
     return nothing
 end
+
+# --- Serve loop ---
+
+"""
+    serve_grpc(::HTTPjlBackend, server, on_call) -> HTTP.Server
+
+Start a non-blocking HTTP.jl HTTP/2 server (cleartext h2c) that invokes
+`on_call(gstream::HTTPjlGRPCStream, peer)` for each incoming request. Returns the
+`HTTP.Server` handle (stored on the GRPCServer and closed by `stop!`).
+"""
+function serve_grpc(::HTTPjlBackend, server, on_call)
+    handler = function (http_stream)
+        gs = HTTPjlGRPCStream(http_stream)
+        # Peer extraction from HTTP.jl streams is a future refinement.
+        peer = PeerInfo(IPv4(0), 0)
+        on_call(gs, peer)
+        return nothing
+    end
+    return HTTP.listen!(handler, server.host, server.port)
+end

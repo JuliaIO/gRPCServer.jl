@@ -287,6 +287,43 @@ end
             end
         end  # @static if VERSION >= v"1.12"
 
+        # =============================================
+        # Feature 020 — HTTP.jl backend interoperability (US1)
+        # Same interop service + gRPCClient, served by HTTPjlBackend (h2c).
+        # =============================================
+        @testset "HTTP.jl backend interoperability (US1)" begin
+            # Use a dedicated port outside the random range (50100-50999) the other
+            # tests draw from: gRPCClient's libcurl pools HTTP/2 connections, and a
+            # port previously used by a now-stopped PureHTTP2 server would have a
+            # stale pooled connection that libcurl reuses (→ "Broken pipe" on the
+            # first send, with no client-side retry). A unique port avoids that
+            # cross-test client artifact (the backend itself is fine).
+            with_test_server(; port=52525, http2_backend=HTTPjlBackend()) do ts
+                gRPCServer.register_service!(ts.server.dispatcher, make_interop_descriptor())
+                ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
+
+                @testset "Unary Echo over HTTP.jl" begin
+                    client = InteropTestService_Echo_Client("127.0.0.1", ts.port)
+                    response = grpc_sync_request(client, InteropRequest(Int32(1), "hello"))
+                    @test response.id == Int32(1)
+                    @test response.result == "hello"
+                end
+
+                @static if VERSION >= v"1.12"
+                    @testset "Server streaming over HTTP.jl" begin
+                        client = InteropTestService_StreamResponses_Client("127.0.0.1", ts.port)
+                        ch = Channel{InteropResponse}(16)
+                        grpc_async_request(client, InteropRequest(Int32(3), "msg"), ch)
+                        got = InteropResponse[]
+                        for r in ch
+                            push!(got, r)
+                        end
+                        @test length(got) == 3
+                    end
+                end
+            end
+        end
+
     finally
         grpc_shutdown()
     end

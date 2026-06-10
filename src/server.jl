@@ -64,6 +64,9 @@ mutable struct GRPCServer
     # HTTP/2 backend (pluggable)
     http2_backend::AbstractHTTP2Backend
 
+    # Handle to the HTTP.jl server task when using HTTPjlBackend (nothing otherwise)
+    httpjl_server::Any
+
     function GRPCServer(
         host::String,
         port::Int;
@@ -128,7 +131,8 @@ mutable struct GRPCServer
             Condition(),
             nothing,
             nothing,  # tls_transport - initialized in start!() when TLS configured
-            http2_backend
+            http2_backend,
+            nothing   # httpjl_server - set in start!() for HTTPjlBackend
         )
 
         # Add logging interceptor if requested
@@ -250,6 +254,24 @@ function start!(server::GRPCServer)
         # Auto-register built-in services if enabled
         register_builtin_services!(server)
 
+        # HTTP.jl backend: HTTP.jl owns the listener/serve loop (non-blocking).
+        if server.http2_backend isa HTTPjlBackend
+            if server.config.tls !== nothing
+                server.status = ServerStatus.STOPPED
+                throw(ArgumentError("TLS is not yet supported on HTTPjlBackend; use PureHTTP2Backend() for TLS"))
+            end
+            # serve_grpc (HTTP.listen!) blocks until the listen loop is ready, so
+            # only mark RUNNING once the port is actually bound and accepting —
+            # otherwise a client racing on RUNNING hits a broken pipe.
+            server.httpjl_server = serve_grpc(
+                server.http2_backend, server,
+                (gs, peer) -> dispatch_grpc_call(server, gs, peer),
+            )
+            server.status = ServerStatus.RUNNING
+            @info "gRPC server started (HTTP.jl backend)" host=server.host port=server.port
+            return
+        end
+
         if server.config.tls !== nothing
             @info "Initializing TLS..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
             server.tls_transport = TLSTransport(server.config.tls, server.host, server.port)
@@ -350,6 +372,19 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
     end
 
     @info "Stopping gRPC server" force=force
+
+    # HTTP.jl backend: HTTP.jl owns the listener; close it and finish (the
+    # socket/drain bookkeeping below applies only to the PureHTTP2 accept loop).
+    if server.httpjl_server !== nothing
+        server.status = ServerStatus.STOPPING
+        try
+            close(server.httpjl_server)
+        catch
+        end
+        server.httpjl_server = nothing
+        server.status = ServerStatus.STOPPED
+        return
+    end
 
     if force
         # Immediate shutdown
@@ -1454,6 +1489,155 @@ function handle_bidi_streaming(
         end
         send_trailers!(s, trailers)
     end
+end
+
+# ---------------------------------------------------------------------------
+# Backend-agnostic gRPC call dispatch (feature 020)
+#
+# Drives a single gRPC call against any AbstractGRPCStream using the backend
+# adapter's stream ops + the transport-agnostic dispatch_* orchestrators from
+# dispatch.jl. Used by serve_grpc(::HTTPjlBackend). The PureHTTP2 path keeps
+# using process_stream_request! (with its buffered/streaming-state handling)
+# until that serve loop is migrated too.
+# ---------------------------------------------------------------------------
+
+function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String)::ServerContext
+    md = Dict{String, Union{String, Vector{UInt8}}}()
+    timeout_header = nothing
+    for (name, value) in metadata
+        if name == "grpc-timeout"
+            timeout_header = value
+        end
+        startswith(name, ":") && continue  # skip HTTP/2 pseudo-headers
+        if endswith(name, "-bin")
+            md[name] = Base64.base64decode(value)
+        else
+            md[name] = value
+        end
+    end
+    deadline = timeout_header !== nothing ? parse_grpc_timeout(timeout_header) : nothing
+    return ServerContext(; method=method, peer=peer, deadline=deadline, metadata=md)
+end
+
+function _grpc_response_content_type(metadata)::String
+    for (name, value) in metadata
+        if name == "content-type" && startswith(value, "application/grpc")
+            return value
+        end
+    end
+    return "application/grpc"
+end
+
+_grpc_ok_headers(content_type) = [
+    (":status", "200"),
+    ("content-type", content_type),
+    ("grpc-encoding", "identity"),
+]
+
+function _grpc_status_trailers(status::StatusCode.T, message::String)
+    trailers = [("grpc-status", string(Int(status)))]
+    isempty(message) || push!(trailers, ("grpc-message", message))
+    return trailers
+end
+
+# Unary-shaped response (headers + optional data + trailers) emitted purely
+# through the AbstractGRPCStream ops.
+function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc")
+    send_response_headers!(gs, _grpc_ok_headers(content_type))
+    isempty(data) || send_message!(gs, data)
+    send_trailers!(gs, _grpc_status_trailers(status, message))
+    return nothing
+end
+
+"""
+    dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
+
+Route and execute one gRPC call (any of the four RPC types) using only the
+[`AbstractGRPCStream`](@ref) contract, so it works for any HTTP/2 backend.
+"""
+function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
+    path = grpc_path(gs)
+    metadata = request_metadata(gs)
+    content_type = _grpc_response_content_type(metadata)
+
+    result = lookup_method(server.dispatcher.registry, path)
+    if result === nothing
+        # Trailers-only UNIMPLEMENTED.
+        send_response_headers!(gs, [
+            (":status", "200"),
+            ("content-type", content_type),
+            ("grpc-status", string(Int(StatusCode.UNIMPLEMENTED))),
+            ("grpc-message", "Method not found: $path"),
+        ])
+        return nothing
+    end
+    service, method_desc = result
+    ctx = _grpc_context_from_metadata(metadata, peer, path)
+
+    if server.config.log_requests
+        @info "gRPC request" method=path peer=peer
+    end
+
+    mt = method_desc.method_type
+    if mt == MethodType.UNARY
+        data = read_message!(gs)
+        data === nothing && (data = UInt8[])
+        status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+
+    elseif mt == MethodType.SERVER_STREAMING
+        data = read_message!(gs)
+        data === nothing && (data = UInt8[])
+        send_response_headers!(gs, _grpc_ok_headers(content_type))
+        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        close_cb = () -> nothing
+        status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
+        send_trailers!(gs, _grpc_status_trailers(status, message))
+
+    elseif mt == MethodType.CLIENT_STREAMING
+        msgs = Vector{UInt8}[]
+        while (m = read_message!(gs)) !== nothing
+            push!(msgs, m)
+        end
+        idx = Ref(1)
+        recv_cb = function()
+            idx[] > length(msgs) && return nothing
+            m = deserialize_message(msgs[idx[]], method_desc.input_type)
+            idx[] += 1
+            return m
+        end
+        cancel_cb = () -> is_cancelled(gs)
+        status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+
+    elseif mt == MethodType.BIDI_STREAMING
+        msgs = Vector{UInt8}[]
+        while (m = read_message!(gs)) !== nothing
+            push!(msgs, m)
+        end
+        idx = Ref(1)
+        recv_cb = function()
+            idx[] > length(msgs) && return nothing
+            m = deserialize_message(msgs[idx[]], method_desc.input_type)
+            idx[] += 1
+            return m
+        end
+        send_response_headers!(gs, _grpc_ok_headers(content_type))
+        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        close_cb = () -> nothing
+        cancel_cb = () -> is_cancelled(gs)
+        status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
+        send_trailers!(gs, _grpc_status_trailers(status, message))
+
+    else
+        send_response_headers!(gs, [
+            (":status", "200"),
+            ("content-type", content_type),
+            ("grpc-status", string(Int(StatusCode.UNIMPLEMENTED))),
+            ("grpc-message", "Unsupported method type"),
+        ])
+    end
+    return nothing
 end
 
 """
