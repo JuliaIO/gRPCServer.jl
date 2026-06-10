@@ -309,6 +309,21 @@ end
                     @test response.result == "hello"
                 end
 
+                @testset "Error status propagation over HTTP.jl" begin
+                    # The Fail handler throws GRPCError(StatusCode(req.id), req.payload);
+                    # verifies grpc-status/grpc-message reach the client via trailers.
+                    client = InteropTestService_Fail_Client("127.0.0.1", ts.port)
+                    ex = try
+                        grpc_sync_request(client, InteropRequest(Int32(5), "not found"))
+                        nothing
+                    catch e
+                        e
+                    end
+                    @test ex isa gRPCServiceCallException
+                    @test ex.grpc_status == 5  # NOT_FOUND
+                    @test occursin("not found", ex.message)
+                end
+
                 @static if VERSION >= v"1.12"
                     @testset "Server streaming over HTTP.jl" begin
                         client = InteropTestService_StreamResponses_Client("127.0.0.1", ts.port)
