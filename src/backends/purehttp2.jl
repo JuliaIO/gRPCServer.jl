@@ -69,11 +69,9 @@ end
 
 # --- Incoming messages ---
 
-function read_message!(::PureHTTP2GRPCStream)
-    # The incremental read path (has_complete_grpc_message / peek_data consumption
-    # currently inlined in server.jl's handlers) will be moved here as part of the
-    # dispatch refactor. Defined explicitly so the contract surface is complete and
-    # an accidental early call fails loudly rather than silently mis-dispatching.
-    error("PureHTTP2GRPCStream.read_message! is not wired yet — the dispatch " *
-          "refactor (feature 020) still reads messages via server.jl's frame loop.")
-end
+# Reads one complete, length-prefixed gRPC message from the stream's buffered
+# DATA (handling decompression), or returns `nothing` when no complete message
+# is currently buffered. For client/bidi streaming the server only enters the
+# read loop after END_STREAM, so the full message sequence is already buffered
+# and successive calls drain it until `nothing`.
+read_message!(s::PureHTTP2GRPCStream) = read_grpc_message!(s.stream)

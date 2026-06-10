@@ -947,7 +947,8 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
 
     # Read one gRPC message (for unary/server-streaming this is the request,
     # for client-streaming this is the first of many messages already in buffer)
-    grpc_data = read_grpc_message!(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    grpc_data = read_message!(s)
     if grpc_data === nothing
         grpc_data = UInt8[]
     end
@@ -966,7 +967,7 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
     if method_desc.method_type == MethodType.UNARY
         status, message, response_data = dispatch_unary(server.dispatcher, ctx, grpc_data)
         @debug "gRPC response" status=status response_len=length(response_data)
-        send_grpc_response(PureHTTP2GRPCStream(conn, io, stream), status, message, response_data; content_type=response_content_type)
+        send_grpc_response(s, status, message, response_data; content_type=response_content_type)
 
     elseif method_desc.method_type == MethodType.SERVER_STREAMING
         # Handle server streaming - multiple responses to one request
@@ -1179,6 +1180,7 @@ function handle_client_streaming(
 
     # Get content-type from request to mirror in response
     response_content_type = get_response_content_type(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
 
     # Track status for response
     final_status = StatusCode.OK
@@ -1199,7 +1201,7 @@ function handle_client_streaming(
         # Read all remaining messages from buffer
         # Since end_stream_received is true, all data is already buffered
         while has_complete_grpc_message(stream)
-            msg = read_grpc_message!(stream)
+            msg = read_message!(s)
             if msg !== nothing
                 push!(messages, msg)
             end
@@ -1248,7 +1250,7 @@ function handle_client_streaming(
     end
 
     # Send response with status
-    send_grpc_response(PureHTTP2GRPCStream(conn, io, stream), final_status, final_message, response_data; content_type=response_content_type)
+    send_grpc_response(s, final_status, final_message, response_data; content_type=response_content_type)
 end
 
 """
@@ -1284,7 +1286,7 @@ function handle_bidi_streaming_incremental(
 
     # Process all complete messages currently in the buffer
     while has_complete_grpc_message(stream)
-        grpc_data = read_grpc_message!(stream)
+        grpc_data = read_message!(s)
         if grpc_data === nothing
             break
         end
@@ -1371,7 +1373,7 @@ function handle_bidi_streaming(
 
         # Read all remaining messages from buffer
         while has_complete_grpc_message(stream)
-            msg = read_grpc_message!(stream)
+            msg = read_message!(s)
             if msg !== nothing
                 push!(messages, msg)
             end

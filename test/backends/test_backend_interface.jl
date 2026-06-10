@@ -28,14 +28,20 @@ using gRPCServer
         end
     end
 
-    @testset "read path is explicitly pending (fails loudly, not silently)" begin
-        # The PureHTTP2 read path is not yet moved onto the adapter; calling it
-        # must error clearly rather than mis-dispatch. Build a bare stream/conn
-        # just to exercise dispatch (no I/O performed).
+    @testset "read_message! drains buffered length-prefixed messages" begin
         conn = gRPCServer.HTTP2Connection()
         stream = gRPCServer.HTTP2Stream(1)
         s = gRPCServer.PureHTTP2GRPCStream(conn, IOBuffer(), stream)
         @test s isa gRPCServer.AbstractGRPCStream
-        @test_throws ErrorException gRPCServer.read_message!(s)
+
+        # Empty buffer → no complete message yet.
+        @test gRPCServer.read_message!(s) === nothing
+
+        # Buffer one gRPC length-prefixed message ("hi") and read it back.
+        payload = Vector{UInt8}("hi")
+        write(stream.data_buffer, gRPCServer.encode_grpc_message(payload))
+        @test gRPCServer.read_message!(s) == payload
+        # Buffer drained.
+        @test gRPCServer.read_message!(s) === nothing
     end
 end
