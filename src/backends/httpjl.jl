@@ -70,3 +70,89 @@ struct HTTPjlBackend <: AbstractHTTP2Backend
         return new()
     end
 end
+
+# ---------------------------------------------------------------------------
+# HTTP.jl stream adapter
+#
+# Wraps an `HTTP.Stream` (the object HTTP.jl's stream-handler model hands to the
+# handler) as an AbstractGRPCStream. HTTP.jl owns the request/response lifecycle:
+# the request head is already parsed (`stream.message`), the handler reads the
+# body via `read`, stages the response via `setstatus`/`setheader`, writes body
+# via `write`, appends trailers via `addtrailer`, and HTTP.jl flushes the head
+# and closes the write side after the handler returns.
+# ---------------------------------------------------------------------------
+
+"""
+    HTTPjlGRPCStream <: AbstractGRPCStream
+
+Adapts an `HTTP.Stream` to the [`AbstractGRPCStream`](@ref) contract for the
+HTTP.jl backend. The request body is read once (lazily) and drained as gRPC
+length-prefixed messages; this matches the server's existing batch handling of
+client/bidi streaming.
+"""
+mutable struct HTTPjlGRPCStream <: AbstractGRPCStream
+    stream::HTTP.Stream
+    _body::Union{Nothing, IOBuffer}
+end
+HTTPjlGRPCStream(s::HTTP.Stream) = HTTPjlGRPCStream(s, nothing)
+
+# --- Request side ---
+
+grpc_path(s::HTTPjlGRPCStream)::String = String(s.stream.message.target)
+
+function request_metadata(s::HTTPjlGRPCStream)
+    return [(lowercase(String(k)), String(v)) for (k, v) in s.stream.message.headers]
+end
+
+# HTTP.jl surfaces a client RST/cancel by closing the stream; treat a closed
+# stream as cancelled. (Finer-grained reset detection is a future refinement.)
+is_cancelled(s::HTTPjlGRPCStream)::Bool = !isopen(s.stream)
+
+function read_message!(s::HTTPjlGRPCStream)
+    if s._body === nothing
+        # Read the full request body once; for unary/client/bidi (batch mode)
+        # all messages are present after the request completes.
+        s._body = IOBuffer(read(s.stream))
+    end
+    buf = s._body
+    bytesavailable(buf) < 5 && return nothing
+    compressed = read(buf, UInt8)
+    len = (UInt32(read(buf, UInt8)) << 24) | (UInt32(read(buf, UInt8)) << 16) |
+          (UInt32(read(buf, UInt8)) << 8) | UInt32(read(buf, UInt8))
+    bytesavailable(buf) < Int(len) && return nothing
+    return read(buf, Int(len))
+end
+
+# --- Response side ---
+
+function send_response_headers!(s::HTTPjlGRPCStream, headers)
+    for (k, v) in headers
+        if k == ":status"
+            HTTP.setstatus(s.stream, parse(Int, v))
+        else
+            HTTP.setheader(s.stream, String(k), String(v))
+        end
+    end
+    return nothing
+end
+
+function send_message!(s::HTTPjlGRPCStream, data::AbstractVector{UInt8}; compress::Bool = true)
+    write(s.stream, encode_grpc_message(Vector{UInt8}(data); compressed = false))
+    return nothing
+end
+
+function send_trailers!(s::HTTPjlGRPCStream, trailers)
+    # HTTP.jl emits trailers as a trailing HEADERS block when the write side is
+    # closed (which HTTP.jl does after the handler returns); a trailers-only
+    # response (no prior send_message!) is produced automatically.
+    HTTP.addtrailer(s.stream, [String(k) => String(v) for (k, v) in trailers])
+    return nothing
+end
+
+function reset!(s::HTTPjlGRPCStream, code)
+    try
+        close(s.stream)
+    catch
+    end
+    return nothing
+end
