@@ -11,5 +11,3 @@ Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 # itself). Adjust the paths if your checkouts live elsewhere.
 [sources]
 gRPCServer = {path = ".."}
-gRPCClient = {path = "../../gRPCClient.jl"}
-HTTP = {path = "../../HTTP.jl"}
