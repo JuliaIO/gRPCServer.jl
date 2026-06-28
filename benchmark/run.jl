@@ -111,7 +111,6 @@ function endtoend_bench()
         0;
         h2_initial_window_size = WINDOW,
         h2_connection_window_size = WINDOW,
-        h2_max_buffered_bytes = WINDOW,
     )
     port = HTTP.port(server)
     sleep(0.3)
