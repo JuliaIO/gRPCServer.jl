@@ -406,4 +406,56 @@ end
             close(server)
         end
     end
+
+    @testset "Graceful shutdown does not hang after early-return streaming handler" begin
+        # Documents a known gap: close(server) still hangs when a client-streaming
+        # handler returns before the client half-closes its request stream.
+        #
+        # Root cause (HTTP.jl body_read!): after body_close!() sets body.closed
+        # and notifies the condition, the while-true loop in body_read! wakes
+        # up but re-blocks on wait() without checking body_closed() inside the
+        # loop. gRPCServer's feeder task therefore stays parked in body_read!
+        # indefinitely. The stream remains in the active-states map, the
+        # connection is never classified as idle, and close(server) hangs until
+        # idle_timeout fires (300 s by default) or forceclose is called.
+        #
+        # HTTP.jl v2.5.0 added _maybe_cleanup_h2_server_state! (which would
+        # fix this if stream_done were set), but stream_done is only set by a
+        # client END_STREAM. Because the server sends RST_STREAM CANCEL and
+        # gRPCClient stops uploading without sending END_STREAM, stream_done
+        # stays false and the cleanup never fires.
+        #
+        # Required fix: add `body_closed(body) && return 0` inside body_read!'s
+        # while loop so the feeder unblocks once body_close!() is called.
+        router = gRPCServer.gRPCRouter()
+        handler_returned = Threads.Atomic{Bool}(false)
+        gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC; allow_unstable_streaming = true) do in, ctx
+            first_req = take!(in)
+            handler_returned[] = true
+            TestResponse(UInt64[first_req.test_response_sz])
+        end
+        server = gRPCServer.serve!(router, "127.0.0.1", 0)
+        port = HTTP.port(server)
+        sleep(0.3)
+
+        client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+        request_c = Channel{TestRequest}(4)
+        _req = gRPCClient.grpc_async_request(client, request_c)
+        put!(request_c, TestRequest(7, UInt64[]))
+        # Intentionally do not half-close: the client keeps the request stream
+        # open to simulate a slow producer.
+
+        @test _await_flag(handler_returned, 10)
+
+        # Graceful close — would complete without forceclose once the HTTP.jl
+        # body_read! fix lands. Currently broken: @test_broken documents it.
+        (completed, _) = _bounded(5) do
+            close(server)
+        end
+        @test_broken completed
+
+        # Cleanup regardless of whether close completed.
+        close(request_c)
+        completed || HTTP.forceclose(server)
+    end
 end
