@@ -13,6 +13,7 @@ export TestResponse, TestRequest
 struct TestResponse
     data::Vector{UInt64}
 end
+TestResponse(;data = Vector{UInt64}()) = TestResponse(data)
 PB.default_values(::Type{TestResponse}) = (;data = Vector{UInt64}())
 PB.field_numbers(::Type{TestResponse}) = (;data = 1)
 
@@ -44,6 +45,7 @@ struct TestRequest
     test_response_sz::UInt64
     data::Vector{UInt64}
 end
+TestRequest(;test_response_sz = zero(UInt64), data = Vector{UInt64}()) = TestRequest(test_response_sz, data)
 PB.default_values(::Type{TestRequest}) = (;test_response_sz = zero(UInt64), data = Vector{UInt64}())
 PB.field_numbers(::Type{TestRequest}) = (;test_response_sz = 1, data = 2)
 
@@ -87,7 +89,6 @@ TestService_TestRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
-	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, false}(
 	host, port, "/test.TestService/TestRPC";
 	secure=secure,
@@ -96,7 +97,6 @@ TestService_TestRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
-	token=token,
 )
 export TestService_TestRPC_Client
 
@@ -110,7 +110,6 @@ TestService_TestServerStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
-	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, true}(
 	host, port, "/test.TestService/TestServerStreamRPC";
 	secure=secure,
@@ -119,7 +118,6 @@ TestService_TestServerStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
-	token=token,
 )
 export TestService_TestServerStreamRPC_Client
 
@@ -133,7 +131,6 @@ TestService_TestClientStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
-	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, false}(
 	host, port, "/test.TestService/TestClientStreamRPC";
 	secure=secure,
@@ -142,7 +139,6 @@ TestService_TestClientStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
-	token=token,
 )
 export TestService_TestClientStreamRPC_Client
 
@@ -156,7 +152,6 @@ TestService_TestBidirectionalStreamRPC_Client(
 	keepalive=60,
 	max_send_message_length = 4*1024*1024,
 	max_recieve_message_length = 4*1024*1024,
-	token=nothing,
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, true}(
 	host, port, "/test.TestService/TestBidirectionalStreamRPC";
 	secure=secure,
@@ -165,7 +160,6 @@ TestService_TestBidirectionalStreamRPC_Client(
 	keepalive=keepalive,
 	max_send_message_length=max_send_message_length,
 	max_recieve_message_length=max_recieve_message_length,
-	token=token,
 )
 export TestService_TestBidirectionalStreamRPC_Client
 # gRPCClient.jl END
