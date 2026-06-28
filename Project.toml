@@ -21,13 +21,5 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 gRPCClient = "aaca4a50-36af-4a1d-b878-4c443f2061ad"
 
-# `HTTP` is pinned to the fork branch that adds configurable HTTP/2 flow-control
-# window sizes; `gRPCClient` is a local sibling checkout driving the integration
-# test. Remove these entries (or point them at registered versions) when running
-# CI against the registry.
-[sources]
-HTTP = {url = "https://github.com/csvance/HTTP.jl.git", rev = "http2-window-size-args"}
-gRPCClient = {path = "../gRPCClient.jl"}
-
 [targets]
 test = ["Test", "Sockets", "gRPCClient"]
