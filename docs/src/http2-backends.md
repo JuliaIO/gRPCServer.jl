@@ -41,6 +41,31 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
     upstream in Reseau (it works over TLS 1.3). Select `PureHTTP2Backend()` if
     you need any of these.
 
+## Shutdown Semantics
+
+`stop!` terminates in bounded time on both backends, but the HTTP.jl backend
+needs care because `Base.close(::HTTP.Server)` polls in an unbounded loop until
+every tracked connection reports idle. A client that opens a stream and never
+completes it — HEADERS with no body, or a stream reset mid-call — would block
+that loop forever. `stop!` therefore never relies on it alone:
+
+```julia
+# Immediate: drops in-flight connections via HTTP.forceclose.
+stop!(server; force = true)
+
+# Graceful: lets HTTP.jl drain, then forces after the budget expires.
+stop!(server)                    # budget = HTTPJL_DRAIN_TIMEOUT (10s)
+stop!(server; timeout = 2.0)     # explicit budget
+```
+
+A graceful stop that exhausts its budget logs a warning and forces the close, so
+`stop!` always returns. Pass `force = true` when you do not care about draining —
+in tests, for instance, where it removes the drain wait entirely.
+
+!!! warning "Do not call `close` on the underlying HTTP.jl server"
+    `close(server.httpjl_server)` bypasses this bounding and can hang
+    indefinitely. Always go through `stop!`.
+
 ## The Backend Interface
 
 A backend is any subtype of `AbstractHTTP2Backend` that implements

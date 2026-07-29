@@ -16,6 +16,9 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    # A deadlocked test run must fail fast instead of burning the 6h GitHub
+    # Actions ceiling: the suite completes in well under 10 min when healthy.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +82,7 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       statuses: write

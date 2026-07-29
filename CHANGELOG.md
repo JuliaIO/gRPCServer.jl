@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `PureHTTP2.jl` runtime dependency — the externalized HTTP/2 protocol
   implementation (frames, HPACK, streams, flow control, connection management)
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
+- CI jobs carry an explicit `timeout-minutes` (45 for tests, 30 for docs) so a
+  deadlocked run fails fast instead of burning the 6-hour GitHub Actions ceiling
 - ROADMAP.md with planned improvements
 - CHANGELOG.md for tracking changes
 - SECURITY.md with vulnerability reporting policy and security best practices
@@ -71,6 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty, or non-configured negotiated protocol is now uniformly classified as
   `ALPN_MISMATCH`.
 
+### Fixed
+- **`stop!` no longer hangs indefinitely on the HTTP.jl backend.** Shutdown went
+  through `Base.close(::HTTP.Server)`, which polls in an unbounded `while true`
+  loop until every tracked connection reports idle — so a single connection
+  holding an in-flight stream (HEADERS with no body, or a stream reset mid-call)
+  blocked `stop!` forever. This is what made the Julia 1.10 CI jobs sit until the
+  6-hour GitHub Actions ceiling instead of failing. `stop!(server; force = true)`
+  now uses `HTTP.forceclose`, and a graceful `stop!` bounds the drain by
+  `timeout` (default `HTTPJL_DRAIN_TIMEOUT`, 10s) before forcing. Reproduced and
+  regression-guarded in `test/backends/test_httpjl_backend.jl`. The unbounded loop
+  is in HTTP.jl and is not Julia-version specific — Julia 1.10 merely hits the
+  trigger more often (see Known Issues).
+
 ### Known Issues
 - mTLS client-certificate authentication does not work when a connection
   negotiates **TLS 1.2** with Reseau >= 1.1 (it works over **TLS 1.3**). The
@@ -78,6 +93,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
   affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
   pending an upstream fix.
+- **Intermittent `RST_STREAM CANCEL` on the HTTP.jl backend under Julia 1.10.**
+  A unary call served by `HTTPjlBackend` occasionally fails with
+  `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` when the client is
+  gRPCClient.jl. Not reproduced on Julia 1.12. Root cause not yet identified;
+  what is established so far:
+  - It is not HTTP.jl on its own — a bare HTTP.jl server answering gRPCClient
+    (no gRPCServer code on the server side) is clean on Julia 1.10.
+  - It is not client/server colocation — it also occurs across two processes.
+  - It is timing-sensitive: adding logging to the dispatch path makes it vanish,
+    and it does not correlate reliably with thread count.
+  `PureHTTP2Backend()` has not exhibited it. A minimal reproducer is in
+  `test/repro/httpjl_single_thread_julia110.jl`. Shutdown no longer hangs when
+  this fires (see Fixed), so it now surfaces as a normal test failure.
 - `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
   - Live TLS certificate reload (`reload_tls!`) is not supported.
   - No configurable max-concurrent-streams limit (HTTP.jl advertises none).

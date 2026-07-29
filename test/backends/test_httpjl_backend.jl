@@ -6,6 +6,7 @@
 
 using Test
 using gRPCServer
+using Sockets
 
 @testset "HTTPjlBackend type and capability detection (US4)" begin
     @testset "type surface" begin
@@ -40,5 +41,86 @@ using gRPCServer
 
         pure_server = GRPCServer("127.0.0.1", 50051; http2_backend = PureHTTP2Backend())
         @test pure_server.http2_backend isa PureHTTP2Backend
+    end
+end
+
+@testset "HTTPjlBackend shutdown is bounded" begin
+    # Regression guard for the 6h CI hang: `Base.close(::HTTP.Server)` polls in an
+    # unbounded `while true` loop until every tracked connection reports idle, so a
+    # single connection left with an in-flight stream wedges shutdown forever.
+    # `stop!` must never inherit that: a forced stop has to drop connections, and a
+    # graceful stop has to fall back to a forced one instead of blocking.
+    #
+    # The in-flight stream is created deliberately: HEADERS without END_STREAM and
+    # no DATA, so the server's dispatch blocks reading a request message that never
+    # arrives and the connection can never go idle.
+    function frame(type::UInt8, flags::UInt8, stream_id::UInt32, payload::Vector{UInt8})
+        n = length(payload)
+        return vcat(
+            UInt8[(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, type, flags],
+            UInt8[(stream_id >> 24) & 0xff, (stream_id >> 16) & 0xff,
+                  (stream_id >> 8) & 0xff, stream_id & 0xff],
+            payload,
+        )
+    end
+
+    # Returns how long `stop!` took, or `nothing` if it was still blocked.
+    function time_bounded_stop(; force::Bool, timeout::Float64 = 0.0)
+        port = rand(51500:51899)
+        server = GRPCServer("127.0.0.1", port; http2_backend = HTTPjlBackend())
+        gRPCServer.register_service!(server.dispatcher, ServiceDescriptor(
+            "shutdown.Svc",
+            Dict("Wait" => MethodDescriptor("Wait", MethodType.UNARY,
+                                            Vector{UInt8}, Vector{UInt8},
+                                            (ctx, req) -> req)),
+            nothing))
+        start!(server)
+        sock = Sockets.connect("127.0.0.1", port)
+        try
+            write(sock, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            write(sock, frame(0x04, 0x00, UInt32(0), UInt8[]))            # SETTINGS
+            hdrs = build_headers_frame_payload([
+                (":method", "POST"), (":scheme", "http"),
+                (":path", "/shutdown.Svc/Wait"), (":authority", "127.0.0.1"),
+                ("content-type", "application/grpc"), ("te", "trailers"),
+            ])
+            # END_HEADERS only — deliberately no END_STREAM and no DATA frame.
+            write(sock, frame(0x01, 0x04, UInt32(1), hdrs))
+            flush(sock)
+            sleep(1.0)
+
+            done = Channel{Any}(1)
+            Threads.@spawn begin
+                t0 = time()
+                try
+                    stop!(server; force = force, timeout = timeout)
+                    put!(done, time() - t0)
+                catch e
+                    put!(done, e)
+                end
+            end
+            t0 = time()
+            while !isready(done) && time() - t0 < 20
+                sleep(0.1)
+            end
+            return isready(done) ? take!(done) : nothing
+        finally
+            close(sock)
+        end
+    end
+
+    @testset "forced stop drops in-flight connections" begin
+        elapsed = time_bounded_stop(force = true)
+        @test elapsed !== nothing            # nothing == still wedged after 20s
+        @test elapsed isa Real && elapsed < 5.0
+    end
+
+    @testset "graceful stop falls back to forced within its budget" begin
+        # An explicit drain budget must be honoured: the connection here can never
+        # go idle, so `stop!` has to give up at ~3s rather than poll forever.
+        elapsed = time_bounded_stop(force = false, timeout = 3.0)
+        @test elapsed !== nothing
+        @test elapsed isa Real && elapsed < 10.0
+        @test elapsed isa Real && elapsed >= 3.0
     end
 end

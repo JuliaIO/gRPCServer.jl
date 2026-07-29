@@ -19,6 +19,19 @@ Minimum HTTP.jl version that ships server-side HTTP/2 (required by `HTTPjlBacken
 const HTTPJL_MIN_VERSION = v"2.0.0"
 
 """
+    HTTPJL_DRAIN_TIMEOUT
+
+How long a graceful `stop!` lets HTTP.jl drain in-flight connections before
+falling back to `HTTP.forceclose`, when the caller passes no explicit `timeout`.
+
+`Base.close(::HTTP.Server)` polls in an unbounded `while true` loop until every
+tracked connection reports idle, so a single connection holding an in-flight
+stream blocks shutdown forever. Bounding the drain keeps `stop!` a terminating
+operation regardless of client behavior.
+"""
+const HTTPJL_DRAIN_TIMEOUT = 10.0
+
+"""
     httpjl_supports_http2() -> Bool
 
 Whether the loaded HTTP.jl provides server-side HTTP/2 (HTTP.jl >= $(HTTPJL_MIN_VERSION)

@@ -377,9 +377,38 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
     # socket/drain bookkeeping below applies only to the PureHTTP2 accept loop).
     if server.httpjl_server !== nothing
         server.status = ServerStatus.STOPPING
-        try
-            close(server.httpjl_server)
-        catch
+        httpjl = server.httpjl_server
+        if force
+            # `HTTP.forceclose` drops tracked connections immediately. Plain
+            # `close` must not be used here: it polls in an unbounded loop until
+            # every connection reports idle, so one in-flight stream (a client
+            # that sent HEADERS and no body, or a stream reset mid-call) wedges
+            # shutdown forever.
+            try
+                HTTP.forceclose(httpjl)
+            catch
+            end
+        else
+            # Graceful: let HTTP.jl drain, but bound the wait — then force. This
+            # keeps `stop!` a terminating operation whatever the client does.
+            budget = timeout > 0.0 ? timeout : HTTPJL_DRAIN_TIMEOUT
+            draining = Threads.@spawn begin
+                try
+                    close(httpjl)
+                catch
+                end
+            end
+            t0 = time()
+            while !istaskdone(draining) && time() - t0 < budget
+                sleep(0.05)
+            end
+            if !istaskdone(draining)
+                @warn "HTTP.jl backend did not drain within the shutdown budget; forcing close" budget_seconds=budget
+                try
+                    HTTP.forceclose(httpjl)
+                catch
+                end
+            end
         end
         server.httpjl_server = nothing
         server.status = ServerStatus.STOPPED
