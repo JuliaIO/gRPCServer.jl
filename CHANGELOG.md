@@ -88,6 +88,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
+- **Requests larger than ~64 KB no longer fail on the HTTP.jl backend.**
+  `read_message!` used `read(io, n)`, which reads *at most* `n` bytes: on an
+  HTTP.jl stream it returns whatever is buffered and no more. For a message
+  bigger than the HTTP/2 initial flow-control window it returned after 65 530
+  bytes — immediately, and with `eof` still false — and the short read was
+  treated as a truncated message, capping every request at the window size.
+
+  The window was a coincidence, not the cause: it is simply how much happens to
+  be buffered at that moment. The server does emit `WINDOW_UPDATE` correctly, as
+  a packet capture confirms. `readbytes!(io, buf, n)` does not fix it either —
+  HTTP.jl overrides it and returns short regardless of `all=true` — so
+  `_read_exactly` loops explicitly, using `eof` as the blocking point.
+
+  Verified at 65 535 bytes, 200 KB and 1 MB, all 6/6 where each previously failed;
+  regression-guarded at 64 000 and 200 000 bytes in the interop suite.
 - **TLS tests were silently skipping in CI.** `test/fixtures/certs/` is gitignored,
   so a fresh checkout — every CI run — had no certificates and each TLS testset
   skipped itself with a warning while the job still reported success. That hid the
@@ -160,27 +175,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and 1.12 with a client that leaves a stream in flight.
 
 ### Known Issues
-- **Request messages larger than ~64 KB fail, on both backends and both Julia
-  versions.** A unary request whose body reaches the HTTP/2 initial
-  flow-control window (65535 bytes) never completes. Bisected precisely: a
-  65 000-byte request succeeds, 65 535 fails. Measured with the server in its own
-  process, 6-8 calls per cell:
-
-  | Julia | backend | 200 KB request → 9 B response |
-  |-------|---------|-------------------------------|
-  | 1.10  | HTTP.jl | `CANCEL` ×6 |
-  | 1.10  | PureHTTP2 | `DEADLINE_EXCEEDED` ×6 |
-  | 1.12  | HTTP.jl | `CANCEL` ×6 |
-  | 1.12  | PureHTTP2 | hangs |
-
-  The **response** direction is unaffected: 9-byte request → 200 KB response
-  succeeds 24/24 across both Julia versions on the HTTP.jl backend. This is
-  therefore about the server never enlarging the client's send window, not about
-  emitting large payloads. Pre-existing and not introduced by the HTTP.jl backend;
-  it went unnoticed because the largest payload in the test suite is 10 KB, just
-  under the threshold. Root cause (which side owes the `WINDOW_UPDATE`) not yet
-  identified. Since the fix above, this surfaces as `INTERNAL` or a cancelled
-  stream rather than a silently truncated success.
+- **Request messages larger than ~64 KB fail on `PureHTTP2Backend`.** A unary
+  request of 65 000 bytes mostly times out (1 of 6 calls succeeded) and 200 KB
+  fails outright with `DEADLINE_EXCEEDED`. `HTTPjlBackend`, the default, is fixed
+  (see below) — this is the same class of defect in PureHTTP2's own
+  `read_grpc_message!` path, which has not been investigated yet. Requests up to
+  ~64 KB are unaffected on both backends.
 - mTLS client-certificate authentication does not work when a connection
   negotiates **TLS 1.2** with Reseau >= 1.1 (it works over **TLS 1.3**). The
   client certificate is not presented during a TLS 1.2 handshake — an upstream

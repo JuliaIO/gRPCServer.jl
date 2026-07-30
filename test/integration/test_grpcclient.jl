@@ -58,6 +58,22 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                     @test response.result == large_payload
                     @test length(response.result) == 10_000
                 end
+
+                @testset "Request larger than the HTTP/2 flow-control window" begin
+                    # `Base.read(io, n)` reads *at most* n bytes. On a request
+                    # bigger than the 65535-byte initial flow-control window it
+                    # returns short — immediately, and not at end-of-stream — so a
+                    # single read() cannot deliver the message. Sizes are chosen to
+                    # straddle that boundary: 64_000 fits inside the window and
+                    # always worked; 200_000 needs several reads.
+                    for size in (64_000, 200_000)
+                        payload = repeat("z", size)
+                        client = InteropTestService_Echo_Client("127.0.0.1", ts.port)
+                        response = grpc_sync_request(client, InteropRequest(Int32(4), payload))
+                        @test length(response.result) == size
+                        @test response.result == payload
+                    end
+                end
             end
 
             # US6 — Compression (compression_enabled=true is the default)

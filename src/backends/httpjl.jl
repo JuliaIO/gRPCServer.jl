@@ -119,21 +119,54 @@ end
 # stream as cancelled. (Finer-grained reset detection is a future refinement.)
 is_cancelled(s::HTTPjlGRPCStream)::Bool = !isopen(s.stream)
 
+"""
+    _read_exactly(io, n) -> Union{Vector{UInt8}, Nothing}
+
+Read exactly `n` bytes, or return `nothing` if the stream ends first.
+
+`Base.read(io, n)` reads *at most* `n` bytes: on an HTTP.jl stream it returns as
+much as is currently buffered and no more. For a request larger than the HTTP/2
+initial flow-control window (65535 bytes) that means it returns immediately with
+~65530 bytes, `eof` still false, and the rest of the message still in flight.
+Treating that short read as a truncated message capped every request at the
+window size — the "requests over ~64KB fail" limit.
+
+`readbytes!(io, buf, n)` does not help: HTTP.jl overrides it and returns short
+just the same, `all=true` notwithstanding. Hence the explicit loop, with `eof` as
+the blocking point — it waits for more body or a genuine end of stream.
+"""
+function _read_exactly(io, n::Int)
+    n == 0 && return UInt8[]
+    buf = Vector{UInt8}(undef, n)
+    off = 0
+    while off < n
+        # `eof` is the blocking point: it waits until more of the body arrives or
+        # the stream really ends. Without it this would spin on an empty buffer.
+        eof(io) && return nothing
+        chunk = read(io, n - off)
+        isempty(chunk) && return nothing
+        copyto!(buf, off + 1, chunk, 1, length(chunk))
+        off += length(chunk)
+    end
+    return buf
+end
+
 function read_message!(s::HTTPjlGRPCStream)
-    # Read ONE gRPC length-prefixed message incrementally from the request body.
-    # `read(io, n)` blocks until n bytes arrive (one message) or the client ends
-    # its send side — so request-response bidi (e.g. reflection) is not deadlocked
-    # waiting for the whole body, and responses (live h2 writes) reach the client
+    # Read ONE gRPC length-prefixed message from the request body, waiting only
+    # for that message — so request-response bidi (e.g. reflection) is not
+    # deadlocked waiting for the whole body, and responses reach the client
     # between requests.
+    #
+    # `_read_exactly` rather than `read(io, n)`: the latter reads *at most* n
+    # bytes and returns short as soon as the buffer runs dry, which caps messages
+    # at the HTTP/2 flow-control window. See its docstring.
     io = s.stream
-    prefix = read(io, 5)
-    length(prefix) < 5 && return nothing  # end of request stream
+    prefix = _read_exactly(io, 5)
+    prefix === nothing && return nothing  # end of request stream
     len = (UInt32(prefix[2]) << 24) | (UInt32(prefix[3]) << 16) |
           (UInt32(prefix[4]) << 8) | UInt32(prefix[5])
     len == 0 && return UInt8[]
-    msg = read(io, Int(len))
-    length(msg) < Int(len) && return nothing  # truncated
-    return msg
+    return _read_exactly(io, Int(len))    # nothing if the stream ended early
 end
 
 # --- Response side ---
