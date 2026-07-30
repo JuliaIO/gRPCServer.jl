@@ -1578,6 +1578,15 @@ function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T
     return nothing
 end
 
+# A backend reports "no complete request message" as `nothing` — the stream ended
+# before a message arrived, or it stalled mid-body (for instance a request larger
+# than the HTTP/2 flow-control window). Unary and server-streaming RPCs each
+# require exactly one complete request message, so this must fail the call.
+# Substituting an empty message instead would run the handler against a
+# default-constructed request and return a successful, silently wrong response.
+const _INCOMPLETE_REQUEST_MESSAGE =
+    "Incomplete request message: the client's request message did not arrive in full"
+
 """
     dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
 
@@ -1608,13 +1617,21 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
     mt = method_desc.method_type
     if mt == MethodType.UNARY
         data = read_message!(gs)
-        data === nothing && (data = UInt8[])
+        if data === nothing
+            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                       UInt8[]; content_type=content_type)
+            return nothing
+        end
         status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
         send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
 
     elseif mt == MethodType.SERVER_STREAMING
         data = read_message!(gs)
-        data === nothing && (data = UInt8[])
+        if data === nothing
+            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                       UInt8[]; content_type=content_type)
+            return nothing
+        end
         send_response_headers!(gs, _grpc_ok_headers(content_type))
         send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
         close_cb = () -> nothing

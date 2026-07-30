@@ -9,7 +9,14 @@ using gRPCClient
 
 # Generated protobuf types and the client stubs. The service handlers live in
 # grpcclient/interop_service.jl and are loaded by the server process only.
-include(joinpath(@__DIR__, "grpcclient", "generated", "interop", "interop.jl"))
+#
+# Guarded: test/backends/test_backend_interface.jl loads the same module and
+# runtests.jl includes both into this namespace. Including it twice defines two
+# distinct `Main.interop` modules, and two `using .interop` then make
+# `InteropRequest` ambiguous (an error on Julia 1.12).
+if !isdefined(@__MODULE__, :interop)
+    include(joinpath(@__DIR__, "grpcclient", "generated", "interop", "interop.jl"))
+end
 using .interop
 include(joinpath(@__DIR__, "grpcclient", "client_stubs.jl"))
 include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))

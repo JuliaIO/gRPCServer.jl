@@ -74,6 +74,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
+- **A truncated request message no longer produces a silently wrong success
+  response.** Backends report "no complete request message" as `nothing` from
+  `read_message!` — the stream ended before a message arrived, or it stalled
+  mid-body. For unary and server-streaming calls, `dispatch_grpc_call`
+  substituted an empty message and ran the handler on it, so proto3's
+  decode-empty-to-defaults behaviour produced a valid-looking response built from
+  a default-constructed request. Observed end to end: a 100 KB unary echo
+  returned `grpc-status 0` with a **zero-length** payload. Both calls now fail
+  with `INTERNAL` and an explicit message instead. This affected both backends,
+  since the substitution was in the shared dispatch path.
 - **gRPCClient interop tests now run the server out of process.** They used to
   colocate server and client in the test process, which is the one configuration
   that trips the Julia 1.10 `CANCEL` issue below — so the whole interop suite
@@ -99,6 +109,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trigger more often (see Known Issues).
 
 ### Known Issues
+- **Request messages larger than ~64 KB fail, on both backends and both Julia
+  versions.** A unary request whose body reaches the HTTP/2 initial
+  flow-control window (65535 bytes) never completes. Bisected precisely: a
+  65 000-byte request succeeds, 65 535 fails. Measured with the server in its own
+  process, 6-8 calls per cell:
+
+  | Julia | backend | 200 KB request → 9 B response |
+  |-------|---------|-------------------------------|
+  | 1.10  | HTTP.jl | `CANCEL` ×6 |
+  | 1.10  | PureHTTP2 | `DEADLINE_EXCEEDED` ×6 |
+  | 1.12  | HTTP.jl | `CANCEL` ×6 |
+  | 1.12  | PureHTTP2 | hangs |
+
+  The **response** direction is unaffected: 9-byte request → 200 KB response
+  succeeds 24/24 across both Julia versions on the HTTP.jl backend. This is
+  therefore about the server never enlarging the client's send window, not about
+  emitting large payloads. Pre-existing and not introduced by the HTTP.jl backend;
+  it went unnoticed because the largest payload in the test suite is 10 KB, just
+  under the threshold. Root cause (which side owes the `WINDOW_UPDATE`) not yet
+  identified. Since the fix above, this surfaces as `INTERNAL` or a cancelled
+  stream rather than a silently truncated success.
 - mTLS client-certificate authentication does not work when a connection
   negotiates **TLS 1.2** with Reseau >= 1.1 (it works over **TLS 1.3**). The
   client certificate is not presented during a TLS 1.2 handshake — an upstream
