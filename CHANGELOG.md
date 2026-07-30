@@ -74,28 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
-- **The HTTP.jl backend no longer cancels streams it has already completed.**
-  `read_message!` reads exactly the 5-byte gRPC prefix plus the declared message
-  length, so a unary or server-streaming call stopped short of EOF even though the
-  client had already sent END_STREAM. HTTP.jl treats an undrained request body at
-  handler return as an abandoned request and emitted `RST_STREAM(CANCEL)` — *after*
-  it had already closed the stream with END_STREAM on the trailers. nghttp2/libcurl
-  then reported `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` whenever it
-  processed that reset before finalising the response. `serve_grpc` now drains the
-  request body before returning.
-
-  Confirmed on the wire (`tshark`, h2c): 128 server-sent `RST_STREAM err=CANCEL`
-  frames across 200 calls, each ~11µs after the trailers that had already ended the
-  stream, absent on streams that succeeded. Measured on Julia 1.10 single-threaded,
-  200 sequential unary calls with a fresh client each: 15-55 failures per run
-  before, 0 after — and the in-process configuration went from 0/12 (total failure)
-  to 12/12. Regression-guarded by a 150-call loop in
-  `test/integration/test_grpcclient.jl`, which fails in ~1.7s without the drain.
-
-  This was the "Julia 1.10 CANCEL issue" tracked here through several releases of
-  this changelog. It was neither an HTTP.jl bug nor a gRPCClient bug, and not
-  Julia-version specific in nature — 1.10's scheduling merely made HTTP.jl reach
-  the undrained-body check far more often (0/200 failures on 1.12, 55/200 on 1.10).
 - **A truncated request message no longer produces a silently wrong success
   response.** Backends report "no complete request message" as `nothing` from
   `read_message!` — the stream ended before a message arrived, or it stalled
@@ -107,10 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `INTERNAL` and an explicit message instead. This affected both backends,
   since the substitution was in the shared dispatch path.
 - **gRPCClient interop tests now run the server out of process.** They used to
-  colocate server and client in the test process, which was the configuration that
-  hit the spurious-`CANCEL` bug above hardest (0/12 calls succeeded) — so the whole
-  interop suite failed on the LTS. The root cause is fixed, but the split is kept:
-  it also exercises the shape users actually deploy. `test/integration/grpcclient/remote_harness.jl` launches the
+  colocate server and client in the test process, which is the one configuration
+  that trips the Julia 1.10 `CANCEL` issue below — so the whole interop suite
+  failed on the LTS. `test/integration/grpcclient/remote_harness.jl` launches the
   server as a child Julia process (`with_remote_server`), the handlers moved to
   `interop_service.jl` (loaded by the server process only), and the child reports
   the backend it constructed so the two-backend assertions still hold without
@@ -128,8 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses `HTTP.forceclose`, and a graceful `stop!` bounds the drain by
   `timeout` (default `HTTPJL_DRAIN_TIMEOUT`, 10s) before forcing. Reproduced and
   regression-guarded in `test/backends/test_httpjl_backend.jl`. The unbounded loop
-  is in HTTP.jl and is not Julia-version specific: reproduced identically on 1.10
-  and 1.12 with a client that leaves a stream in flight.
+  is in HTTP.jl and is not Julia-version specific — Julia 1.10 merely hits the
+  trigger more often (see Known Issues).
 
 ### Known Issues
 - **Request messages larger than ~64 KB fail, on both backends and both Julia
@@ -159,6 +136,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
   affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
   pending an upstream fix.
+- **`RST_STREAM CANCEL` on the HTTP.jl backend under Julia 1.10.** Unary calls
+  served by `HTTPjlBackend` fail with
+  `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` when the client is
+  gRPCClient.jl. Measured over 12 sequential calls per run against one server:
+
+  | Julia | threads | backend | result |
+  |-------|---------|---------|--------|
+  | 1.10  | 1       | HTTP.jl | 0/12 (two runs, 24 consecutive failures) |
+  | 1.10  | 2       | HTTP.jl | 7/12 – 9/12 |
+  | 1.10  | 1       | PureHTTP2 | 12/12 |
+  | 1.12  | 1       | HTTP.jl | 12/12 |
+
+  So it is total under a single thread on the LTS, partial with more threads, and
+  absent on 1.12 and on PureHTTP2.
+
+  **It requires client and server to share one process.** With the server in one
+  process and the client in another, both Julia 1.10 single-threaded, 24 of 24
+  calls succeed. A server process on its own is therefore not affected — what is
+  affected is the in-process test configuration, which is also what `Pkg.test()`
+  produces (it runs single-threaded).
+
+  Root cause not yet identified. Established:
+  - Not HTTP.jl on its own — a bare HTTP.jl server answering gRPCClient (no
+    gRPCServer code server-side) is clean on Julia 1.10.
+  - Not the blocking `read` in `read_message!`: inserting a `sleep(0.001)` on the
+    *response* path (`send_trailers!`) recovers 8/8 just as well as inserting one
+    before the read, while a bare `yield()` before the read recovers only 1/8. So
+    what matters is parking the handler task on a libuv timer at all, not where in
+    the call it happens — and it is not the read that wedges.
+  - Not fixed by gRPCClient.jl PR #127 (which targets request-streaming
+    pause/resume): 0/12 both with and without it.
+  - HTTP.jl 2.x drives I/O through Reseau's own epoll poller while gRPCClient
+    drives libcurl from libuv `Timer` callbacks; two event loops in one
+    single-threaded process is the leading hypothesis, not a confirmed cause.
+
+  A minimal reproducer is in `test/repro/httpjl_single_thread_julia110.jl`.
+  Shutdown no longer hangs when this fires (see Fixed), and the interop tests no
+  longer colocate client and server, so the test suite is unaffected. The
+  underlying issue is still open: anyone embedding a gRPCClient client in the same
+  single-threaded process as an HTTP.jl-backed server on Julia 1.10 will hit it.
+  Workarounds: run the server in its own process, use more than one thread (partial
+  — 7-9/12), select `PureHTTP2Backend()`, or run Julia 1.12+.
 - `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
   - Live TLS certificate reload (`reload_tls!`) is not supported.
   - No configurable max-concurrent-streams limit (HTTP.jl advertises none).

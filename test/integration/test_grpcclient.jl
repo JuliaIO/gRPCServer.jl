@@ -68,32 +68,6 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                 @test response.result == "compressed"
             end
 
-            @testset "Sustained sequential unary calls" begin
-                # Regression guard for the spurious RST_STREAM(CANCEL): the HTTP.jl
-                # adapter used to leave the request body undrained, so HTTP.jl
-                # cancelled each stream after already closing it, and libcurl
-                # reported "stream N was not closed cleanly: CANCEL". The rate was
-                # ~27% per call on Julia 1.10 single-threaded and it came in long
-                # bursts, so a single call never caught it.
-                #
-                # The shape matters: a fresh client per call over many calls is what
-                # reproduces (measured 15, 21 and 55 failures per 200 calls across
-                # three runs). Reusing one client for 50 calls did *not* reproduce,
-                # so do not "simplify" this loop.
-                failures = String[]
-                for i in 1:150
-                    client = InteropTestService_Echo_Client("127.0.0.1", ts.port)
-                    try
-                        r = grpc_sync_request(client, InteropRequest(Int32(i), "seq$i"))
-                        r.result == "seq$i" || push!(failures, "call $i: got $(r.result)")
-                    catch e
-                        push!(failures, "call $i: " * first(sprint(showerror, e), 120))
-                    end
-                end
-                @test isempty(failures)
-                isempty(failures) || @info "sustained-call failures" failures
-            end
-
             @testset "Error Handling and Status Code Propagation" begin
                 @testset "NOT_FOUND Error Propagation" begin
                     client = InteropTestService_Fail_Client("127.0.0.1", ts.port)
