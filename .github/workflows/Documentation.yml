@@ -1,0 +1,51 @@
+# Builds and deploys the manual.
+#
+# This lived as a `docs:` job inside CI.yml, which dated from the initial
+# implementation. Split out to match PureHTTP2.jl and Nghttp2Wrapper.jl, and so
+# that a docs run no longer shares CI.yml's concurrency group: pushing to a pull
+# request cancelled the in-flight docs build along with the test matrix, even
+# when the push touched no documentation.
+#
+# Triggers are deliberately identical to CI.yml's, so the split changes nothing
+# about *when* the manual is built. deploydocs only publishes from `develop`
+# (devbranch in docs/make.jl) and from tags; other runs build and discard, which
+# is what makes this a useful pull-request check.
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags: ['*']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  docs:
+    name: Build and deploy Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # required for the gh-pages push by Documenter.deploydocs
+      statuses: write   # reports the deploy status back to the commit
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v3
+      - name: Configure doc environment
+        run: |
+          julia --project=docs -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path=pwd()))
+            Pkg.instantiate()'
+      - name: Build and deploy docs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+        run: julia --project=docs docs/make.jl
