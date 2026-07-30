@@ -30,9 +30,21 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 | You need… | Use |
 |-----------|-----|
 | The default, on the widely-used Julia HTTP stack | `HTTPjlBackend` (default) |
+| Request bodies larger than ~64 KB | `HTTPjlBackend` — see below |
 | Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
 | A configurable max-concurrent-streams limit | `PureHTTP2Backend` |
 | A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
+
+!!! warning "PureHTTP2 does not accept large request bodies"
+    A unary request whose body exceeds the HTTP/2 initial flow-control window
+    (65535 bytes) does not complete on `PureHTTP2Backend`: the stream is reset
+    and the request never reaches the handler. Requests up to ~64 KB are
+    unaffected, as are responses of any size.
+
+    This is the one area where the two backends differ in what they can carry
+    rather than in which features they expose, so weigh it against the
+    capabilities listed above. `HTTPjlBackend` handles request bodies of any
+    size within `max_message_size`.
 
 !!! note "HTTP.jl backend limitations"
     Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
@@ -68,9 +80,44 @@ in tests, for instance, where it removes the drain wait entirely.
 
 ## The Backend Interface
 
-A backend is any subtype of `AbstractHTTP2Backend` that implements
-`create_connection`. The factory must return a connection object
-compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting
+There are two contracts. A backend implements whichever suits the library it
+wraps.
+
+### The raised contract: `AbstractGRPCStream` and `serve_grpc`
+
+The preferred one, and what `HTTPjlBackend` uses. The backend owns its listener
+and serve loop, and adapts each in-flight call to a per-call stream handle:
+
+```julia
+serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, peer)
+```
+
+`on_call` receives an `AbstractGRPCStream`, on which the backend implements:
+
+| Direction | Methods |
+|-----------|---------|
+| Request   | `grpc_path`, `request_metadata`, `read_message!`, `is_cancelled` |
+| Response  | `send_response_headers!`, `send_message!`, `send_trailers!`, `reset!` |
+| Teardown  | `drain_request!` (optional; defaults to a no-op) |
+
+This contract carries no assumption about the underlying HTTP/2 types, so a
+backend wrapping a foreign library — a C binding, or another Julia HTTP stack —
+does not have to imitate PureHTTP2.jl's object model.
+
+`read_message!` returns one complete gRPC message, or `nothing` when no complete
+message will arrive. Returning `nothing` for a unary or server-streaming call
+fails it with `INTERNAL`; it is not a silent empty request.
+
+`drain_request!` exists because a backend may treat an unread request body at
+handler return as an abandoned request. It is called only after RPCs that read
+exactly one message, where the client has already half-closed — never on
+client- or bidirectional-streaming calls, where a peer may legitimately hold its
+send side open.
+
+### The connection-factory contract: `create_connection`
+
+The original one, used by `PureHTTP2Backend`. The factory returns a connection
+object compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting
 the following operations:
 
 | Category         | Methods                                                                 |
@@ -107,26 +154,45 @@ end
 server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
 ```
 
-For backends that wrap a different HTTP/2 library (e.g., a C binding
-like `nghttp2`, or a higher-level Julia package), the backend is
-responsible for adapting the underlying types to match the
-`HTTP2Connection` field interface. The connection-factory pattern
-means gRPCServer.jl calls `create_connection` once per client; the
-returned object is then used directly through PureHTTP2.jl's API, so
-no per-request indirection is added.
+The connection-factory pattern means gRPCServer.jl calls `create_connection`
+once per client; the returned object is then used directly through
+PureHTTP2.jl's API, so no per-request indirection is added. The cost is that the
+backend must adapt its underlying types to the `HTTP2Connection` field
+interface.
+
+For a backend wrapping a different HTTP/2 library — a C binding such as
+`nghttp2`, or another Julia HTTP stack — prefer the raised contract instead:
+
+```julia
+struct MyBackend <: AbstractHTTP2Backend end
+
+function gRPCServer.serve_grpc(::MyBackend, server, on_call)
+    # Start the library's own listener; for each incoming call, wrap it as an
+    # AbstractGRPCStream and hand it to on_call(stream, peer).
+    # Return whatever handle stop! should close.
+end
+
+# plus the AbstractGRPCStream methods for that stream type
+```
+
+That is how `HTTPjlBackend` is built, and it avoids having to imitate
+PureHTTP2.jl's object model in a library that has its own.
 
 ## Future Backends
 
-The architecture is designed to support additional backends such as:
+HTTP.jl was the future backend in earlier versions of this page; its HTTP/2
+support has since landed and it is now the default.
 
-- [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) — wraps
-  the mature `nghttp2` C library via `nghttp2_jll`
-- HTTP.jl — when its HTTP/2 support
-  ([PR #1248](https://github.com/JuliaWeb/HTTP.jl/pull/1248)) lands
+The remaining candidate is
+[Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl), wrapping the
+`nghttp2` C library via `nghttp2_jll`. The argument for it is concrete: the two
+current backends have independent protocol-level defects — stream teardown on
+one, request-side flow control on the other — and a mature C implementation
+would move that surface out of this project's maintenance scope.
 
-Both would require an adapter layer in their respective backend packages
-to expose the expected `HTTP2Connection` interface, but no changes to
-gRPCServer.jl itself.
+It would implement the raised `AbstractGRPCStream` contract rather than the
+connection factory, since it has no reason to imitate PureHTTP2.jl's object
+model. No change to gRPCServer.jl itself is needed either way.
 
 ## API Reference
 
