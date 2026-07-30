@@ -74,6 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
+- **gRPCClient interop tests now run the server out of process.** They used to
+  colocate server and client in the test process, which is the one configuration
+  that trips the Julia 1.10 `CANCEL` issue below — so the whole interop suite
+  failed on the LTS. `test/integration/grpcclient/remote_harness.jl` launches the
+  server as a child Julia process (`with_remote_server`), the handlers moved to
+  `interop_service.jl` (loaded by the server process only), and the child reports
+  the backend it constructed so the two-backend assertions still hold without
+  sharing objects. Ports are never reused within a run: libcurl pools HTTP/2
+  connections per host:port, and reusing a dead port's pool makes the next first
+  request fail with "Send failure: Broken pipe". These tests now also exercise the
+  shape users actually deploy — a server process talking to a client elsewhere —
+  and cover PureHTTP2 parity, which was previously untested here.
 - **`stop!` no longer hangs indefinitely on the HTTP.jl backend.** Shutdown went
   through `Base.close(::HTTP.Server)`, which polls in an unbounded `while true`
   loop until every tracked connection reports idle — so a single connection
@@ -129,8 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     single-threaded process is the leading hypothesis, not a confirmed cause.
 
   A minimal reproducer is in `test/repro/httpjl_single_thread_julia110.jl`.
-  Shutdown no longer hangs when this fires (see Fixed), so it now surfaces as a
-  normal test failure rather than a 6-hour CI timeout.
+  Shutdown no longer hangs when this fires (see Fixed), and the interop tests no
+  longer colocate client and server, so the test suite is unaffected. The
+  underlying issue is still open: anyone embedding a gRPCClient client in the same
+  single-threaded process as an HTTP.jl-backed server on Julia 1.10 will hit it.
+  Workarounds: run the server in its own process, use more than one thread (partial
+  — 7-9/12), select `PureHTTP2Backend()`, or run Julia 1.12+.
 - `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
   - Live TLS certificate reload (`reload_tls!`) is not supported.
   - No configurable max-concurrent-streams limit (HTTP.jl advertises none).

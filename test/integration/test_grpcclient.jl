@@ -1,114 +1,31 @@
 # Integration tests for gRPCClient.jl interoperability
 # Tests end-to-end gRPC communication between gRPCServer.jl and gRPCClient.jl
+#
+# The server runs in a SEPARATE PROCESS — see grpcclient/remote_harness.jl for
+# the measurements that forced that split. This file only ever runs clients.
 
 using Test
-using gRPCServer
 using gRPCClient
 
-# Load generated protobuf types
+# Generated protobuf types and the client stubs. The service handlers live in
+# grpcclient/interop_service.jl and are loaded by the server process only.
 include(joinpath(@__DIR__, "grpcclient", "generated", "interop", "interop.jl"))
 using .interop
-
-# Load client stubs
 include(joinpath(@__DIR__, "grpcclient", "client_stubs.jl"))
+include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
 
 # TestUtils is included once in runtests.jl to avoid method redefinition warnings
-
-# --- Handler definitions ---
-
-function echo_handler(ctx::ServerContext, req::InteropRequest)::InteropResponse
-    InteropResponse(req.id, req.payload)
-end
-
-function fail_handler(ctx::ServerContext, req::InteropRequest)::InteropResponse
-    throw(GRPCError(StatusCode.T(req.id), req.payload))
-end
-
-function unhandled_error_handler(ctx::ServerContext, req::InteropRequest)::InteropResponse
-    error("unexpected internal error")
-end
-
-function stream_responses_handler(ctx::ServerContext, req::InteropRequest, stream)
-    for i in Int32(1):req.id
-        send!(stream, InteropResponse(i, "$(req.payload)-$i"))
-    end
-    return nothing
-end
-
-function collect_requests_handler(ctx::ServerContext, stream)
-    count = Int32(0)
-    payloads = String[]
-    for msg in stream
-        count += Int32(1)
-        push!(payloads, msg.payload)
-    end
-    return InteropResponse(count, join(payloads, ","))
-end
-
-function bidi_exchange_handler(ctx::ServerContext, stream)
-    for msg in stream
-        send!(stream, InteropResponse(msg.id, msg.payload))
-    end
-    return nothing
-end
-
-# --- Service descriptor builders ---
-
-function make_interop_descriptor()
-    methods = Dict{String, MethodDescriptor}(
-        "Echo" => MethodDescriptor(
-            "Echo", MethodType.UNARY,
-            InteropRequest, InteropResponse,
-            echo_handler
-        ),
-        "Fail" => MethodDescriptor(
-            "Fail", MethodType.UNARY,
-            InteropRequest, InteropResponse,
-            fail_handler
-        ),
-        "StreamResponses" => MethodDescriptor(
-            "StreamResponses", MethodType.SERVER_STREAMING,
-            InteropRequest, InteropResponse,
-            stream_responses_handler
-        ),
-        "CollectRequests" => MethodDescriptor(
-            "CollectRequests", MethodType.CLIENT_STREAMING,
-            InteropRequest, InteropResponse,
-            collect_requests_handler
-        ),
-        "BiDiExchange" => MethodDescriptor(
-            "BiDiExchange", MethodType.BIDI_STREAMING,
-            InteropRequest, InteropResponse,
-            bidi_exchange_handler
-        ),
-    )
-    ServiceDescriptor("interop.InteropTestService", methods, nothing)
-end
-
-function make_unhandled_error_descriptor()
-    methods = Dict{String, MethodDescriptor}(
-        "Echo" => MethodDescriptor(
-            "Echo", MethodType.UNARY,
-            InteropRequest, InteropResponse,
-            unhandled_error_handler
-        ),
-    )
-    ServiceDescriptor("interop.UnhandledErrorService", methods, nothing)
-end
-
-# --- Tests ---
 
 @testset "gRPCClient Integration Tests" begin
     grpc_init()
 
     try
         # =============================================
-        # US1 — Unary RPC Interoperability + US5 — Error Handling
-        # Use a single server instance for all unary tests
+        # US1 — Unary RPC Interoperability + US5 — Error Handling + US6 —
+        # Compression, all against one server on the default (HTTP.jl) backend.
         # =============================================
-        with_test_server() do ts
-            gRPCServer.register_service!(ts.server.dispatcher, make_interop_descriptor())
-            ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
+        with_remote_server(backend = "httpjl") do ts
+            @test ts.backend == "httpjl"
 
             @testset "Unary RPC Interoperability" begin
                 @testset "Synchronous Unary Echo" begin
@@ -170,38 +87,12 @@ end
                     @test ex.grpc_status == 3  # INVALID_ARGUMENT
                 end
             end
-        end
 
-        # INTERNAL error test needs a separate server with a different service
-        with_test_server() do ts
-            gRPCServer.register_service!(ts.server.dispatcher, make_unhandled_error_descriptor())
-            ts.server.health_status["interop.UnhandledErrorService"] = HealthStatus.SERVING
-
-            @testset "Error Handling and Status Code Propagation" begin
-                @testset "INTERNAL Error from Unhandled Exception" begin
-                    client = gRPCClient.gRPCServiceClient{InteropRequest, false, InteropResponse, false}(
-                        "127.0.0.1", ts.port, "/interop.UnhandledErrorService/Echo"
-                    )
-                    ex = try
-                        grpc_sync_request(client, InteropRequest(Int32(1), "trigger error"))
-                        nothing
-                    catch e
-                        e
-                    end
-                    @test ex isa gRPCServiceCallException
-                    @test ex.grpc_status == 13  # INTERNAL
-                end
-            end
-        end
-
-        # =============================================
-        # Streaming (Julia >= 1.12 only)
-        # =============================================
-        @static if VERSION >= v"1.12"
-            with_test_server() do ts
-                gRPCServer.register_service!(ts.server.dispatcher, make_interop_descriptor())
-                ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
-
+            # =============================================
+            # Streaming (Julia >= 1.12 only — gRPCClient disables its streaming
+            # stubs below that, independently of the process split)
+            # =============================================
+            @static if VERSION >= v"1.12"
                 # US2 — Server Streaming
                 @testset "Server Streaming RPC Interoperability" begin
                     @testset "Server Streaming Basic" begin
@@ -284,34 +175,45 @@ end
                         end
                     end
                 end
+            end  # @static if VERSION >= v"1.12"
+        end
+
+        # INTERNAL error needs a server exposing a handler that throws a plain
+        # (non-GRPCError) exception.
+        with_remote_server(service = "unhandled_error") do ts
+            @testset "Error Handling and Status Code Propagation" begin
+                @testset "INTERNAL Error from Unhandled Exception" begin
+                    client = gRPCClient.gRPCServiceClient{InteropRequest, false, InteropResponse, false}(
+                        "127.0.0.1", ts.port, "/interop.UnhandledErrorService/Echo"
+                    )
+                    ex = try
+                        grpc_sync_request(client, InteropRequest(Int32(1), "trigger error"))
+                        nothing
+                    catch e
+                        e
+                    end
+                    @test ex isa gRPCServiceCallException
+                    @test ex.grpc_status == 13  # INTERNAL
+                end
             end
-        end  # @static if VERSION >= v"1.12"
+        end
 
         # =============================================
-        # Feature 020 — HTTP.jl backend interoperability (US1)
-        # Same interop service + gRPCClient, served by HTTPjlBackend (h2c).
+        # PureHTTP2 backend parity: the same interop surface must behave
+        # identically on the opt-in backend.
         # =============================================
-        @testset "HTTP.jl backend interoperability (US1)" begin
-            # Use a dedicated port outside the random range (50100-50999) the other
-            # tests draw from: gRPCClient's libcurl pools HTTP/2 connections, and a
-            # port previously used by a now-stopped PureHTTP2 server would have a
-            # stale pooled connection that libcurl reuses (→ "Broken pipe" on the
-            # first send, with no client-side retry). A unique port avoids that
-            # cross-test client artifact (the backend itself is fine).
-            with_test_server(; port=52525, http2_backend=HTTPjlBackend()) do ts
-                gRPCServer.register_service!(ts.server.dispatcher, make_interop_descriptor())
-                ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
+        @testset "PureHTTP2 backend interoperability" begin
+            with_remote_server(backend = "purehttp2") do ts
+                @test ts.backend == "purehttp2"
 
-                @testset "Unary Echo over HTTP.jl" begin
+                @testset "Unary Echo over PureHTTP2" begin
                     client = InteropTestService_Echo_Client("127.0.0.1", ts.port)
                     response = grpc_sync_request(client, InteropRequest(Int32(1), "hello"))
                     @test response.id == Int32(1)
                     @test response.result == "hello"
                 end
 
-                @testset "Error status propagation over HTTP.jl" begin
-                    # The Fail handler throws GRPCError(StatusCode(req.id), req.payload);
-                    # verifies grpc-status/grpc-message reach the client via trailers.
+                @testset "Error status propagation over PureHTTP2" begin
                     client = InteropTestService_Fail_Client("127.0.0.1", ts.port)
                     ex = try
                         grpc_sync_request(client, InteropRequest(Int32(5), "not found"))
@@ -323,69 +225,19 @@ end
                     @test ex.grpc_status == 5  # NOT_FOUND
                     @test occursin("not found", ex.message)
                 end
-
-                @static if VERSION >= v"1.12"
-                    @testset "Server streaming over HTTP.jl" begin
-                        client = InteropTestService_StreamResponses_Client("127.0.0.1", ts.port)
-                        ch = Channel{InteropResponse}(16)
-                        grpc_async_request(client, InteropRequest(Int32(3), "msg"), ch)
-                        got = InteropResponse[]
-                        for r in ch
-                            push!(got, r)
-                        end
-                        @test length(got) == 3
-                    end
-
-                    @testset "Client streaming over HTTP.jl" begin
-                        client = InteropTestService_CollectRequests_Client("127.0.0.1", ts.port)
-                        request_c = Channel{InteropRequest}(16)
-                        req = grpc_async_request(client, request_c)
-                        for i in Int32(1):Int32(5)
-                            put!(request_c, InteropRequest(i, "item$i"))
-                        end
-                        close(request_c)
-                        response = grpc_async_await(client, req)
-                        @test response.id == Int32(5)
-                        @test response.result == "item1,item2,item3,item4,item5"
-                    end
-
-                    @testset "Bidirectional streaming over HTTP.jl" begin
-                        client = InteropTestService_BiDiExchange_Client("127.0.0.1", ts.port)
-                        request_c = Channel{InteropRequest}(16)
-                        response_c = Channel{InteropResponse}(16)
-                        req = grpc_async_request(client, request_c, response_c)
-                        for i in Int32(1):Int32(5)
-                            put!(request_c, InteropRequest(i, "echo$i"))
-                        end
-                        close(request_c)
-                        responses = InteropResponse[]
-                        for resp in response_c
-                            push!(responses, resp)
-                        end
-                        grpc_async_await(req)
-                        @test length(responses) == 5
-                        for (i, resp) in enumerate(responses)
-                            @test resp.id == Int32(i)
-                            @test resp.result == "echo$i"
-                        end
-                    end
-                end
             end
         end
 
         # =============================================
-        # Feature 020 — US2: two backends serving concurrently in one process
+        # Feature 020 — US2: both backends serving concurrently and
+        # independently, each in its own process.
         # =============================================
         @testset "Two backends serve independently (US2)" begin
-            with_test_server(; http2_backend=PureHTTP2Backend()) do pure_ts
-                gRPCServer.register_service!(pure_ts.server.dispatcher, make_interop_descriptor())
-                pure_ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
-                with_test_server(; port=52626, http2_backend=HTTPjlBackend()) do http_ts
-                    gRPCServer.register_service!(http_ts.server.dispatcher, make_interop_descriptor())
-                    http_ts.server.health_status["interop.InteropTestService"] = HealthStatus.SERVING
-
-                    @test pure_ts.server.http2_backend isa PureHTTP2Backend
-                    @test http_ts.server.http2_backend isa HTTPjlBackend
+            with_remote_server(backend = "purehttp2") do pure_ts
+                with_remote_server(backend = "httpjl") do http_ts
+                    @test pure_ts.backend == "purehttp2"
+                    @test http_ts.backend == "httpjl"
+                    @test pure_ts.port != http_ts.port
 
                     pure_client = InteropTestService_Echo_Client("127.0.0.1", pure_ts.port)
                     r1 = grpc_sync_request(pure_client, InteropRequest(Int32(1), "pure"))
