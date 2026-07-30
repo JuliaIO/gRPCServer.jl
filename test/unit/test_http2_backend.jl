@@ -86,11 +86,11 @@ using PureHTTP2
     end
 
     @testset "GRPCServer backend integration" begin
-        # Default backend
+        # Default backend is HTTP.jl
         server = GRPCServer("127.0.0.1", 50099)
-        @test server.http2_backend isa PureHTTP2Backend
+        @test server.http2_backend isa HTTPjlBackend
 
-        # Explicit backend
+        # Explicit backend (PureHTTP2 is opt-in)
         server2 = GRPCServer("127.0.0.1", 50098; http2_backend=PureHTTP2Backend())
         @test server2.http2_backend isa PureHTTP2Backend
 

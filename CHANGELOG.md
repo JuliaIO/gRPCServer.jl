@@ -8,15 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **HTTP.jl HTTP/2 backend, now the default.** `HTTPjlBackend` serves gRPC over
+  HTTP.jl (≥ 2.1) — cleartext h2c and TLS (ALPN `h2`), across all four RPC types
+  plus server reflection. A `GRPCServer` constructed without naming a backend now
+  uses HTTP.jl; select the previous implementation with
+  `GRPCServer(...; http2_backend = PureHTTP2Backend())`. Observable gRPC behavior
+  is unchanged (the full integration suite passes on both backends).
+- Raised, backend-agnostic HTTP/2 backend contract: `AbstractGRPCStream` (a
+  per-call stream handle with `grpc_path`/`request_metadata`/`read_message!`/
+  `send_response_headers!`/`send_message!`/`send_trailers!`/`reset!`) plus
+  `serve_grpc(backend, server, on_call)`, complementing the existing
+  `create_connection` factory. Both `PureHTTP2Backend` and `HTTPjlBackend`
+  implement it.
 - Pluggable HTTP/2 backend architecture via `AbstractHTTP2Backend` abstract type
-  and `PureHTTP2Backend` default implementation. The `GRPCServer` constructor
-  accepts an `http2_backend` keyword argument to select a backend at construction
-  time. The `create_connection(backend)` method is the single extension point
-  for implementing future backends (e.g., Nghttp2Wrapper.jl, HTTP.jl). See
-  `docs/src/http2-backends.md`.
+  and `PureHTTP2Backend` implementation. The `GRPCServer` constructor accepts an
+  `http2_backend` keyword argument to select a backend at construction time.
+  See `docs/src/http2-backends.md`.
 - New `PureHTTP2.jl` runtime dependency — the externalized HTTP/2 protocol
   implementation (frames, HPACK, streams, flow control, connection management)
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
+- CI jobs carry an explicit `timeout-minutes` (45 for tests, 30 for docs) so a
+  deadlocked run fails fast instead of burning the 6-hour GitHub Actions ceiling
+- CI actions bumped off the Node.js 20 runtime, which GitHub now forces onto
+  Node.js 24 with a deprecation warning on every job: `actions/checkout` v4→v5,
+  `julia-actions/setup-julia` v2→v3, `julia-actions/cache` v2→v3 (which also
+  carries its transitive `actions/cache` and `pyTooling/Actions` forward),
+  `codecov/codecov-action` v4→v7 — v5 and v6 were not enough: v5 pins
+  `actions/github-script` v7.0.1, which is itself node20; v7 pins v8.0.0
+- Test-output noise removed: the nine test files that load
+  `fixtures/conformance_data.jl` now guard the include, which was printing
+  "WARNING: replacing module ConformanceData" eight times per run, and the
+  deliberate unknown-protobuf-type case in `test/unit/test_dispatch.jl` asserts
+  its warning with `@test_logs` instead of letting it leak into the log
+- grpcurl on the macOS runner is downloaded from its GitHub release instead of
+  installed via Homebrew, which emitted a tap-trust warning for `aws/tap` — a tap
+  pre-installed on the runner image and unrelated to this project
 - ROADMAP.md with planned improvements
 - CHANGELOG.md for tracking changes
 - SECURITY.md with vulnerability reporting policy and security best practices
@@ -53,6 +79,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Types `HTTP2Connection`, `HTTP2Stream`, `Frame`, `StreamError`, etc. now
   come from PureHTTP2.jl. All previously exported symbols remain available
   via `gRPCServer.X` for backward compatibility.
+- Bumped `Reseau` from 1.0.x to `>= 1.1.1` (resolves to 1.2.1) as required by the
+  forthcoming HTTP.jl HTTP/2 backend (HTTP.jl 2.x depends on Reseau >= 1.1.1).
+  Refined ALPN-mismatch classification in `src/tls/transport.jl`: Reseau >= 1.1
+  completes the TLS handshake on an ALPN mismatch and returns an empty/unexpected
+  negotiated protocol (Reseau 1.0 failed the handshake outright); a missing,
+  empty, or non-configured negotiated protocol is now uniformly classified as
+  `ALPN_MISMATCH`.
+
+### Fixed
+- **Requests larger than ~64 KB no longer fail on the HTTP.jl backend.**
+  `read_message!` used `read(io, n)`, which reads *at most* `n` bytes: on an
+  HTTP.jl stream it returns whatever is buffered and no more. For a message
+  bigger than the HTTP/2 initial flow-control window it returned after 65 530
+  bytes — immediately, and with `eof` still false — and the short read was
+  treated as a truncated message, capping every request at the window size.
+
+  The window was a coincidence, not the cause: it is simply how much happens to
+  be buffered at that moment. The server does emit `WINDOW_UPDATE` correctly, as
+  a packet capture confirms. `readbytes!(io, buf, n)` does not fix it either —
+  HTTP.jl overrides it and returns short regardless of `all=true` — so
+  `_read_exactly` loops explicitly, using `eof` as the blocking point.
+
+  Verified at 65 535 bytes, 200 KB and 1 MB, all 6/6 where each previously failed;
+  regression-guarded at 64 000 and 200 000 bytes in the interop suite.
+- **TLS tests were silently skipping in CI.** `test/fixtures/certs/` is gitignored,
+  so a fresh checkout — every CI run — had no certificates and each TLS testset
+  skipped itself with a warning while the job still reported success. That hid the
+  entire TLS surface of this release (ALPN negotiation, mTLS enforcement,
+  certificate reload, and the openssl/grpcurl interop suite) from CI. `runtests.jl`
+  now generates the fixtures when they are absent, which took an explicit call:
+  the generator guards its entry point with `abspath(PROGRAM_FILE) == @__FILE__`,
+  so including it alone defines the function without running it. From a clean
+  checkout the suite goes from 9226 tests with 3 TLS skips to 9281 with none.
+- **The HTTP.jl backend no longer cancels streams it has already completed.**
+  `read_message!` reads exactly the 5-byte gRPC prefix plus the declared message
+  length, so a unary or server-streaming call stopped short of EOF even though the
+  client had already sent END_STREAM. HTTP.jl treats an undrained request body at
+  handler return as an abandoned request and emitted `RST_STREAM(CANCEL)` — *after*
+  it had already closed the stream with END_STREAM on the trailers. nghttp2/libcurl
+  then reported `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` whenever it
+  processed that reset before finalising the response. The request body is now
+  drained via a new `drain_request!` backend-contract function (no-op by default),
+  called **only** after unary and server-streaming calls — those read exactly one
+  message and the client has already half-closed. It must not run on client- or
+  bidirectional-streaming RPCs: those already read to end-of-stream, and a bidi
+  client may hold its send side open indefinitely, which server reflection does —
+  waiting for end-of-stream there hangs the handler.
+
+  Confirmed on the wire (`tshark`, h2c): 128 server-sent `RST_STREAM err=CANCEL`
+  frames across 200 calls, each ~11µs after the trailers that had already ended the
+  stream, absent on streams that succeeded. Measured on Julia 1.10 single-threaded,
+  200 sequential unary calls with a fresh client each: 15-55 failures per run
+  before, 0 after — and the in-process configuration went from 0/12 (total failure)
+  to 12/12. Regression-guarded by a 150-call loop in
+  `test/integration/test_grpcclient.jl`, which fails in ~1.7s without the drain.
+
+  This was the "Julia 1.10 CANCEL issue" tracked here through several releases of
+  this changelog. It was neither an HTTP.jl bug nor a gRPCClient bug, and not
+  Julia-version specific in nature — 1.10's scheduling merely made HTTP.jl reach
+  the undrained-body check far more often (0/200 failures on 1.12, 55/200 on 1.10).
+- **A truncated request message no longer produces a silently wrong success
+  response.** Backends report "no complete request message" as `nothing` from
+  `read_message!` — the stream ended before a message arrived, or it stalled
+  mid-body. For unary and server-streaming calls, `dispatch_grpc_call`
+  substituted an empty message and ran the handler on it, so proto3's
+  decode-empty-to-defaults behaviour produced a valid-looking response built from
+  a default-constructed request. Observed end to end: a 100 KB unary echo
+  returned `grpc-status 0` with a **zero-length** payload. Both calls now fail
+  with `INTERNAL` and an explicit message instead. This affected both backends,
+  since the substitution was in the shared dispatch path.
+- **gRPCClient interop tests now run the server out of process.** They used to
+  colocate server and client in the test process, which was the configuration that
+  hit the spurious-`CANCEL` bug above hardest (0/12 calls succeeded) — so the whole
+  interop suite failed on the LTS. The root cause is fixed, but the split is kept:
+  it also exercises the shape users actually deploy. `test/integration/grpcclient/remote_harness.jl` launches the
+  server as a child Julia process (`with_remote_server`), the handlers moved to
+  `interop_service.jl` (loaded by the server process only), and the child reports
+  the backend it constructed so the two-backend assertions still hold without
+  sharing objects. Ports are never reused within a run: libcurl pools HTTP/2
+  connections per host:port, and reusing a dead port's pool makes the next first
+  request fail with "Send failure: Broken pipe". These tests now also exercise the
+  shape users actually deploy — a server process talking to a client elsewhere —
+  and cover PureHTTP2 parity, which was previously untested here.
+- **`stop!` no longer hangs indefinitely on the HTTP.jl backend.** Shutdown went
+  through `Base.close(::HTTP.Server)`, which polls in an unbounded `while true`
+  loop until every tracked connection reports idle — so a single connection
+  holding an in-flight stream (HEADERS with no body, or a stream reset mid-call)
+  blocked `stop!` forever. This is what made the Julia 1.10 CI jobs sit until the
+  6-hour GitHub Actions ceiling instead of failing. `stop!(server; force = true)`
+  now uses `HTTP.forceclose`, and a graceful `stop!` bounds the drain by
+  `timeout` (default `HTTPJL_DRAIN_TIMEOUT`, 10s) before forcing. Reproduced and
+  regression-guarded in `test/backends/test_httpjl_backend.jl`. The unbounded loop
+  is in HTTP.jl and is not Julia-version specific: reproduced identically on 1.10
+  and 1.12 with a client that leaves a stream in flight.
+
+### Known Issues
+- **Request messages larger than ~64 KB fail on `PureHTTP2Backend`.** A unary
+  request of 65 000 bytes mostly times out (1 of 6 calls succeeded) and 200 KB
+  fails outright with `DEADLINE_EXCEEDED`. `HTTPjlBackend`, the default, is fixed
+  (see below) — this is the same class of defect in PureHTTP2's own
+  `read_grpc_message!` path, which has not been investigated yet. Requests up to
+  ~64 KB are unaffected on both backends.
+- mTLS client-certificate authentication does not work when a connection
+  negotiates **TLS 1.2** with Reseau >= 1.1 (it works over **TLS 1.3**). The
+  client certificate is not presented during a TLS 1.2 handshake — an upstream
+  Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
+  affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
+  pending an upstream fix.
+- `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
+  - Live TLS certificate reload (`reload_tls!`) is not supported.
+  - No configurable max-concurrent-streams limit (HTTP.jl advertises none).
+  Select `PureHTTP2Backend()` if you need either capability.
 
 ### Removed
 - Removed `OpenSSL` from runtime `[deps]` and `[compat]` in `Project.toml`

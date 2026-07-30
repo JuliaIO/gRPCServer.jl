@@ -1,6 +1,22 @@
 using Test
 using gRPCServer
 
+# Generate the TLS test fixtures if they are absent.
+#
+# test/fixtures/certs/ is gitignored, so a fresh checkout — every CI run — had no
+# certificates and every TLS test silently skipped itself. That hid the whole TLS
+# surface (ALPN negotiation, mTLS, certificate reload, the openssl/grpcurl interop
+# suite) from CI while the jobs still reported success.
+#
+# Requires the openssl CLI; the generator warns and returns if it is missing, in
+# which case the TLS tests skip as before.
+# The generator guards its own entry point with `abspath(PROGRAM_FILE) == @__FILE__`,
+# so including it only defines the function — it must be called explicitly.
+if !isfile(joinpath(@__DIR__, "fixtures", "certs", "server.crt"))
+    include(joinpath(@__DIR__, "fixtures", "generate_test_certs.jl"))
+    generate_test_certificates()
+end
+
 # Include TestUtils module once for all tests to avoid method redefinition warnings
 include("TestUtils.jl")
 using .TestUtils
@@ -36,6 +52,10 @@ using .TestUtils
     include("unit/test_connection_management.jl")
     include("unit/test_timeout_handling.jl")
     include("unit/test_http2_backend.jl")
+
+    # HTTP/2 backend tests (feature 020)
+    include("backends/test_backend_interface.jl")
+    include("backends/test_httpjl_backend.jl")
 
     # Integration tests
     include("integration/test_unary.jl")
