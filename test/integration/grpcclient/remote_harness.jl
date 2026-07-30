@@ -84,6 +84,44 @@ function _await_ready(proc, timeout::Real)
     return ready[]
 end
 
+const _SERVICE_PATHS = Dict(
+    "interop" => "/interop.InteropTestService/Echo",
+    "unhandled_error" => "/interop.UnhandledErrorService/Echo",
+)
+
+# Warm the server's dispatch path before handing it to the tests.
+#
+# gRPCClient's default deadline is 10s (`gRPCConnectionOptions.deadline`), and the
+# first request to a freshly started server pays the JIT cost of the whole
+# dispatch path — method lookup, protobuf decode, handler, response framing. That
+# is ~5s on a warm developer machine and more than 10s on a cold CI runner, so
+# without this the *first* test against each server fails with DEADLINE_EXCEEDED
+# for reasons unrelated to what it asserts.
+#
+# Deliberately one call with a long deadline rather than several short ones: a
+# request that does time out can leave the pooled HTTP/2 connection reset, which
+# would then break the tests instead of the warm-up.
+#
+# Any response proves the path is compiled, including a gRPC error — the
+# unhandled_error service's Echo throws by design — so only DEADLINE_EXCEEDED
+# means "still cold".
+function _warmup(port::Int, service::String; deadline::Real = 120)
+    path = get(_SERVICE_PATHS, service, _SERVICE_PATHS["interop"])
+    client = gRPCClient.gRPCServiceClient{InteropRequest, false, InteropResponse, false}(
+        "127.0.0.1", port, path; deadline = Float64(deadline)
+    )
+    try
+        gRPCClient.grpc_sync_request(client, InteropRequest(Int32(0), "warmup"))
+    catch e
+        if e isa gRPCClient.gRPCServiceCallException && e.grpc_status == 4
+            error("remote interop server on port $port did not answer a warm-up " *
+                  "call within $(deadline)s (service=$service)")
+        end
+        # Any other status means the server answered: the path is warm.
+    end
+    return nothing
+end
+
 function _shutdown!(proc)
     try
         close(proc.in)
@@ -120,6 +158,7 @@ function with_remote_server(f; backend::String = "httpjl", service::String = "in
         parts = split(line)
         reported = length(parts) >= 3 ? parts[3] : backend
         try
+            _warmup(port, service)
             return f(RemoteServer(port, String(reported), proc))
         finally
             _shutdown!(proc)
