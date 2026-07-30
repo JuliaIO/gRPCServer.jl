@@ -1,0 +1,44 @@
+# Creates the git tag and GitHub release for a version once it is registered in
+# the General registry.
+#
+# Without it, versions get published to General but the repository keeps no tag:
+# The sibling PureHTTP2.jl repository hit exactly this: 0.5.0 registered while
+# its newest tag was still v0.3.0.
+name: TagBot
+
+on:
+  issue_comment:
+    types:
+      - created
+  workflow_dispatch:
+    inputs:
+      lookback:
+        description: "Days to look back for registrations"
+        default: "3"
+        required: false
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  deployments: read
+  issues: read
+  discussions: read
+  packages: read
+  pages: read
+  pull-requests: read
+  repository-projects: read
+  security-events: read
+  statuses: read
+
+jobs:
+  TagBot:
+    # Only react to the registry bot's comment, or to a manual run.
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ssh: ${{ secrets.DOCUMENTER_KEY }}

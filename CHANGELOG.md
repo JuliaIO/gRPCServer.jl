@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **TagBot workflow** — versions registered in the General registry were never
+  getting a git tag. The sibling PureHTTP2.jl repository shows the failure mode:
+  0.5.0 registered and installable while its newest tag was still v0.3.0.
+- **Dependabot for GitHub Actions** — the pinned actions drifted until GitHub's
+  Node.js 20 deprecation warned on every job, which then had to be cleared by
+  hand. Monthly updates prevent the recurrence.
+- **CompatHelper workflow** — this package pins six runtime dependencies, several
+  of which move quickly; compat drift otherwise goes unnoticed until a resolve
+  fails or a needed fix sits behind a bound that is too tight.
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
 - ROADMAP.md with planned improvements
 - CHANGELOG.md for tracking changes
