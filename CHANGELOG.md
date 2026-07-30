@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`uses_serve_grpc` and `stop_serving!` on the backend contract.** `start!` and
+  `stop!` previously branched on `isa HTTPjlBackend` and hard-coded HTTP.jl's
+  bounded-shutdown logic, which no third backend could reuse. Backend-specific
+  knowledge now lives with its backend; `GRPCServer.httpjl_server` is renamed
+  `backend_handle` accordingly.
 - **HTTP.jl HTTP/2 backend, now the default.** `HTTPjlBackend` serves gRPC over
   HTTP.jl (≥ 2.1) — cleartext h2c and TLS (ALPN `h2`), across all four RPC types
   plus server reflection. A `GRPCServer` constructed without naming a backend now

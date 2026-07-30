@@ -164,3 +164,31 @@ until end-of-stream anyway, and a bidi client may legitimately hold its send sid
 open, in which case waiting for end-of-stream would hang.
 """
 drain_request!(::AbstractGRPCStream) = nothing
+
+"""
+    uses_serve_grpc(backend) -> Bool
+
+Whether `backend` drives itself through [`serve_grpc`](@ref) — owning its
+listener and serve loop — rather than through the `create_connection` factory.
+
+`false` by default, so a backend written against the connection factory keeps
+working unchanged.
+"""
+uses_serve_grpc(::AbstractHTTP2Backend) = false
+
+"""
+    stop_serving!(backend, handle; force, timeout)
+
+Shut down the handle returned by [`serve_grpc`](@ref).
+
+The default closes it. A backend whose `close` can block — HTTP.jl's does —
+overrides this to bound the wait; see the `HTTPjlBackend` method.
+"""
+function stop_serving!(::AbstractHTTP2Backend, handle; force::Bool = false,
+                       timeout::Float64 = 0.0)
+    try
+        close(handle)
+    catch
+    end
+    return nothing
+end

@@ -238,6 +238,47 @@ function drain_request!(s::HTTPjlGRPCStream)
     return nothing
 end
 
+uses_serve_grpc(::HTTPjlBackend) = true
+
+"""
+    stop_serving!(::HTTPjlBackend, server; force, timeout)
+
+`Base.close(::HTTP.Server)` polls in an unbounded loop until every tracked
+connection reports idle, so one in-flight stream wedges shutdown for ever. A
+forced stop drops connections outright; a graceful one bounds the drain by
+`timeout` (default [`HTTPJL_DRAIN_TIMEOUT`](@ref)) and then forces, so `stop!`
+always returns.
+"""
+function stop_serving!(::HTTPjlBackend, httpjl; force::Bool = false,
+                       timeout::Float64 = 0.0)
+    if force
+        try
+            HTTP.forceclose(httpjl)
+        catch
+        end
+        return nothing
+    end
+    budget = timeout > 0.0 ? timeout : HTTPJL_DRAIN_TIMEOUT
+    draining = Threads.@spawn begin
+        try
+            close(httpjl)
+        catch
+        end
+    end
+    t0 = time()
+    while !istaskdone(draining) && time() - t0 < budget
+        sleep(0.05)
+    end
+    if !istaskdone(draining)
+        @warn "HTTP.jl backend did not drain within the shutdown budget; forcing close" budget_seconds=budget
+        try
+            HTTP.forceclose(httpjl)
+        catch
+        end
+    end
+    return nothing
+end
+
 # --- Serve loop ---
 
 """

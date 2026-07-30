@@ -65,7 +65,7 @@ mutable struct GRPCServer
     http2_backend::AbstractHTTP2Backend
 
     # Handle to the HTTP.jl server task when using HTTPjlBackend (nothing otherwise)
-    httpjl_server::Any
+    backend_handle::Any
 
     function GRPCServer(
         host::String,
@@ -132,7 +132,7 @@ mutable struct GRPCServer
             nothing,
             nothing,  # tls_transport - initialized in start!() when TLS configured
             http2_backend,
-            nothing   # httpjl_server - set in start!() for HTTPjlBackend
+            nothing   # backend_handle - set in start!() by serve_grpc backends
         )
 
         # Add logging interceptor if requested
@@ -256,14 +256,14 @@ function start!(server::GRPCServer)
 
         # HTTP.jl backend: HTTP.jl owns the listener/serve loop (non-blocking),
         # including the TLS/ALPN handshake when a TLSConfig is configured.
-        if server.http2_backend isa HTTPjlBackend
+        if uses_serve_grpc(server.http2_backend)
             if server.config.tls !== nothing
                 @info "Initializing TLS (HTTP.jl backend)..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
             end
             # serve_grpc (HTTP.listen!) blocks until the listen loop is ready, so
             # only mark RUNNING once the port is actually bound and accepting —
             # otherwise a client racing on RUNNING hits a broken pipe.
-            server.httpjl_server = serve_grpc(
+            server.backend_handle = serve_grpc(
                 server.http2_backend, server,
                 (gs, peer) -> dispatch_grpc_call(server, gs, peer),
             )
@@ -375,42 +375,13 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
 
     # HTTP.jl backend: HTTP.jl owns the listener; close it and finish (the
     # socket/drain bookkeeping below applies only to the PureHTTP2 accept loop).
-    if server.httpjl_server !== nothing
+    if server.backend_handle !== nothing
         server.status = ServerStatus.STOPPING
-        httpjl = server.httpjl_server
-        if force
-            # `HTTP.forceclose` drops tracked connections immediately. Plain
-            # `close` must not be used here: it polls in an unbounded loop until
-            # every connection reports idle, so one in-flight stream (a client
-            # that sent HEADERS and no body, or a stream reset mid-call) wedges
-            # shutdown forever.
-            try
-                HTTP.forceclose(httpjl)
-            catch
-            end
-        else
-            # Graceful: let HTTP.jl drain, but bound the wait — then force. This
-            # keeps `stop!` a terminating operation whatever the client does.
-            budget = timeout > 0.0 ? timeout : HTTPJL_DRAIN_TIMEOUT
-            draining = Threads.@spawn begin
-                try
-                    close(httpjl)
-                catch
-                end
-            end
-            t0 = time()
-            while !istaskdone(draining) && time() - t0 < budget
-                sleep(0.05)
-            end
-            if !istaskdone(draining)
-                @warn "HTTP.jl backend did not drain within the shutdown budget; forcing close" budget_seconds=budget
-                try
-                    HTTP.forceclose(httpjl)
-                catch
-                end
-            end
-        end
-        server.httpjl_server = nothing
+        # How to shut the handle down is the backend's business: HTTP.jl's close
+        # can block for ever, nghttp2's cannot. See `stop_serving!`.
+        stop_serving!(server.http2_backend, server.backend_handle;
+                      force = force, timeout = timeout)
+        server.backend_handle = nothing
         server.status = ServerStatus.STOPPED
         return
     end
@@ -2180,8 +2151,8 @@ function Base.show(io::IO, server::GRPCServer)
     print(io, ", services=$(length(services(server)))")
     if server.config.tls !== nothing
         # "active" once TLS is actually serving: PureHTTP2 sets tls_transport,
-        # the HTTP.jl backend sets httpjl_server (it owns its own TLS listener).
-        tls_active = server.tls_transport !== nothing || server.httpjl_server !== nothing
+        # a serve_grpc backend sets backend_handle (it owns its own TLS listener).
+        tls_active = server.tls_transport !== nothing || server.backend_handle !== nothing
         tls_status = tls_active ? "active" : "configured"
         print(io, ", TLS=$tls_status")
     end
