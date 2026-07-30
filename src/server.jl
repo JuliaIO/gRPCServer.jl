@@ -61,6 +61,12 @@ mutable struct GRPCServer
     """TLS transport for TLS mode. Created at server startup when TLS is configured."""
     tls_transport::Union{TLSTransport, Nothing}
 
+    # HTTP/2 backend (pluggable)
+    http2_backend::AbstractHTTP2Backend
+
+    # Handle to the HTTP.jl server task when using HTTPjlBackend (nothing otherwise)
+    httpjl_server::Any
+
     function GRPCServer(
         host::String,
         port::Int;
@@ -84,7 +90,8 @@ mutable struct GRPCServer
             CompressionCodec.GZIP,
             CompressionCodec.DEFLATE,
             CompressionCodec.IDENTITY
-        ]
+        ],
+        http2_backend::AbstractHTTP2Backend=HTTPjlBackend()
     )
         # Validate host and port
         if port < 1 || port > 65535
@@ -123,7 +130,9 @@ mutable struct GRPCServer
             ReentrantLock(),
             Condition(),
             nothing,
-            nothing  # tls_transport - initialized in start!() when TLS configured
+            nothing,  # tls_transport - initialized in start!() when TLS configured
+            http2_backend,
+            nothing   # httpjl_server - set in start!() for HTTPjlBackend
         )
 
         # Add logging interceptor if requested
@@ -245,6 +254,24 @@ function start!(server::GRPCServer)
         # Auto-register built-in services if enabled
         register_builtin_services!(server)
 
+        # HTTP.jl backend: HTTP.jl owns the listener/serve loop (non-blocking),
+        # including the TLS/ALPN handshake when a TLSConfig is configured.
+        if server.http2_backend isa HTTPjlBackend
+            if server.config.tls !== nothing
+                @info "Initializing TLS (HTTP.jl backend)..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
+            end
+            # serve_grpc (HTTP.listen!) blocks until the listen loop is ready, so
+            # only mark RUNNING once the port is actually bound and accepting —
+            # otherwise a client racing on RUNNING hits a broken pipe.
+            server.httpjl_server = serve_grpc(
+                server.http2_backend, server,
+                (gs, peer) -> dispatch_grpc_call(server, gs, peer),
+            )
+            server.status = ServerStatus.RUNNING
+            @info "gRPC server started (HTTP.jl backend)" host=server.host port=server.port tls=(server.config.tls !== nothing)
+            return
+        end
+
         if server.config.tls !== nothing
             @info "Initializing TLS..." cert=server.config.tls.cert_chain alpn=server.config.tls.alpn_protocols
             server.tls_transport = TLSTransport(server.config.tls, server.host, server.port)
@@ -345,6 +372,48 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
     end
 
     @info "Stopping gRPC server" force=force
+
+    # HTTP.jl backend: HTTP.jl owns the listener; close it and finish (the
+    # socket/drain bookkeeping below applies only to the PureHTTP2 accept loop).
+    if server.httpjl_server !== nothing
+        server.status = ServerStatus.STOPPING
+        httpjl = server.httpjl_server
+        if force
+            # `HTTP.forceclose` drops tracked connections immediately. Plain
+            # `close` must not be used here: it polls in an unbounded loop until
+            # every connection reports idle, so one in-flight stream (a client
+            # that sent HEADERS and no body, or a stream reset mid-call) wedges
+            # shutdown forever.
+            try
+                HTTP.forceclose(httpjl)
+            catch
+            end
+        else
+            # Graceful: let HTTP.jl drain, but bound the wait — then force. This
+            # keeps `stop!` a terminating operation whatever the client does.
+            budget = timeout > 0.0 ? timeout : HTTPJL_DRAIN_TIMEOUT
+            draining = Threads.@spawn begin
+                try
+                    close(httpjl)
+                catch
+                end
+            end
+            t0 = time()
+            while !istaskdone(draining) && time() - t0 < budget
+                sleep(0.05)
+            end
+            if !istaskdone(draining)
+                @warn "HTTP.jl backend did not drain within the shutdown budget; forcing close" budget_seconds=budget
+                try
+                    HTTP.forceclose(httpjl)
+                catch
+                end
+            end
+        end
+        server.httpjl_server = nothing
+        server.status = ServerStatus.STOPPED
+        return
+    end
 
     if force
         # Immediate shutdown
@@ -557,8 +626,8 @@ function handle_connection(server::GRPCServer, client)
 
         @debug "New connection" peer=peer
 
-        # Create HTTP/2 connection manager
-        conn = HTTP2Connection()
+        # Create HTTP/2 connection manager via backend
+        conn = create_connection(server.http2_backend)
 
         # Read and validate client connection preface
         preface_data = read_connection_preface(client)
@@ -942,7 +1011,8 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
 
     # Read one gRPC message (for unary/server-streaming this is the request,
     # for client-streaming this is the first of many messages already in buffer)
-    grpc_data = read_grpc_message!(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    grpc_data = read_message!(s)
     if grpc_data === nothing
         grpc_data = UInt8[]
     end
@@ -961,7 +1031,7 @@ function process_stream_request!(server::GRPCServer, conn::HTTP2Connection,
     if method_desc.method_type == MethodType.UNARY
         status, message, response_data = dispatch_unary(server.dispatcher, ctx, grpc_data)
         @debug "gRPC response" status=status response_len=length(response_data)
-        send_grpc_response(conn, io, stream.id, status, message, response_data; content_type=response_content_type)
+        send_grpc_response(s, status, message, response_data; content_type=response_content_type)
 
     elseif method_desc.method_type == MethodType.SERVER_STREAMING
         # Handle server streaming - multiple responses to one request
@@ -1007,13 +1077,12 @@ function handle_server_streaming(
     response_content_type = get_response_content_type(stream)
 
     # Send response headers first (before any data)
-    response_headers = [
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", response_content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Track status for trailers
     final_status = StatusCode.OK
@@ -1028,10 +1097,7 @@ function handle_server_streaming(
 
         # Create send callback for the ServerStream
         send_callback = function(message, compress)
-            response_data = serialize_message(message)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, serialize_message(message))
         end
 
         # Create close callback (no-op for server streaming, trailers sent after)
@@ -1072,8 +1138,7 @@ function handle_server_streaming(
     if !isempty(final_message)
         push!(trailers, ("grpc-message", final_message))
     end
-    trailer_frames = send_trailers(conn, stream.id, trailers)
-    write_frames(io, trailer_frames)
+    send_trailers!(s, trailers)
 end
 
 """
@@ -1113,7 +1178,7 @@ function wait_for_message_or_end(stream::HTTP2Stream, conn::HTTP2Connection, io:
             # Try to read and process any waiting frames
             frame = try_read_frame(io, conn)
             if frame !== nothing
-                process_frame!(conn, frame)
+                process_frame(conn, frame)
             end
         catch e
             if !(e isa EOFError)
@@ -1179,6 +1244,7 @@ function handle_client_streaming(
 
     # Get content-type from request to mirror in response
     response_content_type = get_response_content_type(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
 
     # Track status for response
     final_status = StatusCode.OK
@@ -1199,7 +1265,7 @@ function handle_client_streaming(
         # Read all remaining messages from buffer
         # Since end_stream_received is true, all data is already buffered
         while has_complete_grpc_message(stream)
-            msg = read_grpc_message!(stream)
+            msg = read_message!(s)
             if msg !== nothing
                 push!(messages, msg)
             end
@@ -1248,7 +1314,7 @@ function handle_client_streaming(
     end
 
     # Send response with status
-    send_grpc_response(conn, io, stream.id, final_status, final_message, response_data; content_type=response_content_type)
+    send_grpc_response(s, final_status, final_message, response_data; content_type=response_content_type)
 end
 
 """
@@ -1270,22 +1336,21 @@ function handle_bidi_streaming_incremental(
 )
     # Get content-type from request to mirror in response
     response_content_type = get_response_content_type(stream)
+    s = PureHTTP2GRPCStream(conn, io, stream)
 
     # Check if we need to send headers first (only once per stream)
     if !stream.headers_sent
         stream.headers_sent = true
-        response_headers = [
+        send_response_headers!(s, [
             (":status", "200"),
             ("content-type", response_content_type),
             ("grpc-encoding", "identity"),
-        ]
-        header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-        write_frames(io, header_frames)
+        ])
     end
 
     # Process all complete messages currently in the buffer
     while has_complete_grpc_message(stream)
-        grpc_data = read_grpc_message!(stream)
+        grpc_data = read_message!(s)
         if grpc_data === nothing
             break
         end
@@ -1303,16 +1368,13 @@ function handle_bidi_streaming_incremental(
             if !isempty(message)
                 push!(trailers, ("grpc-message", message))
             end
-            trailer_frames = send_trailers(conn, stream.id, trailers)
-            write_frames(io, trailer_frames)
+            send_trailers!(s, trailers)
             return
         end
 
         # Send response data
         if !isempty(response_data)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, response_data)
         end
     end
 
@@ -1321,8 +1383,7 @@ function handle_bidi_streaming_incremental(
         trailers = [
             ("grpc-status", string(Int(StatusCode.OK))),
         ]
-        trailer_frames = send_trailers(conn, stream.id, trailers)
-        write_frames(io, trailer_frames)
+        send_trailers!(s, trailers)
     end
 end
 
@@ -1355,13 +1416,12 @@ function handle_bidi_streaming(
     response_content_type = get_response_content_type(stream)
 
     # Send response headers first (before any data)
-    response_headers = [
+    s = PureHTTP2GRPCStream(conn, io, stream)
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", response_content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream.id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Track status for trailers
     final_status = StatusCode.OK
@@ -1377,7 +1437,7 @@ function handle_bidi_streaming(
 
         # Read all remaining messages from buffer
         while has_complete_grpc_message(stream)
-            msg = read_grpc_message!(stream)
+            msg = read_message!(s)
             if msg !== nothing
                 push!(messages, msg)
             end
@@ -1402,10 +1462,7 @@ function handle_bidi_streaming(
                 @warn "Attempted to send message after stream closed" stream_id=stream.id
                 return
             end
-            response_data = serialize_message(message)
-            grpc_message = encode_grpc_message(response_data; compressed=false)
-            data_frames = send_data(conn, stream.id, grpc_message; end_stream=false)
-            write_frames(io, data_frames)
+            send_message!(s, serialize_message(message))
         end
 
         # Create close callback that sends trailers
@@ -1420,8 +1477,7 @@ function handle_bidi_streaming(
             if !isempty(final_message)
                 push!(trailers, ("grpc-message", final_message))
             end
-            trailer_frames = send_trailers(conn, stream.id, trailers)
-            write_frames(io, trailer_frames)
+            send_trailers!(s, trailers)
         end
 
         # Create is_cancelled callback
@@ -1460,9 +1516,175 @@ function handle_bidi_streaming(
         if !isempty(final_message)
             push!(trailers, ("grpc-message", final_message))
         end
-        trailer_frames = send_trailers(conn, stream.id, trailers)
-        write_frames(io, trailer_frames)
+        send_trailers!(s, trailers)
     end
+end
+
+# ---------------------------------------------------------------------------
+# Backend-agnostic gRPC call dispatch (feature 020)
+#
+# Drives a single gRPC call against any AbstractGRPCStream using the backend
+# adapter's stream ops + the transport-agnostic dispatch_* orchestrators from
+# dispatch.jl. Used by serve_grpc(::HTTPjlBackend). The PureHTTP2 path keeps
+# using process_stream_request! (with its buffered/streaming-state handling)
+# until that serve loop is migrated too.
+# ---------------------------------------------------------------------------
+
+function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String)::ServerContext
+    md = Dict{String, Union{String, Vector{UInt8}}}()
+    timeout_header = nothing
+    for (name, value) in metadata
+        if name == "grpc-timeout"
+            timeout_header = value
+        end
+        startswith(name, ":") && continue  # skip HTTP/2 pseudo-headers
+        if endswith(name, "-bin")
+            md[name] = Base64.base64decode(value)
+        else
+            md[name] = value
+        end
+    end
+    deadline = timeout_header !== nothing ? parse_grpc_timeout(timeout_header) : nothing
+    return ServerContext(; method=method, peer=peer, deadline=deadline, metadata=md)
+end
+
+function _grpc_response_content_type(metadata)::String
+    for (name, value) in metadata
+        if name == "content-type" && startswith(value, "application/grpc")
+            return value
+        end
+    end
+    return "application/grpc"
+end
+
+_grpc_ok_headers(content_type) = [
+    (":status", "200"),
+    ("content-type", content_type),
+    ("grpc-encoding", "identity"),
+]
+
+function _grpc_status_trailers(status::StatusCode.T, message::String)
+    trailers = [("grpc-status", string(Int(status)))]
+    isempty(message) || push!(trailers, ("grpc-message", message))
+    return trailers
+end
+
+# Unary-shaped response (headers + optional data + trailers) emitted purely
+# through the AbstractGRPCStream ops.
+function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc")
+    send_response_headers!(gs, _grpc_ok_headers(content_type))
+    isempty(data) || send_message!(gs, data)
+    send_trailers!(gs, _grpc_status_trailers(status, message))
+    return nothing
+end
+
+# A backend reports "no complete request message" as `nothing` — the stream ended
+# before a message arrived, or it stalled mid-body (for instance a request larger
+# than the HTTP/2 flow-control window). Unary and server-streaming RPCs each
+# require exactly one complete request message, so this must fail the call.
+# Substituting an empty message instead would run the handler against a
+# default-constructed request and return a successful, silently wrong response.
+const _INCOMPLETE_REQUEST_MESSAGE =
+    "Incomplete request message: the client's request message did not arrive in full"
+
+"""
+    dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
+
+Route and execute one gRPC call (any of the four RPC types) using only the
+[`AbstractGRPCStream`](@ref) contract, so it works for any HTTP/2 backend.
+"""
+function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
+    path = grpc_path(gs)
+    metadata = request_metadata(gs)
+    content_type = _grpc_response_content_type(metadata)
+
+    result = lookup_method(server.dispatcher.registry, path)
+    if result === nothing
+        # UNIMPLEMENTED as headers + trailers (grpc-status in a trailing HEADERS
+        # block) — universally parsed by gRPC clients, so e.g. grpcurl falls back
+        # from reflection v1 to v1alpha cleanly.
+        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Method not found: $path"))
+        return nothing
+    end
+    service, method_desc = result
+    ctx = _grpc_context_from_metadata(metadata, peer, path)
+
+    if server.config.log_requests
+        @info "gRPC request" method=path peer=peer
+    end
+
+    mt = method_desc.method_type
+    if mt == MethodType.UNARY
+        data = read_message!(gs)
+        if data === nothing
+            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                       UInt8[]; content_type=content_type)
+            return nothing
+        end
+        status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+        drain_request!(gs)
+
+    elseif mt == MethodType.SERVER_STREAMING
+        data = read_message!(gs)
+        if data === nothing
+            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                       UInt8[]; content_type=content_type)
+            return nothing
+        end
+        send_response_headers!(gs, _grpc_ok_headers(content_type))
+        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        close_cb = () -> nothing
+        status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
+        send_trailers!(gs, _grpc_status_trailers(status, message))
+        drain_request!(gs)
+
+    elseif mt == MethodType.CLIENT_STREAMING
+        # Lazy receive: read one request at a time (the client half-closes when done).
+        recv_cb = function()
+            m = read_message!(gs)
+            m === nothing && return nothing
+            return deserialize_message(m, method_desc.input_type)
+        end
+        cancel_cb = () -> is_cancelled(gs)
+        status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+
+    elseif mt == MethodType.BIDI_STREAMING
+        send_response_headers!(gs, _grpc_ok_headers(content_type))
+        if service.name == "grpc.reflection.v1alpha.ServerReflection"
+            # Reflection is request-response: handle each request incrementally and
+            # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
+            while (m = read_message!(gs)) !== nothing
+                status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
+                if status != StatusCode.OK
+                    send_trailers!(gs, _grpc_status_trailers(status, message))
+                    return nothing
+                end
+                isempty(resp) || send_message!(gs, resp)
+            end
+            send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
+            return nothing
+        end
+        # User-defined bidi: read each request lazily and emit responses live, so
+        # request-response exchanges are not deadlocked.
+        recv_cb = function()
+            m = read_message!(gs)
+            m === nothing && return nothing
+            return deserialize_message(m, method_desc.input_type)
+        end
+        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        close_cb = () -> nothing
+        cancel_cb = () -> is_cancelled(gs)
+        status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
+        send_trailers!(gs, _grpc_status_trailers(status, message))
+
+    else
+        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Unsupported method type"))
+    end
+    return nothing
 end
 
 """
@@ -1851,36 +2073,33 @@ function get_response_content_type(stream::HTTP2Stream)::String
 end
 
 """
-    send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
+    send_grpc_response(s::PureHTTP2GRPCStream,
                        status::StatusCode.T, message::String, data::Vector{UInt8};
                        content_type::String="application/grpc")
 
-Send a complete gRPC response (headers, data, trailers).
+Send a complete gRPC response (headers, data, trailers) through the
+[`AbstractGRPCStream`](@ref) contract.
 Checks stream state before sending - if stream is not sendable, logs a warning and returns.
 """
-function send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
+function send_grpc_response(s::PureHTTP2GRPCStream,
                             status::StatusCode.T, message::String, data::Vector{UInt8};
                             content_type::String="application/grpc")
     # Check if stream is still sendable before attempting to send
-    if !can_send_on_stream(conn, stream_id)
-        @warn "Cannot send gRPC response, stream not in sendable state" stream_id
+    if !can_send_on_stream(s.conn, s.stream.id)
+        @warn "Cannot send gRPC response, stream not in sendable state" stream_id=s.stream.id
         return
     end
 
     # Send response headers
-    response_headers = [
+    send_response_headers!(s, [
         (":status", "200"),
         ("content-type", content_type),
         ("grpc-encoding", "identity"),
-    ]
-    header_frames = send_headers(conn, stream_id, response_headers; end_stream=false)
-    write_frames(io, header_frames)
+    ])
 
     # Send response data (with gRPC framing)
     if !isempty(data)
-        grpc_message = encode_grpc_message(data)
-        data_frames = send_data(conn, stream_id, grpc_message; end_stream=false)
-        write_frames(io, data_frames)
+        send_message!(s, data)
     end
 
     # Send trailers with status
@@ -1890,8 +2109,7 @@ function send_grpc_response(conn::HTTP2Connection, io::IO, stream_id::UInt32,
     if !isempty(message)
         push!(trailers, ("grpc-message", message))
     end
-    trailer_frames = send_trailers(conn, stream_id, trailers)
-    write_frames(io, trailer_frames)
+    send_trailers!(s, trailers)
 end
 
 """
@@ -1961,7 +2179,10 @@ function Base.show(io::IO, server::GRPCServer)
     print(io, "GRPCServer($(server.host):$(server.port), status=$(server.status)")
     print(io, ", services=$(length(services(server)))")
     if server.config.tls !== nothing
-        tls_status = server.tls_transport !== nothing ? "active" : "configured"
+        # "active" once TLS is actually serving: PureHTTP2 sets tls_transport,
+        # the HTTP.jl backend sets httpjl_server (it owns its own TLS listener).
+        tls_active = server.tls_transport !== nothing || server.httpjl_server !== nothing
+        tls_status = tls_active ? "active" : "configured"
         print(io, ", TLS=$tls_status")
     end
     print(io, ")")

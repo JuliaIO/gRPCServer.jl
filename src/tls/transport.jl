@@ -217,7 +217,11 @@ function accept_one(t::TLSTransport)::NegotiatedConnection
     end
 
     alpn = state.alpn_protocol
-    if alpn === nothing
+    # Reseau >= 1.1 completes the TLS handshake even when ALPN does not match,
+    # surfacing an empty/`nothing` negotiated protocol instead of failing the
+    # handshake (Reseau 1.0 failed the handshake outright). Treat a missing,
+    # empty, or non-configured negotiated protocol uniformly as an ALPN mismatch.
+    if alpn === nothing || isempty(alpn)
         peer = _peer_addr(conn)
         try; close(conn); catch; end
         throw(TLSHandshakeError(TLSHandshakeFailureKind.ALPN_MISMATCH,
@@ -227,8 +231,8 @@ function accept_one(t::TLSTransport)::NegotiatedConnection
     if !(alpn in t.grpc_config.alpn_protocols)
         peer = _peer_addr(conn)
         try; close(conn); catch; end
-        throw(TLSHandshakeError(TLSHandshakeFailureKind.HANDSHAKE_IO_ERROR,
-            "ALPN readback returned unexpected value: $(alpn) (configured=$(t.grpc_config.alpn_protocols))";
+        throw(TLSHandshakeError(TLSHandshakeFailureKind.ALPN_MISMATCH,
+            "client negotiated ALPN '$(alpn)' which is not in the configured set (configured=$(t.grpc_config.alpn_protocols))";
             peer = peer))
     end
 

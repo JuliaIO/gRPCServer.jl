@@ -16,6 +16,9 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    # A deadlocked test run must fail fast instead of burning the 6h GitHub
+    # Actions ceiling: the suite completes in well under 10 min when healthy.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -36,12 +39,12 @@ jobs:
             arch: aarch64
             version: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
 
       # Install grpcurl for example validation
       - name: Install grpcurl (Ubuntu)
@@ -51,11 +54,18 @@ jobs:
           curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
           grpcurl --version
 
+      # Downloaded rather than installed via Homebrew: brew emits a tap-trust
+      # warning for aws/tap, which is pre-tapped on the macOS runner image and
+      # unrelated to this project. A direct download is also faster and pins the
+      # version, matching the Linux and Windows steps.
       - name: Install grpcurl (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install grpcurl
-          grpcurl --version
+          GRPCURL_VERSION="1.8.9"
+          mkdir -p "$HOME/bin"
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_osx_arm64.tar.gz" | tar -xz -C "$HOME/bin" grpcurl
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/grpcurl" --version
 
       - name: Install grpcurl (Windows)
         if: runner.os == 'Windows'
@@ -70,7 +80,7 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -79,15 +89,16 @@ jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       statuses: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - name: Configure doc environment
         run: |
           julia --project=docs -e '

@@ -9,7 +9,7 @@ end
 if !@isdefined(gRPCServer)
     using gRPCServer
 end
-using JSON3
+using JSON
 
 # ============================================================================
 # Test Harness Functions (T009-T013)
@@ -23,7 +23,10 @@ Returns a NamedTuple with `cases` array and optional `description`.
 """
 function load_test_file(path::String)
     content = read(path, String)
-    return JSON3.read(content)
+    # JSON.jl v1 (successor to the deprecated JSON3.jl). `JSON.parse` returns a
+    # `JSON.Object` supporting property access (`.cases`, `.seqno`, ...),
+    # `hasproperty`, and `pairs`, so the access patterns below are unchanged.
+    return JSON.parse(content)
 end
 
 """

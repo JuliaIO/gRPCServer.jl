@@ -132,7 +132,7 @@ using gRPCServer
         # This should return early without throwing (logs a warning)
         # Using Test.@test_logs to verify warning is logged
         @test_logs (:warn, r"Cannot send gRPC response") gRPCServer.send_grpc_response(
-            conn, io, UInt32(1),
+            gRPCServer.PureHTTP2GRPCStream(conn, io, stream),
             gRPCServer.StatusCode.OK, "", UInt8[]
         )
 
@@ -173,7 +173,7 @@ using gRPCServer
 
         # This should return early without throwing
         @test_logs (:warn, r"Cannot send gRPC response") gRPCServer.send_grpc_response(
-            conn, io, UInt32(999),
+            gRPCServer.PureHTTP2GRPCStream(conn, io, gRPCServer.HTTP2Stream(999)),
             gRPCServer.StatusCode.OK, "", UInt8[]
         )
 

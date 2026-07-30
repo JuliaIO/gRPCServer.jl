@@ -1,15 +1,17 @@
 name = "gRPCServer"
 uuid = "608c6337-0d7d-447f-bb69-0f5674ee3959"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["gRPCServer Contributors"]
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 ProtoBuf = "3349acd9-ac6a-5e09-bcdb-63829b23a429"
+PureHTTP2 = "7d1e1b98-28e7-4969-8df9-5a308937986a"
 Reseau = "802f3686-a58f-41ce-bb0c-3c43c75bba36"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 TranscodingStreams = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
@@ -17,9 +19,11 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 CodecZlib = "0.7"
-Coverage = "1.8"
+HTTP = "2.1"
+JSON = "1"
 PrecompileTools = "1"
 ProtoBuf = "1.2"
+PureHTTP2 = "0.5"
 Reseau = "1"
 TranscodingStreams = "0.9"
 gRPCClient = "1"
@@ -27,10 +31,9 @@ julia = "1.10"
 
 [extras]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
-Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
-JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 gRPCClient = "aaca4a50-36af-4a1d-b878-4c443f2061ad"
 
 [targets]
-test = ["Aqua", "Coverage", "JSON3", "Test", "gRPCClient"]
+test = ["Aqua", "JSON", "Test", "gRPCClient"]
