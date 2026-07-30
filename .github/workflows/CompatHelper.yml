@@ -1,0 +1,33 @@
+# Opens pull requests raising [compat] bounds as dependencies release new
+# versions.
+#
+# This package pins six runtime dependencies (HTTP, ProtoBuf, Reseau,
+# PureHTTP2, CodecZlib, TranscodingStreams), several of which move quickly.
+# Chasing those bounds by hand is how compat drift goes unnoticed until a
+# resolve fails or a fix is unavailable because the bound is too tight.
+name: CompatHelper
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  CompatHelper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - name: Install CompatHelper
+        run: julia -e 'using Pkg; Pkg.add("CompatHelper")'
+      - name: Run CompatHelper
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPATHELPER_PRIV: ${{ secrets.DOCUMENTER_KEY }}
+        run: julia -e 'using CompatHelper; CompatHelper.main()'
