@@ -124,3 +124,28 @@ end
         @test elapsed isa Real && elapsed >= 3.0
     end
 end
+
+@testset "Nghttp2Backend is an opt-in extension" begin
+    # Nghttp2Wrapper is a *weak* dependency: the backend type is declared here so
+    # users can name it, but everything that touches nghttp2 lives in an
+    # extension that only loads when Nghttp2Wrapper is present. Constructing the
+    # backend without it must fail with a message that says what to do, not with
+    # a MethodError from deep inside the adapter.
+    @test isdefined(gRPCServer, :Nghttp2Backend)
+    @test gRPCServer.Nghttp2Backend <: gRPCServer.AbstractHTTP2Backend
+
+    if isdefined(Main, :Nghttp2Wrapper)
+        @test Nghttp2Backend() isa Nghttp2Backend
+    else
+        err = try
+            Nghttp2Backend()
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        msg = sprint(showerror, err)
+        @test occursin("Nghttp2Wrapper", msg)   # names what to load
+        @test occursin("using", msg)            # and how
+    end
+end

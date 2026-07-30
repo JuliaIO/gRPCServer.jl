@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Nghttp2Backend`, an optional third HTTP/2 backend** over the `nghttp2` C
+  library via [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl).
+  Nghttp2Wrapper is a **weak** dependency (`[weakdeps]` + `[extensions]`), so it
+  adds nothing to a default install; the backend type is declared in the package
+  and everything touching nghttp2 lives in `ext/gRPCServerNghttp2Ext.jl`.
+  Constructing it without the extension loaded raises an `ArgumentError` naming
+  what to load.
+
+  Serves **unary and client-streaming** calls. Server-streaming and
+  bidirectional calls are refused with `UNIMPLEMENTED`: Nghttp2Wrapper's handler
+  is buffered, so a response cannot be emitted message by message, and serving
+  them with wrong timing would deadlock request/response exchanges such as
+  server reflection.
+
+  Verified end to end: a unary call round-trips through nghttp2, and a
+  server-streaming call is refused with a clear status.
 - **`uses_serve_grpc` and `stop_serving!` on the backend contract.** `start!` and
   `stop!` previously branched on `isa HTTPjlBackend` and hard-coded HTTP.jl's
   bounded-shutdown logic, which no third backend could reuse. Backend-specific

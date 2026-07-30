@@ -35,6 +35,10 @@
 !src/
 !src/**
 
+# Package extensions (weak dependencies)
+!ext/
+!ext/*.jl
+
 # Documentation
 !docs/
 !docs/**
