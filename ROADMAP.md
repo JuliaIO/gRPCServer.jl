@@ -2,6 +2,48 @@
 
 This document outlines planned improvements and missing features for gRPCServer.jl based on the project constitution requirements.
 
+## Open Questions
+
+### Large request bodies on `PureHTTP2Backend`
+
+**Status**: Open — upstream, tracked in PureHTTP2.jl.
+
+A unary request whose body exceeds the HTTP/2 initial flow-control window
+(65535 bytes) never reaches the handler on `PureHTTP2Backend`: the stream is
+reset. `HTTPjlBackend`, the default, is unaffected — its own version of this
+limit was fixed in 0.2.0.
+
+The cause is in PureHTTP2.jl's connection layer, not here. See its ROADMAP for
+the seven hypotheses measured and eliminated. Nothing to do in this repository
+beyond widening the `PureHTTP2` compat bound once a fixed version is released.
+
+### A third backend via Nghttp2Wrapper.jl
+
+**Status**: Not started — worth scoping.
+
+The two current backends have independent protocol-level defects: stream
+teardown on the HTTP.jl side (fixed in 0.2.0, but it took a packet capture to
+find), request-side flow control on the PureHTTP2 side (still open). Both live
+in code this project or its sibling maintains.
+
+A backend over `nghttp2`, the C reference implementation, would move that
+surface out of scope. It would implement the raised `AbstractGRPCStream` /
+`serve_grpc` contract rather than the connection factory, so no change to this
+package is required.
+
+**Prerequisite**: assess what Nghttp2Wrapper.jl exposes for the *server* role.
+PureHTTP2.jl already uses it in interop tests, but largely as a client. That
+assessment determines whether this is realistic now or premature.
+
+### Residual: `wait_for_message_or_end` discards response frames
+
+**Status**: Open — small, isolated.
+
+`wait_for_message_or_end` calls `process_frame` and drops the frames it
+returns, where the main connection loop writes them back. That is wrong on its
+own terms — those frames include flow-control updates. Measured *not* to be the
+cause of the large-request failure above, which is why it was never committed.
+
 ## High Priority
 
 ### Server Streaming RPC Support with grpcurl
