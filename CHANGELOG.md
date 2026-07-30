@@ -106,13 +106,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | 1.12  | 1       | HTTP.jl | 12/12 |
 
   So it is total under a single thread on the LTS, partial with more threads, and
-  absent on 1.12 and on PureHTTP2. Root cause not yet identified. Established:
+  absent on 1.12 and on PureHTTP2.
+
+  **It requires client and server to share one process.** With the server in one
+  process and the client in another, both Julia 1.10 single-threaded, 24 of 24
+  calls succeed. A server process on its own is therefore not affected — what is
+  affected is the in-process test configuration, which is also what `Pkg.test()`
+  produces (it runs single-threaded).
+
+  Root cause not yet identified. Established:
   - Not HTTP.jl on its own — a bare HTTP.jl server answering gRPCClient (no
     gRPCServer code server-side) is clean on Julia 1.10.
-  - Not client/server colocation — it also occurs across two processes.
-  - Timing-sensitive: adding logging to the dispatch path makes it vanish.
+  - Not the blocking `read` in `read_message!`: inserting a `sleep(0.001)` on the
+    *response* path (`send_trailers!`) recovers 8/8 just as well as inserting one
+    before the read, while a bare `yield()` before the read recovers only 1/8. So
+    what matters is parking the handler task on a libuv timer at all, not where in
+    the call it happens — and it is not the read that wedges.
   - Not fixed by gRPCClient.jl PR #127 (which targets request-streaming
     pause/resume): 0/12 both with and without it.
+  - HTTP.jl 2.x drives I/O through Reseau's own epoll poller while gRPCClient
+    drives libcurl from libuv `Timer` callbacks; two event loops in one
+    single-threaded process is the leading hypothesis, not a confirmed cause.
 
   A minimal reproducer is in `test/repro/httpjl_single_thread_julia110.jl`.
   Shutdown no longer hangs when this fires (see Fixed), so it now surfaces as a
