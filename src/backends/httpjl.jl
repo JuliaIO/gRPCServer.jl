@@ -170,6 +170,41 @@ function reset!(s::HTTPjlGRPCStream, code)
     return nothing
 end
 
+"""
+    drain_request!(s::HTTPjlGRPCStream)
+
+Consume the unread remainder of the request body.
+
+`read_message!` reads exactly the 5-byte gRPC prefix plus the declared message
+length, so a unary or server-streaming call stops short of end-of-stream even
+though the client already sent END_STREAM. HTTP.jl treats an unread request body
+at handler return as an abandoned request and emits `RST_STREAM(CANCEL)` — *after*
+it has already closed the stream with END_STREAM on the trailers. nghttp2/libcurl
+then reports `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` whenever it
+processes that reset before finalising the response.
+
+Confirmed on the wire (tshark, h2c): 128 server-sent `RST_STREAM err=CANCEL`
+frames across 200 calls, each ~11µs after the trailers that had already ended the
+stream, and absent from the streams that succeeded.
+
+Safe to wait for end-of-stream here only because the caller restricts this to
+RPCs that read exactly one request message, where the client has already
+half-closed. Calling it on a bidirectional stream would hang — a bidi client may
+hold its send side open indefinitely, which is exactly what server reflection
+does.
+"""
+function drain_request!(s::HTTPjlGRPCStream)
+    io = s.stream
+    try
+        while !eof(io)
+            read(io)
+        end
+    catch
+        # The client may already be gone; the response is sent by this point.
+    end
+    return nothing
+end
+
 # --- Serve loop ---
 
 """

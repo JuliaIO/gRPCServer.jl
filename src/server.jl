@@ -1624,6 +1624,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         end
         status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
         send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+        drain_request!(gs)
 
     elseif mt == MethodType.SERVER_STREAMING
         data = read_message!(gs)
@@ -1637,6 +1638,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         close_cb = () -> nothing
         status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
         send_trailers!(gs, _grpc_status_trailers(status, message))
+        drain_request!(gs)
 
     elseif mt == MethodType.CLIENT_STREAMING
         # Lazy receive: read one request at a time (the client half-closes when done).

@@ -145,3 +145,22 @@ function send_trailers! end
 Abort the stream (RST_STREAM equivalent) with the given error code.
 """
 function reset! end
+
+"""
+    drain_request!(s::AbstractGRPCStream)
+
+Consume any unread remainder of the request body. Called only after an RPC that
+reads exactly one request message (unary, server-streaming), where the client has
+already half-closed its send side — so this must never block.
+
+Backends that need no such step keep the default no-op. It exists because
+`read_message!` reads exactly the gRPC prefix plus the declared length and so
+stops short of end-of-stream; a backend that treats an unread request body at
+handler return as an abandoned request would otherwise reset a stream it had
+already completed. See the `HTTPjlGRPCStream` method for the concrete case.
+
+Deliberately not called for client-streaming or bidirectional RPCs: those read
+until end-of-stream anyway, and a bidi client may legitimately hold its send side
+open, in which case waiting for end-of-stream would hang.
+"""
+drain_request!(::AbstractGRPCStream) = nothing
