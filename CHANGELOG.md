@@ -93,19 +93,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reseau regression surfaced by requiring Reseau >= 1.1.1 for HTTP.jl 2.x. The
   affected expectation is marked `@test_broken` in `test/integration/test_tls.jl`
   pending an upstream fix.
-- **Intermittent `RST_STREAM CANCEL` on the HTTP.jl backend under Julia 1.10.**
-  A unary call served by `HTTPjlBackend` occasionally fails with
+- **`RST_STREAM CANCEL` on the HTTP.jl backend under Julia 1.10.** Unary calls
+  served by `HTTPjlBackend` fail with
   `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` when the client is
-  gRPCClient.jl. Not reproduced on Julia 1.12. Root cause not yet identified;
-  what is established so far:
-  - It is not HTTP.jl on its own — a bare HTTP.jl server answering gRPCClient
-    (no gRPCServer code on the server side) is clean on Julia 1.10.
-  - It is not client/server colocation — it also occurs across two processes.
-  - It is timing-sensitive: adding logging to the dispatch path makes it vanish,
-    and it does not correlate reliably with thread count.
-  `PureHTTP2Backend()` has not exhibited it. A minimal reproducer is in
-  `test/repro/httpjl_single_thread_julia110.jl`. Shutdown no longer hangs when
-  this fires (see Fixed), so it now surfaces as a normal test failure.
+  gRPCClient.jl. Measured over 12 sequential calls per run against one server:
+
+  | Julia | threads | backend | result |
+  |-------|---------|---------|--------|
+  | 1.10  | 1       | HTTP.jl | 0/12 (two runs, 24 consecutive failures) |
+  | 1.10  | 2       | HTTP.jl | 7/12 – 9/12 |
+  | 1.10  | 1       | PureHTTP2 | 12/12 |
+  | 1.12  | 1       | HTTP.jl | 12/12 |
+
+  So it is total under a single thread on the LTS, partial with more threads, and
+  absent on 1.12 and on PureHTTP2. Root cause not yet identified. Established:
+  - Not HTTP.jl on its own — a bare HTTP.jl server answering gRPCClient (no
+    gRPCServer code server-side) is clean on Julia 1.10.
+  - Not client/server colocation — it also occurs across two processes.
+  - Timing-sensitive: adding logging to the dispatch path makes it vanish.
+  - Not fixed by gRPCClient.jl PR #127 (which targets request-streaming
+    pause/resume): 0/12 both with and without it.
+
+  A minimal reproducer is in `test/repro/httpjl_single_thread_julia110.jl`.
+  Shutdown no longer hangs when this fires (see Fixed), so it now surfaces as a
+  normal test failure rather than a 6-hour CI timeout.
 - `HTTPjlBackend` limitations (HTTP.jl owns the listener and TLS context):
   - Live TLS certificate reload (`reload_tls!`) is not supported.
   - No configurable max-concurrent-streams limit (HTTP.jl advertises none).
