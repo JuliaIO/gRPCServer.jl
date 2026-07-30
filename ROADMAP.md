@@ -31,9 +31,35 @@ surface out of scope. It would implement the raised `AbstractGRPCStream` /
 `serve_grpc` contract rather than the connection factory, so no change to this
 package is required.
 
-**Prerequisite**: assess what Nghttp2Wrapper.jl exposes for the *server* role.
-PureHTTP2.jl already uses it in interop tests, but largely as a client. That
-assessment determines whether this is realistic now or premature.
+**Prerequisite assessment (done, 2026-07-30): premature — two gaps upstream.**
+
+`Nghttp2Wrapper.HTTP2Server` exists, with an accept loop, TLS/ALPN, and the
+nghttp2 data-provider callback wired up. Two things block a gRPC backend on top
+of it, both in Nghttp2Wrapper rather than here:
+
+1. **No trailer support.** `grep -ri trailer src/` returns nothing. Every gRPC
+   response terminates with `grpc-status` in a trailing HEADERS block — this is
+   not optional, and no gRPC call can complete without it. Needs
+   `nghttp2_submit_trailer` exposed.
+
+2. **The handler model is fully buffered.** It is
+   `ServerRequest(method, path, headers, body)` → `ServerResponse(status,
+   headers, body)`: the whole request body arrives before the handler runs, and
+   the whole response body is returned at once. That cannot express
+   server-streaming, client-streaming or bidirectional calls, and it cannot
+   emit trailers after a body. The `_server_data_source_read_cb` data provider
+   is the right foundation for incremental writes, so the gap is in the exposed
+   API rather than in the binding.
+
+Until both land upstream, a `Nghttp2Backend` here would have nothing to adapt.
+The order is: extend Nghttp2Wrapper.jl first, then implement the backend
+against the raised `AbstractGRPCStream` contract.
+
+**When it does land**, it must be a *weak* dependency — a package extension
+(`[weakdeps]` + `[extensions]`, supported by the `julia = "1.10"` bound), not a
+hard one. The backend type would be declared in the main package with a
+capability guard that fails fast when the extension is not loaded, mirroring
+`HTTPjlBackend`'s `_assert_httpjl_capable`.
 
 ### Residual: `wait_for_message_or_end` discards response frames
 
