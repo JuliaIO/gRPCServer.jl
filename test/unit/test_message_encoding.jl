@@ -12,7 +12,12 @@ if !isdefined(@__MODULE__, :TestUtils)
 end
 
 # Include conformance test data
-include("../fixtures/conformance_data.jl")
+# Guarded: nine test files load this module and runtests.jl includes them all
+# into the same namespace, so an unguarded include redefines it and Julia prints
+# "WARNING: replacing module ConformanceData" once per extra include.
+if !isdefined(@__MODULE__, :ConformanceData)
+    include("../fixtures/conformance_data.jl")
+end
 using .ConformanceData
 
 @testset "AC3: Message Encoding" begin

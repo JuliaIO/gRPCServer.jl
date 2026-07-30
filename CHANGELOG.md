@@ -29,11 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
 - CI jobs carry an explicit `timeout-minutes` (45 for tests, 30 for docs) so a
   deadlocked run fails fast instead of burning the 6-hour GitHub Actions ceiling
-- CI actions bumped off the Node.js 20 runtime, which GitHub now forces onto
-  Node.js 24 with a deprecation warning on every job: `actions/checkout` v4→v5,
-  `julia-actions/setup-julia` v2→v3, `julia-actions/cache` v2→v3 (which also
-  carries its transitive `actions/cache` and `pyTooling/Actions` forward),
-  `codecov/codecov-action` v4→v5
+- Test-output noise removed: the nine test files that load
+  `fixtures/conformance_data.jl` now guard the include, which was printing
+  "WARNING: replacing module ConformanceData" eight times per run, and the
+  deliberate unknown-protobuf-type case in `test/unit/test_dispatch.jl` asserts
+  its warning with `@test_logs` instead of letting it leak into the log
 - grpcurl on the macOS runner is downloaded from its GitHub release instead of
   installed via Homebrew, which emitted a tap-trust warning for `aws/tap` — a tap
   pre-installed on the runner image and unrelated to this project
@@ -82,6 +82,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
+- **TLS tests were silently skipping in CI.** `test/fixtures/certs/` is gitignored,
+  so a fresh checkout — every CI run — had no certificates and each TLS testset
+  skipped itself with a warning while the job still reported success. That hid the
+  entire TLS surface of this release (ALPN negotiation, mTLS enforcement,
+  certificate reload, and the openssl/grpcurl interop suite) from CI. `runtests.jl`
+  now generates the fixtures when they are absent, which took an explicit call:
+  the generator guards its entry point with `abspath(PROGRAM_FILE) == @__FILE__`,
+  so including it alone defines the function without running it. From a clean
+  checkout the suite goes from 9226 tests with 3 TLS skips to 9281 with none.
 - **The HTTP.jl backend no longer cancels streams it has already completed.**
   `read_message!` reads exactly the 5-byte gRPC prefix plus the declared message
   length, so a unary or server-streaming call stopped short of EOF even though the

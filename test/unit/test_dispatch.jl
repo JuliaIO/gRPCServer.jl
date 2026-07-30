@@ -147,9 +147,12 @@ using gRPCServer
     end
 
     @testset "deserialize_message" begin
-        # Unknown type returns raw bytes (with warning)
+        # Unknown type returns raw bytes and warns. Assert the warning rather
+        # than letting it leak into the test output as noise.
         data = UInt8[0x01, 0x02, 0x03]
-        result = gRPCServer.deserialize_message(data, "test.UnknownType")
+        result = @test_logs (:warn, r"Unknown protobuf type") match_mode = :any begin
+            gRPCServer.deserialize_message(data, "test.UnknownType")
+        end
         @test result == data
 
         # Empty message is valid for known types
