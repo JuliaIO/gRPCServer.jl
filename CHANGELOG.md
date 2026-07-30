@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI pipeline now triggers on `develop` branch pushes (in addition to `main` and PRs)
 - CI jobs carry an explicit `timeout-minutes` (45 for tests, 30 for docs) so a
   deadlocked run fails fast instead of burning the 6-hour GitHub Actions ceiling
+- CI actions bumped off the Node.js 20 runtime, which GitHub now forces onto
+  Node.js 24 with a deprecation warning on every job: `actions/checkout` v4→v5,
+  `julia-actions/setup-julia` v2→v3, `julia-actions/cache` v2→v3 (which also
+  carries its transitive `actions/cache` and `pyTooling/Actions` forward),
+  `codecov/codecov-action` v4→v7 — v5 and v6 were not enough: v5 pins
+  `actions/github-script` v7.0.1, which is itself node20; v7 pins v8.0.0
 - Test-output noise removed: the nine test files that load
   `fixtures/conformance_data.jl` now guard the include, which was printing
   "WARNING: replacing module ConformanceData" eight times per run, and the
