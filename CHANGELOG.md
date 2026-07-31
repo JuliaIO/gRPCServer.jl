@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The consequence for users is the same one the job encodes: `Nghttp2Backend`
   is **not available on the Julia 1.10 LTS**.
+
+  Requires Nghttp2Wrapper 0.3, whose bounded `close` matters here: on 0.2.x the
+  out-of-process test server could not be shut down by closing its stdin and had
+  to be killed.
 - **`uses_serve_grpc` and `stop_serving!` on the backend contract.** `start!` and
   `stop!` previously branched on `isa HTTPjlBackend` and hard-coded HTTP.jl's
   bounded-shutdown logic, which no third backend could reuse. Backend-specific

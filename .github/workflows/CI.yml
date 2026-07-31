@@ -114,6 +114,13 @@ jobs:
           julia --project=@nghttp2 -e '
             using Pkg
             Pkg.develop(PackageSpec(path = pwd()))
-            Pkg.add(["Nghttp2Wrapper", "gRPCClient", "Test"])'
+            Pkg.add(["Nghttp2Wrapper", "gRPCClient", "ProtoBuf", "Test"])'
       - name: Run the nghttp2 end-to-end tests
+        # Restrict loading to this environment plus the standard library.
+        # Without it a developer's default environment silently completes any
+        # missing dependency, so the tests pass locally and fail here — which is
+        # exactly what happened with ProtoBuf. `@stdlib` must stay: dropping it
+        # hides Sockets and Test, which no environment declares explicitly.
+        env:
+          JULIA_LOAD_PATH: "@:@stdlib"
         run: julia --project=@nghttp2 test/nghttp2/run_nghttp2_tests.jl

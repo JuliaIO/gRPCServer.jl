@@ -11,8 +11,14 @@
 #     julia --project=@nghttp2 -e '
 #         using Pkg
 #         Pkg.develop(path = ".")
-#         Pkg.add(["Nghttp2Wrapper", "gRPCClient", "Test"])'
-#     julia --project=@nghttp2 test/nghttp2/run_nghttp2_tests.jl
+#         Pkg.add(["Nghttp2Wrapper", "gRPCClient", "ProtoBuf", "Test"])'
+#     JULIA_LOAD_PATH=@:@stdlib julia --project=@nghttp2 \
+#         test/nghttp2/run_nghttp2_tests.jl
+#
+# That JULIA_LOAD_PATH is not optional if you want to reproduce CI: without it
+# your default environment quietly supplies anything missing here, and the run
+# passes locally while failing on a bare runner. Keep `@stdlib` — dropping it
+# hides Sockets and Test.
 #
 # The suite in `test/backends/test_httpjl_backend.jl` covers the *opposite*
 # case — the extension absent — and runs on every job.
