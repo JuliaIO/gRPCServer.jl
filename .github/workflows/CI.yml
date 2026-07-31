@@ -85,3 +85,42 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  nghttp2:
+    # The optional nghttp2 backend, on the latest stable Julia only.
+    #
+    # It cannot join the matrix above. Nghttp2Wrapper.jl requires Julia 1.12 —
+    # it calls nghttp2's size_t API, added in nghttp2 1.57.0, and nghttp2_jll is
+    # a standard library, so the 1.10 LTS ships 1.52.0 and cannot satisfy it.
+    # gRPCServer declares its test dependencies once, in [extras], for the whole
+    # matrix; adding Nghttp2Wrapper there would break dependency resolution on
+    # the LTS job outright rather than skipping these tests.
+    #
+    # Hence a separate environment and a separate job. The suite in
+    # test/backends/ covers the opposite case — the extension absent — and runs
+    # everywhere.
+    name: nghttp2 backend (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v3
+      - name: Build the nghttp2 environment
+        # A named shared environment, so nothing is written into the checkout.
+        run: |
+          julia --project=@nghttp2 -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path = pwd()))
+            Pkg.add(["Nghttp2Wrapper", "gRPCClient", "ProtoBuf", "Test"])'
+      - name: Run the nghttp2 end-to-end tests
+        # Restrict loading to this environment plus the standard library.
+        # Without it a developer's default environment silently completes any
+        # missing dependency, so the tests pass locally and fail here — which is
+        # exactly what happened with ProtoBuf. `@stdlib` must stay: dropping it
+        # hides Sockets and Test, which no environment declares explicitly.
+        env:
+          JULIA_LOAD_PATH: "@:@stdlib"
+        run: julia --project=@nghttp2 test/nghttp2/run_nghttp2_tests.jl

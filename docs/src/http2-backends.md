@@ -30,7 +30,9 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 | You need… | Use |
 |-----------|-----|
 | The default, on the widely-used Julia HTTP stack | `HTTPjlBackend` (default) |
+| Any streaming RPC type | `HTTPjlBackend` or `PureHTTP2Backend` |
 | Request bodies larger than ~64 KB | `HTTPjlBackend` — see below |
+| The `nghttp2` C reference implementation | `Nghttp2Backend` — unary and client-streaming only |
 | Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
 | A configurable max-concurrent-streams limit | `PureHTTP2Backend` |
 | A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
@@ -52,6 +54,48 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
     max-concurrent-streams limit. mTLS over TLS 1.2 is also currently broken
     upstream in Reseau (it works over TLS 1.3). Select `PureHTTP2Backend()` if
     you need any of these.
+
+## The nghttp2 Backend
+
+`Nghttp2Backend` serves gRPC over the `nghttp2` C library through
+[Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl), which is an
+**optional** dependency — a package extension, not a hard requirement. Load it
+before constructing the backend:
+
+```julia
+using gRPCServer, Nghttp2Wrapper
+server = GRPCServer("127.0.0.1", 50051; http2_backend = Nghttp2Backend())
+```
+
+Constructing it without `Nghttp2Wrapper` loaded raises an `ArgumentError` naming
+what to load, rather than failing later inside the adapter.
+
+!!! note "Not available on the Julia 1.10 LTS"
+    Nghttp2Wrapper.jl requires Julia 1.12. It calls nghttp2's `size_t` API,
+    introduced in nghttp2 1.57.0, and `nghttp2_jll` is a standard library — so
+    the version of libnghttp2 available is whichever one the Julia sysimage
+    ships, and 1.10 ships 1.52.0.
+
+    On the LTS, `Pkg` simply will not install Nghttp2Wrapper, so the extension
+    never loads and `Nghttp2Backend()` raises. The other two backends are
+    unaffected.
+
+!!! warning "Unary and client-streaming only"
+    Nghttp2Wrapper's server handler is buffered: it receives a complete request
+    and returns a complete response, so a handler cannot emit messages as it
+    produces them.
+
+    Unary and client-streaming calls are served correctly — all request messages
+    are in hand, and the single response is emitted at the end.
+
+    Server-streaming and bidirectional calls are **refused** with
+    `UNIMPLEMENTED` and an explanatory message. They are not served with wrong
+    timing: a bidirectional request/response exchange, such as server
+    reflection, would deadlock waiting for a reply that is only flushed once the
+    handler returns.
+
+    Nghttp2Wrapper's ROADMAP Milestone 7 tracks the incremental handler that
+    would lift this.
 
 ## Shutdown Semantics
 
@@ -75,7 +119,7 @@ A graceful stop that exhausts its budget logs a warning and forces the close, so
 in tests, for instance, where it removes the drain wait entirely.
 
 !!! warning "Do not call `close` on the underlying HTTP.jl server"
-    `close(server.httpjl_server)` bypasses this bounding and can hang
+    `close(server.backend_handle)` bypasses this bounding and can hang
     indefinitely. Always go through `stop!`.
 
 ## The Backend Interface
@@ -183,16 +227,13 @@ PureHTTP2.jl's object model in a library that has its own.
 HTTP.jl was the future backend in earlier versions of this page; its HTTP/2
 support has since landed and it is now the default.
 
-The remaining candidate is
-[Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl), wrapping the
-`nghttp2` C library via `nghttp2_jll`. The argument for it is concrete: the two
-current backends have independent protocol-level defects — stream teardown on
-one, request-side flow control on the other — and a mature C implementation
-would move that surface out of this project's maintenance scope.
+The nghttp2 backend has since landed as `Nghttp2Backend` — see above. It
+implements the raised `AbstractGRPCStream` contract through a package
+extension, and required no change to the dispatch core, which was the point of
+that contract.
 
-It would implement the raised `AbstractGRPCStream` contract rather than the
-connection factory, since it has no reason to imitate PureHTTP2.jl's object
-model. No change to gRPCServer.jl itself is needed either way.
+What it does not yet cover is streaming, and that gap is upstream: the
+incremental handler is Nghttp2Wrapper.jl's ROADMAP Milestone 7.
 
 ## API Reference
 

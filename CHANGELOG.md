@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Nghttp2Backend`, an optional third HTTP/2 backend** over the `nghttp2` C
+  library via [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl).
+  Nghttp2Wrapper is a **weak** dependency (`[weakdeps]` + `[extensions]`), so it
+  adds nothing to a default install; the backend type is declared in the package
+  and everything touching nghttp2 lives in `ext/gRPCServerNghttp2Ext.jl`.
+  Constructing it without the extension loaded raises an `ArgumentError` naming
+  what to load.
+
+  Serves **unary and client-streaming** calls. Server-streaming and
+  bidirectional calls are refused with `UNIMPLEMENTED`: Nghttp2Wrapper's handler
+  is buffered, so a response cannot be emitted message by message, and serving
+  them with wrong timing would deadlock request/response exchanges such as
+  server reflection.
+
+  Verified end to end **in CI**, by a dedicated `nghttp2` job: a unary call
+  round-trips, an error status propagates through the trailers, and a
+  server-streaming call is refused with `UNIMPLEMENTED`.
+
+  That job is separate from the test matrix on purpose. Nghttp2Wrapper requires
+  Julia 1.12 — it calls nghttp2's `size_t` API, added in nghttp2 1.57.0, and
+  `nghttp2_jll` is a standard library, so the 1.10 LTS ships 1.52.0 and cannot
+  satisfy it. Since gRPCServer declares its test dependencies once in
+  `[extras]` for the whole matrix, adding Nghttp2Wrapper there would break
+  dependency resolution on the LTS job outright rather than skip the tests. The
+  job therefore builds its own environment on the latest stable Julia, and its
+  first assertion is that the extension really loaded — a job that silently
+  exercises nothing is worse than no job, because it reports green.
+
+  The consequence for users is the same one the job encodes: `Nghttp2Backend`
+  is **not available on the Julia 1.10 LTS**.
+
+  Requires Nghttp2Wrapper 0.3, whose bounded `close` matters here: on 0.2.x the
+  out-of-process test server could not be shut down by closing its stdin and had
+  to be killed.
+- **`uses_serve_grpc` and `stop_serving!` on the backend contract.** `start!` and
+  `stop!` previously branched on `isa HTTPjlBackend` and hard-coded HTTP.jl's
+  bounded-shutdown logic, which no third backend could reuse. Backend-specific
+  knowledge now lives with its backend; `GRPCServer.httpjl_server` is renamed
+  `backend_handle` accordingly.
 - **HTTP.jl HTTP/2 backend, now the default.** `HTTPjlBackend` serves gRPC over
   HTTP.jl (≥ 2.1) — cleartext h2c and TLS (ALPN `h2`), across all four RPC types
   plus server reflection. A `GRPCServer` constructed without naming a backend now

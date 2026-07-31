@@ -133,6 +133,7 @@ AbstractHTTP2Backend
 PureHTTP2Backend
 create_connection
 HTTPjlBackend
+Nghttp2Backend
 ```
 
 ### Raised stream-handler contract (HTTP.jl backend)

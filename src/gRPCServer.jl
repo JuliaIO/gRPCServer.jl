@@ -66,6 +66,7 @@ include("backends/purehttp2.jl")
 
 # 4b. HTTP.jl HTTP/2 backend adapter (feature 020)
 include("backends/httpjl.jl")
+include("backends/nghttp2.jl")
 
 # 5. Context and streams (depend on config, errors)
 include("context.jl")
@@ -150,7 +151,7 @@ export has_health_descriptor, has_reflection_descriptor
 # HTTP/2 Backend Abstraction
 export AbstractHTTP2Backend, PureHTTP2Backend, create_connection
 # HTTP.jl backend + raised stream-handler contract (feature 020)
-export HTTPjlBackend, AbstractGRPCStream, serve_grpc
+export HTTPjlBackend, Nghttp2Backend, AbstractGRPCStream, serve_grpc
 
 # HTTP/2 Stream State (for advanced use cases)
 export can_send, StreamError
