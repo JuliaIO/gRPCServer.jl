@@ -22,8 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them with wrong timing would deadlock request/response exchanges such as
   server reflection.
 
-  Verified end to end: a unary call round-trips through nghttp2, and a
-  server-streaming call is refused with a clear status.
+  Verified end to end **in CI**, by a dedicated `nghttp2` job: a unary call
+  round-trips, an error status propagates through the trailers, and a
+  server-streaming call is refused with `UNIMPLEMENTED`.
+
+  That job is separate from the test matrix on purpose. Nghttp2Wrapper requires
+  Julia 1.12 — it calls nghttp2's `size_t` API, added in nghttp2 1.57.0, and
+  `nghttp2_jll` is a standard library, so the 1.10 LTS ships 1.52.0 and cannot
+  satisfy it. Since gRPCServer declares its test dependencies once in
+  `[extras]` for the whole matrix, adding Nghttp2Wrapper there would break
+  dependency resolution on the LTS job outright rather than skip the tests. The
+  job therefore builds its own environment on the latest stable Julia, and its
+  first assertion is that the extension really loaded — a job that silently
+  exercises nothing is worse than no job, because it reports green.
+
+  The consequence for users is the same one the job encodes: `Nghttp2Backend`
+  is **not available on the Julia 1.10 LTS**.
 - **`uses_serve_grpc` and `stop_serving!` on the backend contract.** `start!` and
   `stop!` previously branched on `isa HTTPjlBackend` and hard-coded HTTP.jl's
   bounded-shutdown logic, which no third backend could reuse. Backend-specific

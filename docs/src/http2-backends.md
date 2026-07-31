@@ -70,6 +70,16 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend = Nghttp2Backend())
 Constructing it without `Nghttp2Wrapper` loaded raises an `ArgumentError` naming
 what to load, rather than failing later inside the adapter.
 
+!!! note "Not available on the Julia 1.10 LTS"
+    Nghttp2Wrapper.jl requires Julia 1.12. It calls nghttp2's `size_t` API,
+    introduced in nghttp2 1.57.0, and `nghttp2_jll` is a standard library — so
+    the version of libnghttp2 available is whichever one the Julia sysimage
+    ships, and 1.10 ships 1.52.0.
+
+    On the LTS, `Pkg` simply will not install Nghttp2Wrapper, so the extension
+    never loads and `Nghttp2Backend()` raises. The other two backends are
+    unaffected.
+
 !!! warning "Unary and client-streaming only"
     Nghttp2Wrapper's server handler is buffered: it receives a complete request
     and returns a complete response, so a handler cannot emit messages as it

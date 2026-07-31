@@ -4,7 +4,7 @@
 # through the environment so the parent needs no serialisation:
 #
 #   GRPCSERVER_TEST_PORT     port to bind (required)
-#   GRPCSERVER_TEST_BACKEND  "httpjl" (default) | "purehttp2"
+#   GRPCSERVER_TEST_BACKEND  "httpjl" (default) | "purehttp2" | "nghttp2"
 #   GRPCSERVER_TEST_SERVICE  "interop" (default) | "unhandled_error"
 #
 # Prints exactly one line on stdout once it is accepting connections:
@@ -30,6 +30,12 @@ backend = if BACKEND == "purehttp2"
     PureHTTP2Backend()
 elseif BACKEND == "httpjl"
     HTTPjlBackend()
+elseif BACKEND == "nghttp2"
+    # Loaded here and not at the top of the file: Nghttp2Wrapper requires Julia
+    # 1.12, while this script also serves the main suite on the 1.10 LTS. An
+    # unconditional `using` would make every backend unusable on the LTS.
+    @eval using Nghttp2Wrapper
+    Base.invokelatest(Nghttp2Backend)
 else
     error("unknown GRPCSERVER_TEST_BACKEND: $BACKEND")
 end
@@ -47,7 +53,13 @@ gRPCServer.register_service!(server.dispatcher, descriptor)
 server.health_status[descriptor.name] = HealthStatus.SERVING
 start!(server)
 
-actual = server.http2_backend isa HTTPjlBackend ? "httpjl" : "purehttp2"
+actual = if server.http2_backend isa HTTPjlBackend
+    "httpjl"
+elseif server.http2_backend isa PureHTTP2Backend
+    "purehttp2"
+else
+    "nghttp2"
+end
 println("READY $PORT $actual")
 flush(stdout)
 
