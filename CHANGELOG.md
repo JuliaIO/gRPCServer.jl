@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **`stop_serving!` for `Nghttp2Backend`.** The generic method just closes the
+  handle, which dropped both of gRPCServer's shutdown arguments: a forced stop
+  still waited out the grace period, and a caller asking for thirty seconds
+  silently got Nghttp2Wrapper's five. `force` now means zero grace, an explicit
+  `timeout` is passed through, and otherwise Nghttp2Wrapper picks its own
+  default.
+
+  One half of this is blocked upstream and marked `@test_broken` rather than
+  hidden: on Nghttp2Wrapper 0.3.0 a forced stop still waits for a running
+  handler, because its `close` submits GOAWAY under the connection lock that a
+  live handler holds. Measured at 4.21s against a 4s handler. Fixed upstream,
+  unreleased; `@test_broken` makes Test.jl report "Unexpectedly Passed" the
+  moment the bound can be raised.
+
+### Added
 - **`Nghttp2Backend`, an optional third HTTP/2 backend** over the `nghttp2` C
   library via [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl).
   Nghttp2Wrapper is a **weak** dependency (`[weakdeps]` + `[extensions]`), so it

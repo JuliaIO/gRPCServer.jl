@@ -102,3 +102,97 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
         grpc_shutdown()
     end
 end
+
+@testset "stop_serving! forwards force and timeout" begin
+    # Driven with a raw nghttp2 client session over h2c rather than gRPCClient:
+    # the point here is the adapter's shutdown method, and an in-process
+    # gRPCClient call against a colocated server is unreliable for reasons
+    # unrelated to it (see remote_harness.jl).
+    using Sockets
+    using Nghttp2Wrapper: HTTP2Server, ServerResponse, Callbacks, NVPair,
+                          to_nghttp2_nv, nghttp2_session_client_new,
+                          nghttp2_session_del, nghttp2_submit_settings,
+                          nghttp2_submit_request2, Nghttp2SettingsEntry,
+                          NGHTTP2_FLAG_NONE, listener_port
+
+    function connect_retry(port)
+        for _ in 1:50
+            try
+                return Sockets.connect("127.0.0.1", port)
+            catch
+                sleep(0.2)
+            end
+        end
+        return nothing
+    end
+
+    function fire_request(sock, path)
+        cb = Callbacks()
+        rv, session = nghttp2_session_client_new(cb.ptr)
+        rv == 0 || error("client session")
+        nghttp2_submit_settings(session, NGHTTP2_FLAG_NONE,
+                                Ptr{Nghttp2SettingsEntry}(C_NULL), 0)
+        hs = [NVPair(":method", "POST"), NVPair(":path", path),
+              NVPair(":scheme", "http"), NVPair(":authority", "localhost")]
+        nva = [to_nghttp2_nv(h) for h in hs]
+        GC.@preserve hs nva begin
+            nghttp2_submit_request2(session, C_NULL, pointer(nva), length(nva),
+                                    C_NULL, C_NULL)
+            write(sock, Nghttp2Wrapper._session_send_all(session))
+            flush(sock)
+        end
+        return session, cb
+    end
+
+    function await_flag(flag, seconds)
+        deadline = time() + seconds
+        while !flag[] && time() < deadline
+            sleep(0.05)
+        end
+        return flag[]
+    end
+
+    # `force = true` must not wait for the handler; the default must.
+    for (label, kwargs, waits) in (("forced", (; force = true), false),
+                                   ("graceful", (; timeout = 30.0), true))
+        entered = Ref(false)
+        finished = Ref(false)
+        handle = HTTP2Server(0) do req
+            entered[] = true
+            sleep(4.0)
+            finished[] = true
+            ServerResponse(200, "slow")
+        end
+        port = listener_port(handle)
+        sock = connect_retry(port)
+        @test sock !== nothing
+        session, cb = fire_request(sock, "/slow")
+        @test await_flag(entered, 15.0)
+
+        started = time()
+        gRPCServer.stop_serving!(Nghttp2Backend(), handle; kwargs...)
+        elapsed = time() - started
+
+        if waits
+            @test finished[]
+            @test elapsed > 1.0
+        else
+            # Should return without waiting out the 4s handler — and does not,
+            # on Nghttp2Wrapper 0.3.0. Its `close` submits GOAWAY under the
+            # connection lock, which the connection task holds for the whole
+            # duration of a running handler, so `timeout = 0` blocks for exactly
+            # as long as the handler. Measured: 4.21s.
+            #
+            # Fixed upstream (the GOAWAY lock wait is now bounded), unreleased.
+            # `@test_broken` rather than a relaxed bound so that Test.jl reports
+            # "Unexpectedly Passed" the moment the pin can be raised, instead of
+            # this quietly staying wrong.
+            @test_broken elapsed < 3.0
+        end
+        @test elapsed < 30.0
+
+        nghttp2_session_del(session)
+        close(cb)
+        try; close(sock); catch; end
+    end
+end
