@@ -4,6 +4,50 @@ This document outlines planned improvements and missing features for gRPCServer.
 
 ## Open Questions
 
+### Streaming interop coverage on the LTS
+
+**Status**: Blocked upstream, waiting on a release
+
+Our interop suite gates every streaming test behind `VERSION >= v"1.12"`, in
+`test/integration/test_grpcclient.jl` and
+`test/integration/grpcclient/client_stubs.jl`. The consequence is easy to
+overlook and worth stating plainly: **on the Julia 1.10 job, the server-streaming,
+client-streaming and bidirectional paths are exercised against no real client at
+all.** Only unary, error propagation, compression and the sustained-call
+regression run there.
+
+The gate is not ours by choice. gRPCClient 1.0.4 compiles `Streaming.jl` out
+below 1.12 (`@static if VERSION >= v"1.12"`, warning citing
+[gRPCClient#68](https://github.com/JuliaIO/gRPCClient.jl/issues/68)).
+
+[gRPCClient#129](https://github.com/JuliaIO/gRPCClient.jl/pull/129) traces that
+to **two libcurl bugs rather than a Julia one**: `select_bits_paused` ORs the two
+directions in libcurl 8.4.0–8.5.0, so a paused upload also stops the download —
+which is what Julia 1.10 bundles; and 8.6.0 clobbers a transfer's pending read
+interest, which is what hits 1.11. Demonstrated by swapping only libcurl under an
+unchanged Julia 1.10: the suite goes from 5m12s with errors on 8.4.0 to passing
+in 12s on 8.15.0. Server streaming is unaffected either way, since it never
+pauses the upload.
+
+**Nothing here is a defect in this package.** The two client-visible faults we
+found and fixed were ours and were proven server-side — the undrained request
+body causing spurious `RST_STREAM(CANCEL)`, and the >64 KB truncation from
+`Base.read` returning short.
+
+**When gRPCClient 1.1.0 is released** (General currently has 1.0.4; 1.1.0-rc1
+exists but a prerelease is not selected by our `gRPCClient = "1"` bound):
+
+- [ ] Drop both `@static if VERSION >= v"1.12"` guards
+- [ ] Raise the `gRPCClient` compat bound to the release that carries the fix
+- [ ] Confirm the streaming interop tests pass on the 1.10 job
+
+**Worth re-measuring at the same time**, without over-reading it: `remote_harness.jl`
+runs the test server out-of-process because a colocated client measured 0/24.
+Those failures were unary and the libcurl wedge is described for
+request-streaming, so the two are probably unrelated — but "the caller blocks
+until its deadline" is exactly the symptom our 120s `_warmup` was built around.
+If it turns out to have been this, the harness can be simplified.
+
 ### Large request bodies on `PureHTTP2Backend`
 
 **Status**: Open — upstream, tracked in PureHTTP2.jl.
@@ -97,7 +141,9 @@ Integration tests against [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.
 - [x] Test compression negotiation
 
 **Notes**:
-- Streaming tests (server, client, bidi) require Julia >= 1.12 and are version-gated
+- Streaming tests (server, client, bidi) are gated on Julia >= 1.12 — not because
+  of Julia, but because of libcurl; see *Streaming interop coverage on the LTS*
+  under Open Questions
 - Unary and error tests run on all Julia versions (1.10+)
 - Fixed HTTP/2 ENABLE_PUSH compliance (RFC 9113) discovered during testing
 - Metadata/header passing tests deferred to a follow-up
