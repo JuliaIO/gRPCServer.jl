@@ -142,4 +142,37 @@ function serve_grpc(::gRPCServer.Nghttp2Backend, server, on_call)
     return Nghttp2Wrapper.HTTP2Server(handler, server.port; host = server.host)
 end
 
+"""
+    stop_serving!(::Nghttp2Backend, server; force, timeout)
+
+Shut the nghttp2 listener down, mapping gRPCServer's shutdown contract onto
+Nghttp2Wrapper's.
+
+The default method just closes the handle, which drops both arguments: a forced
+stop would still wait out the grace period, and a caller asking for thirty
+seconds would silently get five.
+
+- `force` means do not wait for anything in flight, so the grace period is zero
+- an explicit `timeout` is passed through
+- otherwise Nghttp2Wrapper picks its own default grace
+
+Requires Nghttp2Wrapper 0.3, where `close` became bounded and gained the
+keyword; on 0.2.x it could not return at all while a peer held a connection
+open.
+"""
+function gRPCServer.stop_serving!(::gRPCServer.Nghttp2Backend, server;
+                                  force::Bool = false, timeout::Float64 = 0.0)
+    try
+        if force
+            close(server; timeout = 0.0)
+        elseif timeout > 0.0
+            close(server; timeout = timeout)
+        else
+            close(server)
+        end
+    catch
+    end
+    return nothing
+end
+
 end # module
