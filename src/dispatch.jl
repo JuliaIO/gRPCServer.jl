@@ -81,7 +81,11 @@ function _type_to_proto_name(T::Type)::String
     parts = String[]
     while mod !== Main && mod !== Base && mod !== Core
         pushfirst!(parts, string(nameof(mod)))
-        mod = parentmodule(mod)
+        parent = parentmodule(mod)
+        # Top-level package modules are self-parented. Without this guard a protobuf type
+        # nested under a package module makes automatic service registration loop forever.
+        parent === mod && break
+        mod = parent
     end
 
     if isempty(parts)

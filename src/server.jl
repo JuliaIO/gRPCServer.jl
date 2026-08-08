@@ -1544,7 +1544,10 @@ end
 # through the AbstractGRPCStream ops.
 function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc")
     send_response_headers!(gs, _grpc_ok_headers(content_type))
-    isempty(data) || send_message!(gs, data)
+    # A valid proto3 message may encode to zero bytes when every field has its default value.
+    # Successful unary calls must still emit its five-byte gRPC message frame. A trailers-only
+    # success is interpreted by standard clients as "no response message" (`None` in Python).
+    (status == StatusCode.OK || !isempty(data)) && send_message!(gs, data)
     send_trailers!(gs, _grpc_status_trailers(status, message))
     return nothing
 end
