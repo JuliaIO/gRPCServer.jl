@@ -86,6 +86,28 @@ gRPCServer.send_trailers!(s::IncompleteRequestStream, trailers) =
     (append!(s.trailers, [(String(k), String(v)) for (k, v) in trailers]); nothing)
 gRPCServer.reset!(s::IncompleteRequestStream, code) = nothing
 
+@testset "successful empty protobuf responses retain a message frame" begin
+    success = IncompleteRequestStream("/test.Empty/Success")
+    gRPCServer.send_grpc_response_generic(
+        success,
+        StatusCode.OK,
+        "",
+        UInt8[],
+    )
+    @test success.messages == [UInt8[]]
+    @test ("grpc-status", "0") in success.trailers
+
+    failure = IncompleteRequestStream("/test.Empty/Failure")
+    gRPCServer.send_grpc_response_generic(
+        failure,
+        StatusCode.NOT_FOUND,
+        "missing",
+        UInt8[],
+    )
+    @test isempty(failure.messages)
+    @test ("grpc-status", string(Int(StatusCode.NOT_FOUND))) in failure.trailers
+end
+
 @testset "an incomplete request message must not dispatch as an empty one" begin
     # Regression guard against silent data corruption. `read_message!` returns
     # `nothing` both for "stream ended" and for "message truncated mid-body";
