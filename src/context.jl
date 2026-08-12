@@ -54,6 +54,7 @@ Request-scoped context provided to handler functions.
 - `cancelled::Bool`: Whether the request has been cancelled
 - `peer::PeerInfo`: Client connection information
 - `trace_context::Union{Vector{UInt8}, Nothing}`: Distributed tracing context
+- `payload::Any`: Arbitrary server-side payload (unused by the transport)
 
 # Example
 ```julia
@@ -89,6 +90,7 @@ mutable struct ServerContext
     cancelled::Bool
     peer::PeerInfo
     trace_context::Union{Vector{UInt8}, Nothing}
+    payload::Any
 
     function ServerContext(;
         method::String="",
@@ -96,7 +98,8 @@ mutable struct ServerContext
         metadata::Dict{String, Union{String, Vector{UInt8}}}=Dict{String, Union{String, Vector{UInt8}}}(),
         deadline::Union{DateTime, Nothing}=nothing,
         peer::PeerInfo=PeerInfo(IPv4("0.0.0.0"), 0),
-        trace_context::Union{Vector{UInt8}, Nothing}=nothing
+        trace_context::Union{Vector{UInt8}, Nothing}=nothing,
+        payload::Any=nothing
     )
         new(
             uuid4(),
@@ -108,7 +111,8 @@ mutable struct ServerContext
             deadline,
             false,
             peer,
-            trace_context
+            trace_context,
+            payload
         )
     end
 end
@@ -251,58 +255,10 @@ function cancel!(ctx::ServerContext)
     ctx.cancelled = true
 end
 
-"""
-    parse_grpc_timeout(timeout_str::String) -> Union{DateTime, Nothing}
-
-Parse a gRPC timeout header value to a deadline.
-
-Format: `<value><unit>` where unit is one of:
-- `H`: hours
-- `M`: minutes
-- `S`: seconds
-- `m`: milliseconds
-- `u`: microseconds
-- `n`: nanoseconds
-
-# Example
-```julia
-deadline = parse_grpc_timeout("30S")  # 30 seconds
-deadline = parse_grpc_timeout("500m")  # 500 milliseconds
-```
-"""
-function parse_grpc_timeout(timeout_str::String)::Union{DateTime, Nothing}
-    if isempty(timeout_str)
-        return nothing
-    end
-
-    # Parse value and unit
-    unit = timeout_str[end]
-    value_str = timeout_str[1:end-1]
-
-    value = tryparse(Int64, value_str)
-    if value === nothing || value < 0
-        return nothing
-    end
-
-    # Convert to milliseconds
-    ms = if unit == 'H'
-        value * 3600000
-    elseif unit == 'M'
-        value * 60000
-    elseif unit == 'S'
-        value * 1000
-    elseif unit == 'm'
-        value
-    elseif unit == 'u'
-        value ÷ 1000
-    elseif unit == 'n'
-        value ÷ 1000000
-    else
-        return nothing
-    end
-
-    return now() + Millisecond(ms)
-end
+# parse_grpc_timeout is defined in strict.jl (included before this file):
+# strict spec-validated parsing (1-8 digits + unit, checked arithmetic) that
+# returns a DateTime deadline and throws GRPCError(StatusCode.INVALID_ARGUMENT)
+# on malformed non-empty values (empty = absent -> nothing).
 
 """
     format_grpc_timeout(deadline::DateTime) -> String
@@ -416,8 +372,8 @@ function get_response_trailers(ctx::ServerContext, status::Int, message::String)
     ]
 
     if !isempty(message)
-        # URL-encode the message for grpc-message header
-        encoded_message = HTTP_urlencode(message)
+        # Percent-encode the message per the gRPC spec for the grpc-message header
+        encoded_message = percent_encode(message)
         push!(trailers, ("grpc-message", encoded_message))
     end
 

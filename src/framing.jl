@@ -77,10 +77,18 @@ const _FrameView = SubArray{UInt8,1,Vector{UInt8},Tuple{UnitRange{Int64}},true}
 const _FrameBuffer = Base.GenericIOBuffer{_FrameView}
 
 """
-    FrameReader(stream, max_receive_message_length)
+    FrameReader(stream, max_receive_message_length[, request_encoding])
 
 Pull-based decoder of the gRPC length-prefixed framing over an `IO` request
 body (in the server, an `HTTP.Stream`).
+
+`request_encoding` is the value of the request's `grpc-encoding` header, or
+`nothing` (the default) when the client sent none; it enables decompression of
+frames whose compressed flag is set. Messages are rejected with
+`UNIMPLEMENTED` when a compressed frame arrives with no header or an
+unsupported codec, `RESOURCE_EXHAUSTED` when the decompressed payload exceeds
+`max_receive_message_length`, and `INTERNAL` when the compressed data is
+corrupt.
 
 A single growable `buf` holds the bytes pulled from the stream. `r` is the read
 offset (bytes `1:r` have been consumed) and `w` is the write offset (bytes
@@ -94,15 +102,21 @@ message is not copied on its way to the decoder.
 mutable struct FrameReader{S<:IO}
     stream::S
     max_receive_message_length::Int64
+    # Request-side compression codec name from the `grpc-encoding` header, or
+    # `nothing` when the client sent none. Distinct from the explicit
+    # "identity" codec: a compressed frame without a negotiated encoding is a
+    # protocol violation (UNIMPLEMENTED), while explicit identity is a no-op.
+    request_encoding::Union{Nothing, String}
     buf::Vector{UInt8}
     r::Int
     w::Int
     eof::Bool
 end
 
-FrameReader(stream::IO, max_receive_message_length::Integer) = FrameReader(
+FrameReader(stream::IO, max_receive_message_length::Integer, request_encoding::Union{Nothing, AbstractString} = nothing) = FrameReader(
     stream,
     Int64(max_receive_message_length),
+    request_encoding === nothing ? nothing : String(request_encoding),
     Vector{UInt8}(undef, _FRAME_READ_CHUNK),
     0,
     0,
@@ -162,13 +176,18 @@ end
 
 Return the next fully-framed message as an `IOBuffer` positioned at the start,
 or `nothing` at a clean half-close (end of the request stream). Throws
-`GRPCError` on a compressed frame (`UNIMPLEMENTED`), an oversize length prefix
-(`RESOURCE_EXHAUSTED`), or a truncated frame (`INVALID_ARGUMENT`).
+`GRPCError` on a compressed frame with no usable codec (`UNIMPLEMENTED`), an
+oversize length prefix (`RESOURCE_EXHAUSTED`), a truncated frame
+(`INVALID_ARGUMENT`), an oversize decompressed payload (`RESOURCE_EXHAUSTED`)
+or corrupt compressed data (`INTERNAL`).
 
 The returned `IOBuffer` borrows the reader's internal storage. It is only valid
 until the next `read_message!` call (which may grow, compact, or reallocate that
 storage), so it must be fully decoded before reading the following message. All
 callers in this package decode immediately, which preserves that invariant.
+Exception: when the frame's compressed flag is set and a non-identity codec was
+negotiated, the payload is decompressed into a fresh buffer (one allocation,
+inherent to decompression) and the returned buffer borrows that instead.
 """
 function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     if !_ensure!(fr, GRPC_HEADER_SIZE)
@@ -181,12 +200,14 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     len = ntoh(reinterpret(UInt32, view(fr.buf, (fr.r+2):(fr.r+5)))[1])
     fr.r += GRPC_HEADER_SIZE
 
-    compressed && throw(
-        GRPCError(
-            StatusCode.UNIMPLEMENTED,
-            "Request was compressed but compression is not currently supported.",
-        ),
-    )
+    # The compressed flag is only meaningful with a negotiated request encoding.
+    # Reject before buffering any payload: a bare 5-byte frame must not be able
+    # to force work, and both the no-header and unsupported-codec cases map to
+    # UNIMPLEMENTED (the dispatch layer emits that as a trailers-only status).
+    codec = compressed ? _request_codec(fr) : nothing
+    if compressed && codec === nothing
+        throw(_compressed_frame_error(fr))
+    end
 
     if len > fr.max_receive_message_length
         throw(
@@ -198,7 +219,8 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     end
 
     # Empty message: return an empty view of the same concrete type so every
-    # branch yields `_FrameBuffer`.
+    # branch yields `_FrameBuffer`. An empty frame carries no payload to
+    # decompress, so the compressed flag is not consulted.
     len == 0 && return IOBuffer(view(fr.buf, (fr.r+1):fr.r))
 
     if !_ensure!(fr, Int(len))
@@ -207,7 +229,67 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
 
     payload = view(fr.buf, (fr.r+1):(fr.r+Int(len)))
     fr.r += Int(len)
+
+    # Decompress on demand when the client negotiated a non-identity codec. The
+    # result is wrapped in a view of the same concrete type as the borrow above,
+    # so the return type stays stable.
+    if compressed && codec != CompressionCodec.IDENTITY
+        decompressed = _decompress_frame(payload, codec, fr.max_receive_message_length)
+        return IOBuffer(view(decompressed, 1:length(decompressed)))
+    end
+
     return IOBuffer(payload)
+end
+
+# Resolve the codec negotiated by the request's `grpc-encoding` header. `nothing`
+# means there is no usable codec: either the client sent no header at all, or it
+# named an encoding this server does not support.
+_request_codec(fr::FrameReader) = fr.request_encoding === nothing ? nothing : parse_codec(fr.request_encoding)
+
+function _compressed_frame_error(fr::FrameReader)::GRPCError
+    message = if fr.request_encoding === nothing
+        "Request was compressed but no grpc-encoding header was provided."
+    else
+        "Request was compressed with an unsupported grpc-encoding."
+    end
+    return GRPCError(StatusCode.UNIMPLEMENTED, message)
+end
+
+# Incrementally decompress a compressed message payload, capping the output at
+# `maxlen` bytes so a small compressed payload (a "compression bomb") cannot
+# force a huge allocation. Returns a fresh `Vector{UInt8}`. Decompression
+# failure (corrupt/truncated data) surfaces as `GRPCError(INTERNAL)`.
+function _decompress_frame(payload::AbstractVector{UInt8}, codec::CompressionCodec.T, maxlen::Int64)::Vector{UInt8}
+    decompressor = codec == CompressionCodec.GZIP ? GzipDecompressor() : DeflateDecompressor()
+    stream = TranscodingStreams.TranscodingStream(decompressor, IOBuffer(payload))
+    out = IOBuffer()
+    chunk = Vector{UInt8}(undef, _FRAME_READ_CHUNK)
+    n = 0
+    try
+        while !eof(stream)
+            n > maxlen && break
+            m = readbytes!(stream, chunk, min(length(chunk), maxlen + 1 - n))
+            m == 0 && break
+            write(out, view(chunk, 1:m))
+            n += m
+        end
+    catch err
+        throw(
+            GRPCError(
+                StatusCode.INTERNAL,
+                "Failed to decompress gRPC message: $(sprint(showerror, err))",
+            ),
+        )
+    end
+    if n > maxlen
+        throw(
+            GRPCError(
+                StatusCode.RESOURCE_EXHAUSTED,
+                "decompressed message larger than max_receive_message_length: $n > $maxlen",
+            ),
+        )
+    end
+    return take!(out)
 end
 
 # For unary and server-streaming RPCs the client must send exactly one message

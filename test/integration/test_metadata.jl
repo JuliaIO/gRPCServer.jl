@@ -180,9 +180,10 @@ using Dates
             @test remaining <= expected_seconds + 1  # Allow 1 second tolerance
         end
 
-        # Invalid timeout
+        # Invalid timeout: empty is absent (nothing); a malformed non-empty
+        # value throws INVALID_ARGUMENT under the merged strict contract.
         @test gRPCServer.parse_grpc_timeout("") === nothing
-        @test gRPCServer.parse_grpc_timeout("invalid") === nothing
+        @test_throws GRPCError gRPCServer.parse_grpc_timeout("invalid")
     end
 
     @testset "Remaining Time Calculation" begin

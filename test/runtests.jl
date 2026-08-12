@@ -50,6 +50,7 @@ using .TestUtils
     include("unit/test_custom_metadata.jl")
     include("unit/test_error_mapping.jl")
     include("unit/test_dispatch_grpc_error_mapping.jl")
+    include("unit/test_strict.jl")
     include("unit/test_connection_management.jl")
     include("unit/test_timeout_handling.jl")
     include("unit/test_http2_backend.jl")

@@ -72,6 +72,11 @@ include("backends/purehttp2.jl")
 include("backends/httpjl.jl")
 include("backends/nghttp2.jl")
 
+# 4c. Strict HTTP/2/gRPC header helpers (parse_grpc_timeout, percent_encode,
+#     _clip, _is_grpc_content_type) — depend on errors; must precede context.jl
+#     which uses them
+include("strict.jl")
+
 # 5. Context and streams (depend on config, errors)
 include("context.jl")
 include("streams.jl")

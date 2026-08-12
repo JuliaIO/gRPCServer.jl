@@ -130,11 +130,22 @@ is_cancelled(s::HTTPjlGRPCStream)::Bool = !isopen(s.stream)
 
 function read_message!(s::HTTPjlGRPCStream)
     if s.fr === nothing
-        s.fr = FrameReader(s.stream, s.max_receive_message_length)
+        # The request's grpc-encoding header names the codec a compressed frame
+        # uses (absent => nothing, which makes a compressed frame a protocol
+        # violation, UNIMPLEMENTED, in the framing layer).
+        encoding = nothing
+        for (name, value) in request_metadata(s)
+            if name == "grpc-encoding"
+                encoding = value
+                break
+            end
+        end
+        s.fr = FrameReader(s.stream, s.max_receive_message_length, encoding)
     end
     # Returns a borrowed IOBuffer view (zero-copy); `nothing` at end of stream.
     # FrameReader.read_message! enforces max_receive_message_length
-    # (RESOURCE_EXHAUSTED), rejects compressed frames (UNIMPLEMENTED) and maps
+    # (RESOURCE_EXHAUSTED), decompresses frames compressed with the negotiated
+    # codec (UNIMPLEMENTED without one, INTERNAL on corrupt data) and maps
     # truncated frames to INVALID_ARGUMENT.
     return read_message!(s.fr)
 end
@@ -147,6 +158,11 @@ end
 # --- Response side ---
 
 function send_response_headers!(s::HTTPjlGRPCStream, headers)
+    # Send-side compression is not implemented on this backend: responses are
+    # always "grpc-encoding: identity" (see _grpc_ok_headers in server.jl). The
+    # ServerConfig.compression_enabled / compression_threshold / supported_codecs
+    # knobs are therefore inert on the HTTPjl path; outbound compression at
+    # framing time is a planned Phase 4 feature.
     for (k, v) in headers
         if k == ":status"
             HTTP.setstatus(s.stream, parse(Int, v))

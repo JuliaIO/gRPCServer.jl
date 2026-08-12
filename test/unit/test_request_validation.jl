@@ -279,20 +279,25 @@ using .ConformanceData
             @test deadline !== nothing
         end
 
-        @testset "Invalid timeouts return nothing" begin
+        @testset "Invalid timeouts raise INVALID_ARGUMENT" begin
+            # Merged strict contract (Phase 1b): malformed non-empty values throw;
+            # an empty value is absent (no deadline) and returns nothing.
             @test gRPCServer.parse_grpc_timeout("") === nothing
-            @test gRPCServer.parse_grpc_timeout("abc") === nothing
-            @test gRPCServer.parse_grpc_timeout("1X") === nothing
-            @test gRPCServer.parse_grpc_timeout("-1S") === nothing
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("abc")
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("1X")
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("-1S")
         end
 
         @testset "All timeout test cases" begin
+            # Empty is absent (nothing); other should_fail cases now throw;
+            # valid entries must still parse to a deadline.
             for (input, _, should_fail) in ConformanceData.TIMEOUT_TEST_CASES
-                result = gRPCServer.parse_grpc_timeout(input)
-                if should_fail
-                    @test result === nothing
+                if input == ""
+                    @test gRPCServer.parse_grpc_timeout(input) === nothing
+                elseif should_fail
+                    @test_throws GRPCError gRPCServer.parse_grpc_timeout(input)
                 else
-                    @test result !== nothing
+                    @test gRPCServer.parse_grpc_timeout(input) !== nothing
                 end
             end
         end

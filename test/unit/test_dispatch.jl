@@ -161,4 +161,176 @@ using gRPCServer
         @test result isa HealthCheckRequest
         @test result.service == ""
     end
+
+    @testset "MethodDescriptor raw flags" begin
+        # Defaults are false on both constructor variants
+        md_str = MethodDescriptor("M", MethodType.UNARY, "test.Req", "test.Resp", (ctx, req) -> req)
+        @test !md_str.raw_request
+        @test !md_str.raw_response
+
+        md_type = MethodDescriptor("M", MethodType.UNARY, Vector{UInt8}, Vector{UInt8}, (ctx, req) -> req)
+        @test !md_type.raw_request
+        @test !md_type.raw_response
+
+        # Keyword flags set on both constructor variants
+        raw_str = MethodDescriptor(
+            "M", MethodType.UNARY, "test.Req", "test.Resp", (ctx, req) -> req;
+            raw_request = true, raw_response = true,
+        )
+        @test raw_str.raw_request
+        @test raw_str.raw_response
+
+        raw_type = MethodDescriptor(
+            "M", MethodType.UNARY, Vector{UInt8}, Vector{UInt8}, (ctx, req) -> req;
+            raw_request = true, raw_response = true,
+        )
+        @test raw_type.raw_request
+        @test raw_type.raw_response
+    end
+
+    @testset "raw request: fresh copy, no type registry" begin
+        payload = UInt8[0x01, 0x02, 0x03, 0x04]
+
+        # raw=true skips the registry and returns a fresh copy of the raw bytes
+        # even for a type name that IS registered (proving the registry is bypassed).
+        got = gRPCServer.deserialize_message(
+            IOBuffer(payload), "grpc.health.v1.HealthCheckRequest"; raw = true,
+        )
+        @test got isa Vector{UInt8}
+        @test got == payload
+        @test got !== payload # fresh copy, not the input storage
+
+        # raw=false (default) still decodes registered types
+        decoded = gRPCServer.deserialize_message(IOBuffer(payload), "grpc.health.v1.HealthCheckRequest")
+        @test decoded isa HealthCheckRequest
+
+        # Borrowed view input: the copy must outlive the view (a raw handler
+        # holds onto the returned storage after the reader moves on).
+        view_io = IOBuffer(view(payload, 1:3))
+        got2 = gRPCServer.deserialize_message(view_io, "Vector{UInt8}"; raw = true)
+        @test got2 == payload[1:3]
+        @test got2 !== payload
+    end
+
+    @testset "raw response: verbatim passthrough of AbstractVector{UInt8}" begin
+        # Vector{UInt8} passes through as the same object (zero copy)
+        vec = UInt8[0x0a, 0x01, 0x41]
+        @test gRPCServer.serialize_message(vec; raw = true) === vec
+
+        # SubArray also passes through (converted to a plain Vector by the return type)
+        sub = view(vec, 1:2)
+        out = gRPCServer.serialize_message(sub; raw = true)
+        @test out == vec[1:2]
+        @test out isa Vector{UInt8}
+
+        # raw=false (default) is unchanged: Vector{UInt8} still passes through
+        @test gRPCServer.serialize_message(vec) === vec
+
+        # raw=true with a NON-vector value falls through to the normal ProtoBuf
+        # encode path (a String cannot be ProtoBuf-encoded -> the pre-existing
+        # failure behavior returns UInt8[]).
+        @test gRPCServer.serialize_message("hello"; raw = true) == UInt8[]
+    end
+
+    @testset "raw flags honored through dispatch_unary (round trip)" begin
+        payload = UInt8[0x0a, 0x03, 0x61, 0x62, 0x63]
+        received = Ref{Any}(nothing)
+
+        handler = (ctx, req) -> begin
+            received[] = req
+            return req
+        end
+        dispatcher = gRPCServer.RequestDispatcher()
+        descriptor = ServiceDescriptor(
+            "test.RawService",
+            Dict(
+                "Echo" => MethodDescriptor(
+                    "Echo", MethodType.UNARY, "Vector{UInt8}", "Vector{UInt8}", handler;
+                    raw_request = true, raw_response = true,
+                ),
+            ),
+            nothing,
+        )
+        gRPCServer.register_service!(dispatcher, descriptor)
+
+        ctx = ServerContext(method = "/test.RawService/Echo")
+        request_data = IOBuffer(payload)
+        status, message, response = gRPCServer.dispatch_unary(dispatcher, ctx, request_data)
+
+        @test status == StatusCode.OK
+        @test message == ""
+        # The handler received the raw bytes as a fresh copy (not the IOBuffer
+        # storage — read(seekstart(io)) always allocates a new vector)
+        @test received[] isa Vector{UInt8}
+        @test received[] == payload
+        @test received[] !== payload
+        # raw_response passes the handler's vector through verbatim
+        @test response === received[]
+        @test response == payload
+    end
+
+    @testset "raw_request honored through dispatch_server_streaming" begin
+        payload = UInt8[0x01, 0x02]
+        received = Ref{Any}(nothing)
+
+        handler = (ctx, req, stream) -> begin
+            received[] = req
+            return nothing
+        end
+        dispatcher = gRPCServer.RequestDispatcher()
+        descriptor = ServiceDescriptor(
+            "test.RawStreamService",
+            Dict(
+                "M" => MethodDescriptor(
+                    "M", MethodType.SERVER_STREAMING, "Vector{UInt8}", "Vector{UInt8}", handler;
+                    raw_request = true,
+                ),
+            ),
+            nothing,
+        )
+        gRPCServer.register_service!(dispatcher, descriptor)
+
+        ctx = ServerContext(method = "/test.RawStreamService/M")
+        send_cb = (message, compress) -> nothing
+        close_cb = () -> nothing
+        status, message = gRPCServer.dispatch_server_streaming(
+            dispatcher, ctx, IOBuffer(payload), send_cb, close_cb,
+        )
+
+        @test status == StatusCode.OK
+        @test message == ""
+        @test received[] isa Vector{UInt8}
+        @test received[] == payload
+        @test received[] !== payload
+    end
+
+    @testset "raw_response honored through dispatch_client_streaming" begin
+        resp_bytes = UInt8[0x0a, 0x02, 0x78, 0x79]
+        handler = (ctx, stream) -> resp_bytes
+        dispatcher = gRPCServer.RequestDispatcher()
+        descriptor = ServiceDescriptor(
+            "test.RawClientStreamService",
+            Dict(
+                "M" => MethodDescriptor(
+                    "M", MethodType.CLIENT_STREAMING, "Vector{UInt8}", "Vector{UInt8}", handler;
+                    raw_response = true,
+                ),
+            ),
+            nothing,
+        )
+        gRPCServer.register_service!(dispatcher, descriptor)
+
+        ctx = ServerContext(method = "/test.RawClientStreamService/M")
+        recv_cb = () -> nothing
+        cancel_cb = () -> false
+        status, message, response = gRPCServer.dispatch_client_streaming(
+            dispatcher, ctx, recv_cb, cancel_cb,
+        )
+
+        @test status == StatusCode.OK
+        @test message == ""
+        # raw_response passes the handler's vector through verbatim (same object)
+        @test response === resp_bytes
+        @test response == resp_bytes
+    end
 end

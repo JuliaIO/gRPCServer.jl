@@ -82,6 +82,12 @@ using .ConformanceData
 
     # =========================================================================
     # T043: Invalid Timeout Values
+    #
+    # Merged strict contract (Phase 1b): a malformed NON-EMPTY grpc-timeout
+    # throws GRPCError(StatusCode.INVALID_ARGUMENT) — silently ignoring it would
+    # leave the request without a deadline, which a hostile client could exploit
+    # to bypass server timeouts. An empty value is treated as absent (no
+    # deadline), matching the original silent behavior.
     # =========================================================================
 
     @testset "T043: Invalid timeout values" begin
@@ -90,37 +96,42 @@ using .ConformanceData
             @test gRPCServer.parse_grpc_timeout("") === nothing
         end
 
-        @testset "Missing unit returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("100") === nothing
+        @testset "Missing unit throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("100")
         end
 
-        @testset "Missing value returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("S") === nothing
+        @testset "Missing value throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("S")
         end
 
-        @testset "Negative value returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("-1S") === nothing
+        @testset "Negative value throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("-1S")
         end
 
-        @testset "Invalid unit returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("1X") === nothing
-            @test gRPCServer.parse_grpc_timeout("1s") === nothing  # lowercase
-            @test gRPCServer.parse_grpc_timeout("1h") === nothing  # lowercase
+        @testset "Invalid unit throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("1X")
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("1s")  # lowercase
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("1h")  # lowercase
         end
 
-        @testset "Non-numeric value returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("abcS") === nothing
+        @testset "Non-numeric value throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("abcS")
         end
 
-        @testset "Float value returns nothing" begin
-            @test gRPCServer.parse_grpc_timeout("1.5S") === nothing
+        @testset "Float value throws INVALID_ARGUMENT" begin
+            @test_throws GRPCError gRPCServer.parse_grpc_timeout("1.5S")
         end
 
-        @testset "All invalid test cases" begin
+        @testset "All timeout test cases" begin
+            # Empty is absent (nothing); other should_fail cases now throw;
+            # valid entries must still parse to a deadline.
             for (input, _, should_fail) in ConformanceData.TIMEOUT_TEST_CASES
-                if should_fail
-                    result = gRPCServer.parse_grpc_timeout(input)
-                    @test result === nothing
+                if input == ""
+                    @test gRPCServer.parse_grpc_timeout(input) === nothing
+                elseif should_fail
+                    @test_throws GRPCError gRPCServer.parse_grpc_timeout(input)
+                else
+                    @test gRPCServer.parse_grpc_timeout(input) !== nothing
                 end
             end
         end

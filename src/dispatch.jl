@@ -13,6 +13,12 @@ Describes a single RPC method.
 - `input_type::String`: Fully-qualified request message type name
 - `output_type::String`: Fully-qualified response message type name
 - `handler::Function`: Handler function reference
+- `raw_request::Bool`: Treat the request payload as raw protobuf bytes (skip the
+  type registry / ProtoBuf decode; the handler receives a fresh copy of the raw
+  bytes). Default `false`.
+- `raw_response::Bool`: Treat the handler's `AbstractVector{UInt8}` return value
+  as raw protobuf bytes and pass them through verbatim (no ProtoBuf encode).
+  Default `false`.
 
 # Handler Signatures by MethodType
 - `UNARY`: `(ctx::ServerContext, request::T) -> R`
@@ -39,6 +45,8 @@ struct MethodDescriptor
     handler::Function
     input_julia_type::Union{Type, Nothing}
     output_julia_type::Union{Type, Nothing}
+    raw_request::Bool
+    raw_response::Bool
 
     # Constructor with string type names (backward compatible)
     function MethodDescriptor(
@@ -46,9 +54,11 @@ struct MethodDescriptor
         method_type::MethodType.T,
         input_type::String,
         output_type::String,
-        handler::Function
+        handler::Function;
+        raw_request::Bool=false,
+        raw_response::Bool=false
     )
-        new(name, method_type, input_type, output_type, handler, nothing, nothing)
+        new(name, method_type, input_type, output_type, handler, nothing, nothing, raw_request, raw_response)
     end
 
     # Constructor with Julia types (preferred - enables auto-registration)
@@ -57,12 +67,14 @@ struct MethodDescriptor
         method_type::MethodType.T,
         input_type::Type,
         output_type::Type,
-        handler::Function
+        handler::Function;
+        raw_request::Bool=false,
+        raw_response::Bool=false
     )
         # Derive protobuf type name from Julia type
         input_name = _type_to_proto_name(input_type)
         output_name = _type_to_proto_name(output_type)
-        new(name, method_type, input_name, output_name, handler, input_type, output_type)
+        new(name, method_type, input_name, output_name, handler, input_type, output_type, raw_request, raw_response)
     end
 end
 
@@ -342,8 +354,8 @@ function dispatch_unary(
     end
 
     try
-        # Deserialize request
-        request = deserialize_message(request_data, method.input_type)
+        # Deserialize request (per-method raw passthrough honored)
+        request = deserialize_message(request_data, method.input_type; raw=method.raw_request)
 
         # Build interceptor chain
         info = MethodInfo(service.name, method.name, method.method_type)
@@ -352,8 +364,8 @@ function dispatch_unary(
         # Execute handler
         response = handler(ctx, request)
 
-        # Serialize response
-        response_data = serialize_message(response)
+        # Serialize response (per-method raw passthrough honored)
+        response_data = serialize_message(response; raw=method.raw_response)
 
         return (StatusCode.OK, "", response_data)
 
@@ -479,14 +491,26 @@ function get_type_registry()::Dict{String, Type}
 end
 
 """
-    deserialize_message(data::Vector{UInt8}, type_name::String) -> Any
+    deserialize_message(data, type_name::String; raw::Bool=false) -> Any
 
 Deserialize a Protocol Buffer message from raw bytes.
 
 Note: The gRPC Length-Prefixed Message header (5 bytes) should already be stripped
 by the time this function is called. This function receives raw protobuf bytes.
+
+When `raw=true` (per-method `raw_request`), the type registry is skipped and the
+raw bytes are returned as a fresh copy — `data` may be a borrowed buffer (valid
+only until the next read), so a raw handler must receive storage it can hold onto.
 """
-function deserialize_message(data, type_name::String)
+function deserialize_message(data, type_name::String; raw::Bool=false)
+    if raw
+        # Raw-bytes passthrough: no type registry, no ProtoBuf decode. Copy
+        # semantics identical to the unknown-type fallback below: the input may
+        # be a borrowed IOBuffer view, so read into a fresh vector.
+        io = data isa IO ? data : IOBuffer(data)
+        return read(seekstart(io))
+    end
+
     # Look up the Julia type from the registry
     julia_type = get(get_type_registry(), type_name, nothing)
 
@@ -512,14 +536,26 @@ function deserialize_message(data, type_name::String)
 end
 
 """
-    serialize_message(message) -> Vector{UInt8}
+    serialize_message(message; raw::Bool=false) -> Vector{UInt8}
 
 Serialize a Protocol Buffer message to raw bytes.
 
 Note: This returns raw protobuf bytes WITHOUT the gRPC Length-Prefixed header.
 The gRPC framing is added later by the transport layer (server.jl encode_grpc_message).
+
+When `raw=true` (per-method `raw_response`), an `AbstractVector{UInt8}` return
+value is passed through verbatim (no ProtoBuf encode) so the framing layer
+writes those exact bytes; any other type falls through to the normal ProtoBuf
+encode path.
 """
-function serialize_message(message)::Vector{UInt8}
+function serialize_message(message; raw::Bool=false)::Vector{UInt8}
+    # Raw mode: AbstractVector{UInt8} passes through verbatim (the gRPC frame is
+    # built around these exact bytes — zero re-encode, zero copy for Vector{UInt8}).
+    # Non-vector values fall through to the normal ProtoBuf encode below.
+    if raw && message isa AbstractVector{UInt8}
+        return message isa Vector{UInt8} ? message : Vector{UInt8}(message)
+    end
+
     # Serialize message using ProtoBuf
     if message isa Vector{UInt8}
         return message
@@ -590,8 +626,8 @@ function dispatch_server_streaming(
     end
 
     try
-        # Deserialize request
-        request = deserialize_message(request_data, method.input_type)
+        # Deserialize request (per-method raw passthrough honored)
+        request = deserialize_message(request_data, method.input_type; raw=method.raw_request)
 
         # Create server stream
         stream = ServerStream{Any}(send_callback, close_callback)
@@ -664,8 +700,8 @@ function dispatch_client_streaming(
         # Execute handler - it returns the response
         response = wrapped_handler(ctx, stream)
 
-        # Serialize response
-        response_data = serialize_message(response)
+        # Serialize response (per-method raw passthrough honored)
+        response_data = serialize_message(response; raw=method.raw_response)
 
         return (StatusCode.OK, "", response_data)
 
