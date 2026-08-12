@@ -106,10 +106,17 @@ Request headers as gRPC metadata (lowercase names preserved, including binary
 function request_metadata end
 
 """
-    read_message!(s::AbstractGRPCStream) -> Union{Vector{UInt8}, Nothing}
+    read_message!(s::AbstractGRPCStream) -> Union{IOBuffer, Nothing}
 
-Return the next length-prefixed request message, or `nothing` at end of stream.
-Supports incremental reads for client-streaming and bidirectional RPCs.
+Return the next length-prefixed request message as a **borrowed** `IOBuffer`
+wrapping a view of the backend's internal buffer (zero-copy), or `nothing` at
+end of stream. An empty `IOBuffer` is a zero-length message (distinct from
+`nothing`). Supports incremental reads for client-streaming and bidirectional
+RPCs.
+
+The returned buffer is only valid until the next `read_message!` call — decode
+it immediately. (The legacy PureHTTP2 adapter still returns a fresh
+`Vector{UInt8}` until its serve loop is migrated; that is explicitly scoped.)
 """
 function read_message! end
 
@@ -124,9 +131,12 @@ Send the initial response headers (`:status 200`, `content-type`, `grpc-encoding
 function send_response_headers! end
 
 """
-    send_message!(s::AbstractGRPCStream, bytes; compress::Bool=true)
+    send_message!(s::AbstractGRPCStream, framed)
 
-Send one length-prefixed response message (a DATA payload).
+Send one response message. `framed` is the **already-framed** gRPC message (5-byte
+length-prefix header + payload); the adapter writes it to the transport without
+re-framing or copying. Framing happens once, in the dispatch layer, via
+[`grpc_encode_message_iobuffer`](@ref) into a per-call reusable buffer.
 """
 function send_message! end
 
@@ -147,23 +157,32 @@ Abort the stream (RST_STREAM equivalent) with the given error code.
 function reset! end
 
 """
-    drain_request!(s::AbstractGRPCStream)
+    abort_request!(s::AbstractGRPCStream)
 
-Consume any unread remainder of the request body. Called only after an RPC that
-reads exactly one request message (unary, server-streaming), where the client has
-already half-closed its send side — so this must never block.
+Abort the request side of the stream (close-read / RST_STREAM equivalent) when
+the handler finishes without consuming the whole request body — the
+client-streaming / bidirectional early-return case. Must not wait for
+end-of-stream. The default is a no-op for backends whose read side needs no such
+step; `HTTPjlGRPCStream` implements it via `HTTP.closeread`.
 
-Backends that need no such step keep the default no-op. It exists because
-`read_message!` reads exactly the gRPC prefix plus the declared length and so
-stops short of end-of-stream; a backend that treats an unread request body at
-handler return as an abandoned request would otherwise reset a stream it had
-already completed. See the `HTTPjlGRPCStream` method for the concrete case.
-
-Deliberately not called for client-streaming or bidirectional RPCs: those read
-until end-of-stream anyway, and a bidi client may legitimately hold its send side
-open, in which case waiting for end-of-stream would hang.
+Deliberately not called for unary and server-streaming RPCs: those use
+[`expect_half_close!`](@ref) instead, consuming the body to end-of-stream so the
+backend never sees an abandoned request.
 """
-drain_request!(::AbstractGRPCStream) = nothing
+abort_request!(::AbstractGRPCStream) = nothing
+
+"""
+    expect_half_close!(s::AbstractGRPCStream)
+
+For unary and server-streaming RPCs: require that the request stream ends after
+exactly one message — read one more frame and throw `INVALID_ARGUMENT` on extra
+frames. This both drains the body to end-of-stream (so the transport does not
+reset the stream for an abandoned request) and bounds the drain (a misbehaving
+peer streaming endless frames cannot pin the handler). The default is a no-op
+for backends whose framing layer does not need the explicit check;
+`HTTPjlGRPCStream` implements it via [`FrameReader`](@ref).
+"""
+expect_half_close!(::AbstractGRPCStream) = nothing
 
 """
     uses_serve_grpc(backend) -> Bool

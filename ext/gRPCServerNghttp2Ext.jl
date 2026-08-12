@@ -60,7 +60,8 @@ function read_message!(s::Nghttp2GRPCStream)
           (UInt32(body[s.offset + 4]) << 8) | UInt32(body[s.offset + 5])
     stop = s.offset + 5 + Int(len)
     stop > length(body) && return nothing          # truncated
-    msg = body[(s.offset + 6):stop]
+    # Borrowed view into the fully-buffered request body — no copy.
+    msg = IOBuffer(@view body[(s.offset + 6):stop])
     s.offset = stop
     return msg
 end
@@ -78,9 +79,11 @@ function send_response_headers!(s::Nghttp2GRPCStream, headers)
     return nothing
 end
 
-function send_message!(s::Nghttp2GRPCStream, data::AbstractVector{UInt8};
-                       compress::Bool = true)
-    append!(s.body, gRPCServer.encode_grpc_message(Vector{UInt8}(data); compressed = false))
+function send_message!(s::Nghttp2GRPCStream, framed::AbstractVector{UInt8})
+    # `framed` is the already-framed gRPC message built by the dispatch layer.
+    # The buffered model accumulates the response body, so the append copies by
+    # nature (inherent, documented cost of this backend).
+    append!(s.body, framed)
     return nothing
 end
 

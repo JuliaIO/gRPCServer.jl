@@ -46,11 +46,10 @@ function send_response_headers!(s::PureHTTP2GRPCStream, headers)
     return nothing
 end
 
-function send_message!(s::PureHTTP2GRPCStream, data::AbstractVector{UInt8}; compress::Bool = true)
-    # `data` is the serialized message; apply the gRPC length-prefix framing here
-    # (compression negotiation is handled by the dispatch layer as today).
-    grpc_message = encode_grpc_message(Vector{UInt8}(data); compressed = false)
-    frames = send_data(s.conn, s.stream.id, grpc_message; end_stream = false)
+function send_message!(s::PureHTTP2GRPCStream, framed::AbstractVector{UInt8})
+    # `framed` is the already-framed gRPC message (5-byte header + payload) built
+    # once by the dispatch layer; send it verbatim without re-framing or copying.
+    frames = send_data(s.conn, s.stream.id, framed; end_stream = false)
     write_frames(s.io, frames)
     return nothing
 end

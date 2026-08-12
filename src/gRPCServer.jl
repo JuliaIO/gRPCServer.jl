@@ -58,6 +58,10 @@ include("compression.jl")
 # 3. Configuration (depends on compression for CompressionCodec)
 include("config.jl")
 
+# 3b. Zero-copy gRPC framing (FrameReader, grpc_encode_message_iobuffer,
+#     expect_half_close!) — used by the backends and the dispatch layer
+include("framing.jl")
+
 # 4. HTTP/2 backend abstraction (delegates to PureHTTP2.jl)
 include("http2_backend.jl")
 

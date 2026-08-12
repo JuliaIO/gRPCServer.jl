@@ -102,9 +102,19 @@ HTTP.jl backend. The request body is read once (lazily) and drained as gRPC
 length-prefixed messages; this matches the server's existing batch handling of
 client/bidi streaming.
 """
-struct HTTPjlGRPCStream <: AbstractGRPCStream
+mutable struct HTTPjlGRPCStream <: AbstractGRPCStream
     stream::HTTP.Stream
+    max_receive_message_length::Int64
+    # Lazily-created zero-copy frame reader over the request body. `Union{Nothing,...}`
+    # so a stream that never reads a message allocates nothing.
+    fr::Union{Nothing,FrameReader}
 end
+
+HTTPjlGRPCStream(stream::HTTP.Stream, max_receive_message_length::Integer) =
+    HTTPjlGRPCStream(stream, Int64(max_receive_message_length), nothing)
+
+# Compat one-arg constructor (protocol default receive limit).
+HTTPjlGRPCStream(stream::HTTP.Stream) = HTTPjlGRPCStream(stream, 4 * 1024 * 1024)
 
 # --- Request side ---
 
@@ -118,54 +128,20 @@ end
 # stream as cancelled. (Finer-grained reset detection is a future refinement.)
 is_cancelled(s::HTTPjlGRPCStream)::Bool = !isopen(s.stream)
 
-"""
-    _read_exactly(io, n) -> Union{Vector{UInt8}, Nothing}
-
-Read exactly `n` bytes, or return `nothing` if the stream ends first.
-
-`Base.read(io, n)` reads *at most* `n` bytes: on an HTTP.jl stream it returns as
-much as is currently buffered and no more. For a request larger than the HTTP/2
-initial flow-control window (65535 bytes) that means it returns immediately with
-~65530 bytes, `eof` still false, and the rest of the message still in flight.
-Treating that short read as a truncated message capped every request at the
-window size — the "requests over ~64KB fail" limit.
-
-`readbytes!(io, buf, n)` does not help: HTTP.jl overrides it and returns short
-just the same, `all=true` notwithstanding. Hence the explicit loop, with `eof` as
-the blocking point — it waits for more body or a genuine end of stream.
-"""
-function _read_exactly(io, n::Int)
-    n == 0 && return UInt8[]
-    buf = Vector{UInt8}(undef, n)
-    off = 0
-    while off < n
-        # `eof` is the blocking point: it waits until more of the body arrives or
-        # the stream really ends. Without it this would spin on an empty buffer.
-        eof(io) && return nothing
-        chunk = read(io, n - off)
-        isempty(chunk) && return nothing
-        copyto!(buf, off + 1, chunk, 1, length(chunk))
-        off += length(chunk)
+function read_message!(s::HTTPjlGRPCStream)
+    if s.fr === nothing
+        s.fr = FrameReader(s.stream, s.max_receive_message_length)
     end
-    return buf
+    # Returns a borrowed IOBuffer view (zero-copy); `nothing` at end of stream.
+    # FrameReader.read_message! enforces max_receive_message_length
+    # (RESOURCE_EXHAUSTED), rejects compressed frames (UNIMPLEMENTED) and maps
+    # truncated frames to INVALID_ARGUMENT.
+    return read_message!(s.fr)
 end
 
-function read_message!(s::HTTPjlGRPCStream)
-    # Read ONE gRPC length-prefixed message from the request body, waiting only
-    # for that message — so request-response bidi (e.g. reflection) is not
-    # deadlocked waiting for the whole body, and responses reach the client
-    # between requests.
-    #
-    # `_read_exactly` rather than `read(io, n)`: the latter reads *at most* n
-    # bytes and returns short as soon as the buffer runs dry, which caps messages
-    # at the HTTP/2 flow-control window. See its docstring.
-    io = s.stream
-    prefix = _read_exactly(io, 5)
-    prefix === nothing && return nothing  # end of request stream
-    len = (UInt32(prefix[2]) << 24) | (UInt32(prefix[3]) << 16) |
-          (UInt32(prefix[4]) << 8) | UInt32(prefix[5])
-    len == 0 && return UInt8[]
-    return _read_exactly(io, Int(len))    # nothing if the stream ended early
+function expect_half_close!(s::HTTPjlGRPCStream)
+    s.fr === nothing && return nothing
+    return expect_half_close!(s.fr)
 end
 
 # --- Response side ---
@@ -181,8 +157,10 @@ function send_response_headers!(s::HTTPjlGRPCStream, headers)
     return nothing
 end
 
-function send_message!(s::HTTPjlGRPCStream, data::AbstractVector{UInt8}; compress::Bool = true)
-    write(s.stream, encode_grpc_message(Vector{UInt8}(data); compressed = false))
+function send_message!(s::HTTPjlGRPCStream, framed::AbstractVector{UInt8})
+    # `framed` is the already-framed gRPC message (5-byte header + payload); write
+    # it verbatim — no re-framing, no copy.
+    write(s.stream, framed)
     return nothing
 end
 
@@ -203,34 +181,20 @@ function reset!(s::HTTPjlGRPCStream, code)
 end
 
 """
-    drain_request!(s::HTTPjlGRPCStream)
+    abort_request!(s::HTTPjlGRPCStream)
 
-Consume the unread remainder of the request body.
+Abort the unread remainder of the request body via `HTTP.closeread` (sends
+RST_STREAM CANCEL on a still-open stream). Called after a client-streaming or
+bidirectional handler returns early, when the peer may still be sending — the
+read side must not be left open. When the body is already fully consumed,
+`HTTP.closeread` is a no-op.
 
-`read_message!` reads exactly the 5-byte gRPC prefix plus the declared message
-length, so a unary or server-streaming call stops short of end-of-stream even
-though the client already sent END_STREAM. HTTP.jl treats an unread request body
-at handler return as an abandoned request and emits `RST_STREAM(CANCEL)` — *after*
-it has already closed the stream with END_STREAM on the trailers. nghttp2/libcurl
-then reports `HTTP/2 stream N was not closed cleanly: CANCEL (err 8)` whenever it
-processes that reset before finalising the response.
-
-Confirmed on the wire (tshark, h2c): 128 server-sent `RST_STREAM err=CANCEL`
-frames across 200 calls, each ~11µs after the trailers that had already ended the
-stream, and absent from the streams that succeeded.
-
-Safe to wait for end-of-stream here only because the caller restricts this to
-RPCs that read exactly one request message, where the client has already
-half-closed. Calling it on a bidirectional stream would hang — a bidi client may
-hold its send side open indefinitely, which is exactly what server reflection
-does.
+Unary and server-streaming RPCs instead consume the body to end-of-stream via
+[`expect_half_close!`](@ref), so no abort is needed there.
 """
-function drain_request!(s::HTTPjlGRPCStream)
-    io = s.stream
+function abort_request!(s::HTTPjlGRPCStream)
     try
-        while !eof(io)
-            read(io)
-        end
+        HTTP.closeread(s.stream)
     catch
         # The client may already be gone; the response is sent by this point.
     end
@@ -291,7 +255,7 @@ closed by `stop!`).
 """
 function serve_grpc(::HTTPjlBackend, server, on_call)
     handler = function (http_stream)
-        gs = HTTPjlGRPCStream(http_stream)
+        gs = HTTPjlGRPCStream(http_stream, server.config.max_message_size)
         # Peer extraction from HTTP.jl streams is a future refinement.
         peer = PeerInfo(IPv4(0), 0)
         on_call(gs, peer)

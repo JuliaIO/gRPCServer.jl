@@ -1068,7 +1068,8 @@ function handle_server_streaming(
 
         # Create send callback for the ServerStream
         send_callback = function(message, compress)
-            send_message!(s, serialize_message(message))
+            buf = grpc_encode_message_iobuffer(serialize_message(message))
+            send_message!(s, take!(buf))
         end
 
         # Create close callback (no-op for server streaming, trailers sent after)
@@ -1345,7 +1346,8 @@ function handle_bidi_streaming_incremental(
 
         # Send response data
         if !isempty(response_data)
-            send_message!(s, response_data)
+            buf = grpc_encode_message_iobuffer(response_data)
+            send_message!(s, take!(buf))
         end
     end
 
@@ -1433,7 +1435,8 @@ function handle_bidi_streaming(
                 @warn "Attempted to send message after stream closed" stream_id=stream.id
                 return
             end
-            send_message!(s, serialize_message(message))
+            buf = grpc_encode_message_iobuffer(serialize_message(message))
+            send_message!(s, take!(buf))
         end
 
         # Create close callback that sends trailers
@@ -1541,13 +1544,14 @@ function _grpc_status_trailers(status::StatusCode.T, message::String)
 end
 
 # Unary-shaped response (headers + optional data + trailers) emitted purely
-# through the AbstractGRPCStream ops.
-function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc")
+# through the AbstractGRPCStream ops. Framing happens here, once, via
+# grpc_encode_message_iobuffer (the adapters write already-framed bytes).
+function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc", max_send_message_length::Integer=4 * 1024 * 1024)
     send_response_headers!(gs, _grpc_ok_headers(content_type))
     # A valid proto3 message may encode to zero bytes when every field has its default value.
     # Successful unary calls must still emit its five-byte gRPC message frame. A trailers-only
     # success is interpreted by standard clients as "no response message" (`None` in Python).
-    (status == StatusCode.OK || !isempty(data)) && send_message!(gs, data)
+    (status == StatusCode.OK || !isempty(data)) && send_message!(gs, take!(grpc_encode_message_iobuffer(data; max_send_message_length = max_send_message_length)))
     send_trailers!(gs, _grpc_status_trailers(status, message))
     return nothing
 end
@@ -1583,6 +1587,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
     end
     service, method_desc = result
     ctx = _grpc_context_from_metadata(metadata, peer, path)
+    max_send = server.config.max_message_size
 
     if server.config.log_requests
         @info "gRPC request" method=path peer=peer
@@ -1593,26 +1598,33 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         data = read_message!(gs)
         if data === nothing
             send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
-                                       UInt8[]; content_type=content_type)
+                                       UInt8[]; content_type=content_type, max_send_message_length=max_send)
             return nothing
         end
+        # Require exactly one request message: reading one more frame consumes the
+        # body to end-of-stream (no abandoned-request reset) and rejects extra
+        # frames (bounded drain).
+        expect_half_close!(gs)
         status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
-        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
-        drain_request!(gs)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
 
     elseif mt == MethodType.SERVER_STREAMING
         data = read_message!(gs)
         if data === nothing
             send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
-                                       UInt8[]; content_type=content_type)
+                                       UInt8[]; content_type=content_type, max_send_message_length=max_send)
             return nothing
         end
+        expect_half_close!(gs)
         send_response_headers!(gs, _grpc_ok_headers(content_type))
-        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        encode_buf = IOBuffer()
+        send_cb = (message, _compress) -> begin
+            grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
+            send_message!(gs, take!(encode_buf))
+        end
         close_cb = () -> nothing
         status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
         send_trailers!(gs, _grpc_status_trailers(status, message))
-        drain_request!(gs)
 
     elseif mt == MethodType.CLIENT_STREAMING
         # Lazy receive: read one request at a time (the client half-closes when done).
@@ -1623,7 +1635,10 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         end
         cancel_cb = () -> is_cancelled(gs)
         status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
-        send_grpc_response_generic(gs, status, message, resp; content_type=content_type)
+        send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
+        # The handler may have returned before the client half-closed; abort the
+        # read side so the transport does not see an abandoned request.
+        abort_request!(gs)
 
     elseif mt == MethodType.BIDI_STREAMING
         send_response_headers!(gs, _grpc_ok_headers(content_type))
@@ -1636,7 +1651,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                     send_trailers!(gs, _grpc_status_trailers(status, message))
                     return nothing
                 end
-                isempty(resp) || send_message!(gs, resp)
+                isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
             end
             send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
             return nothing
@@ -1648,11 +1663,18 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             m === nothing && return nothing
             return deserialize_message(m, method_desc.input_type)
         end
-        send_cb = (message, _compress) -> send_message!(gs, serialize_message(message))
+        encode_buf = IOBuffer()
+        send_cb = (message, _compress) -> begin
+            grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
+            send_message!(gs, take!(encode_buf))
+        end
         close_cb = () -> nothing
         cancel_cb = () -> is_cancelled(gs)
         status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
         send_trailers!(gs, _grpc_status_trailers(status, message))
+        # The handler may have returned before the client half-closed; abort the
+        # read side so the transport does not see an abandoned request.
+        abort_request!(gs)
 
     else
         send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
@@ -1672,7 +1694,7 @@ For reflection and similar services, handles one request and returns one respons
 function dispatch_streaming_message(
     dispatcher::RequestDispatcher,
     ctx::ServerContext,
-    request_data::Vector{UInt8},
+    request_data::Union{AbstractVector{UInt8}, IO},
     method::MethodDescriptor,
     service::ServiceDescriptor
 )::Tuple{StatusCode.T, String, Vector{UInt8}}
@@ -1696,14 +1718,18 @@ import ProtoBuf as PB
 using ProtoBuf: OneOf
 
 """
-    handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceRegistry) -> Vector{UInt8}
+    handle_reflection_request_raw(data::Union{AbstractVector{UInt8}, IO},
+                                  registry::ServiceRegistry) -> Vector{UInt8}
 
 Handle a reflection request by parsing protobuf, processing, and serializing response.
 Uses ProtoBuf.jl for proper encoding/decoding.
 """
-function handle_reflection_request_raw(data::Vector{UInt8}, registry::ServiceRegistry)::Vector{UInt8}
-    # Decode the request using ProtoBuf.jl
-    request = PB.decode(PB.ProtoDecoder(IOBuffer(data)), ServerReflectionRequest)
+function handle_reflection_request_raw(data::Union{AbstractVector{UInt8}, IO}, registry::ServiceRegistry)::Vector{UInt8}
+    # Decode the request using ProtoBuf.jl — directly from the borrowed buffer
+    # (zero-copy) when the caller hands us an IO, else wrap the vector.
+    io = data isa IO ? data : IOBuffer(data)
+    seekstart(io)
+    request = PB.decode(PB.ProtoDecoder(io), ServerReflectionRequest)
 
     @debug "Reflection request" host=request.host message_request=request.message_request
 
@@ -2073,7 +2099,8 @@ function send_grpc_response(s::PureHTTP2GRPCStream,
 
     # Send response data (with gRPC framing)
     if !isempty(data)
-        send_message!(s, data)
+        buf = grpc_encode_message_iobuffer(data)
+        send_message!(s, take!(buf))
     end
 
     # Send trailers with status

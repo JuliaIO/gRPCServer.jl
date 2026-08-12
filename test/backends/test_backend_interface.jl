@@ -93,7 +93,10 @@ gRPCServer.reset!(s::IncompleteRequestStream, code) = nothing
         "",
         UInt8[],
     )
-    @test success.messages == [UInt8[]]
+    # Framing now happens in send_grpc_response_generic: an empty message is
+    # still sent as its 5-byte gRPC frame (compression flag 0 + big-endian
+    # length 0).
+    @test success.messages == [UInt8[0x00, 0x00, 0x00, 0x00, 0x00]]
     @test ("grpc-status", "0") in success.trailers
 
     failure = IncompleteRequestStream("/test.Empty/Failure")

@@ -325,7 +325,7 @@ Returns (status_code, status_message, response_data).
 function dispatch_unary(
     dispatcher::RequestDispatcher,
     ctx::ServerContext,
-    request_data::Vector{UInt8}
+    request_data::Union{AbstractVector{UInt8}, IO}
 )::Tuple{StatusCode.T, String, Vector{UInt8}}
     path = ctx.method
 
@@ -486,19 +486,24 @@ Deserialize a Protocol Buffer message from raw bytes.
 Note: The gRPC Length-Prefixed Message header (5 bytes) should already be stripped
 by the time this function is called. This function receives raw protobuf bytes.
 """
-function deserialize_message(data::Vector{UInt8}, type_name::String)
+function deserialize_message(data, type_name::String)
     # Look up the Julia type from the registry
     julia_type = get(get_type_registry(), type_name, nothing)
 
     if julia_type === nothing
-        # Unknown type - return raw bytes as fallback
+        # Unknown type - return raw bytes as fallback. `data` may be a borrowed
+        # buffer (valid only until the next read), so return a fresh copy a raw
+        # handler can hold onto.
         @warn "Unknown protobuf type, returning raw bytes" type_name
-        return data
+        io = data isa IO ? data : IOBuffer(data)
+        return read(seekstart(io))
     end
 
-    # Use ProtoBuf.jl to decode the message
+    # Use ProtoBuf.jl to decode the message (zero-copy: decodes straight from the
+    # borrowed buffer when `data` is an IO, else wraps the vector without copying)
     try
-        io = IOBuffer(data)
+        io = data isa IO ? data : IOBuffer(data)
+        seekstart(io)
         decoder = ProtoBuf.ProtoDecoder(io)
         return ProtoBuf.decode(decoder, julia_type)
     catch e
@@ -566,7 +571,7 @@ Returns (status_code, status_message) after streaming completes.
 function dispatch_server_streaming(
     dispatcher::RequestDispatcher,
     ctx::ServerContext,
-    request_data::Vector{UInt8},
+    request_data::Union{AbstractVector{UInt8}, IO},
     send_callback::Function,
     close_callback::Function
 )::Tuple{StatusCode.T, String}
