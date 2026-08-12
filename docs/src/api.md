@@ -1,79 +1,156 @@
 # API Reference
 
-This page documents the full public interface of gRPCServer.jl.
-
-```@meta
-CurrentModule = gRPCServer
-```
-
-## Types
+## Module
 
 ```@docs
-gRPCRouter
-gRPCMethod
-gRPCContext
+gRPCServer
 ```
 
-## Serving
+## Server Types
 
 ```@docs
-serve!
-serve
+GRPCServer
+ServerConfig
+TLSConfig
+ServerStatus
 ```
 
-## Handler registration
+## Context Types
 
 ```@docs
-handle!
+ServerContext
+PeerInfo
 ```
 
-## Context
+## Service Registration
 
 ```@docs
-metadata
-set_initial_metadata!
-set_trailing_metadata!
+ServiceDescriptor
+MethodDescriptor
+MethodType
+register!
+services
+service_descriptor
 ```
 
-## Deadlines and cancellation
+## Stream Types
 
 ```@docs
-deadline_exceeded
-iscancelled
+ServerStream
+ClientStream
+BidiStream
+send!
+close!
 ```
 
-## Errors
+## Error Handling
 
 ```@docs
-gRPCException
-gRPCServiceCallException
+StatusCode
+GRPCError
+BindError
+ServiceAlreadyRegisteredError
+InvalidServerStateError
+MethodSignatureError
+StreamCancelledError
+status_code_to_http
+exception_to_status_code
+http2_to_grpc_status
 ```
 
-## Status codes
+## Interceptors
 
 ```@docs
-GRPC_OK
-GRPC_CANCELLED
-GRPC_UNKNOWN
-GRPC_INVALID_ARGUMENT
-GRPC_DEADLINE_EXCEEDED
-GRPC_NOT_FOUND
-GRPC_ALREADY_EXISTS
-GRPC_PERMISSION_DENIED
-GRPC_RESOURCE_EXHAUSTED
-GRPC_FAILED_PRECONDITION
-GRPC_ABORTED
-GRPC_OUT_OF_RANGE
-GRPC_UNIMPLEMENTED
-GRPC_INTERNAL
-GRPC_UNAVAILABLE
-GRPC_DATA_LOSS
-GRPC_UNAUTHENTICATED
-GRPC_CODE_TABLE
+Interceptor
+MethodInfo
+LoggingInterceptor
+MetricsInterceptor
+TimeoutInterceptor
+RecoveryInterceptor
+add_interceptor!
 ```
 
-## Code generation
+## Health Checking
 
 ```@docs
-grpc_register_service_codegen
+HealthStatus
+set_health!
+get_health
 ```
+
+## Reflection Support
+
+```@docs
+HEALTH_DESCRIPTOR
+REFLECTION_DESCRIPTOR
+has_health_descriptor
+has_reflection_descriptor
+```
+
+## Server Lifecycle
+
+```@docs
+start!
+stop!
+```
+
+## TLS
+
+```@docs
+reload_tls!
+```
+
+## Context Operations
+
+```@docs
+set_header!
+set_trailer!
+get_metadata
+get_metadata_string
+get_metadata_binary
+remaining_time
+is_cancelled
+```
+
+## Compression
+
+```@docs
+CompressionCodec
+compress
+decompress
+codec_name
+parse_codec
+negotiate_compression
+```
+
+## HTTP/2 Backend Abstraction
+
+gRPCServer.jl supports pluggable HTTP/2 backends via an abstract type and a
+connection-factory method. See [HTTP/2 Backends](@ref) for the full guide.
+
+```@docs
+AbstractHTTP2Backend
+PureHTTP2Backend
+create_connection
+HTTPjlBackend
+Nghttp2Backend
+```
+
+### Raised stream-handler contract (HTTP.jl backend)
+
+The HTTP.jl backend requires a higher-level contract than the connection
+factory: the backend owns the serve loop and presents each gRPC call as an
+[`AbstractGRPCStream`](@ref). This contract is introduced for the HTTP.jl
+backend; the request-path integration is in progress.
+
+```@docs
+AbstractGRPCStream
+serve_grpc
+```
+
+## HTTP/2 Stream State
+
+These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection. They come from [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) and are re-exported by gRPCServer.
+
+- `can_send(stream)` — check whether a stream is in a state that accepts outbound data
+- `StreamError` — exception type for HTTP/2 stream-level errors

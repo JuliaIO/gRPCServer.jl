@@ -1,180 +1,201 @@
+"""
+    gRPCServer
+
+A native Julia implementation of a gRPC server library.
+
+gRPCServer enables Julia developers to expose services over the gRPC protocol
+with support for all four RPC patterns (unary, server streaming, client streaming,
+bidirectional), interceptors, health checking, reflection, TLS/mTLS, and compression.
+
+# Quick Start
+
+```julia
+using gRPCServer
+
+# Create server
+server = GRPCServer("127.0.0.1", 50051)
+
+# Register your service
+register!(server, MyService())
+
+# Start server
+run(server)
+```
+
+See the documentation for more examples and API reference.
+"""
 module gRPCServer
 
-using PrecompileTools: @setup_workload, @compile_workload
-
-using HTTP
+using Base64
+using Dates
+using Logging
+using Sockets
+using UUIDs
 using ProtoBuf
-using Base.Threads
-import Reseau
-import ProtoBuf.CodeGenerators
+using CodecZlib
+using TranscodingStreams
+using PrecompileTools
+using Reseau
+using PureHTTP2
 
-"""
-    gRPCException <: Exception
+# HTTP.jl (>= 2.0) provides the server-side HTTP/2 implementation used by the
+# HTTPjlBackend. Imported (not `using`-ed) to avoid clashing with PureHTTP2's
+# exported names (Request, Response, Stream, ...); referenced as `HTTP.*`.
+import HTTP
 
-Abstract supertype for the errors raised by gRPCServer. The concrete type a
-handler throws to control the response is [`gRPCServiceCallException`](@ref).
-"""
-abstract type gRPCException <: Exception end
+# Import functions from PureHTTP2 that gRPCServer also defines methods for,
+# so the method tables merge (allows dispatch on both PureHTTP2 and gRPCServer types).
+import PureHTTP2: get_metadata, set_header!, is_closed
 
-"""
-    gRPCServiceCallException(grpc_status::Int, message::String) <: gRPCException
+# Include source files in dependency order
 
-Exception type that is thrown (or returned to the client as a non-OK trailer)
-when something goes wrong while handling an RPC.
+# 1. Core error types and status codes (no dependencies)
+include("errors.jl")
 
-This exception type has two fields:
+# 2. Compression (depends on errors for potential exceptions)
+include("compression.jl")
 
-1. `grpc_status::Int` - See [here](https://grpc.io/docs/guides/status-codes/) for an in-depth explanation of each status.
-2. `message::String`
+# 3. Configuration (depends on compression for CompressionCodec)
+include("config.jl")
 
-A handler can `throw` this to control the `grpc-status` and `grpc-message`
-trailers sent back to the caller.
-"""
-struct gRPCServiceCallException <: gRPCException
-    grpc_status::Int
-    message::String
+# 4. HTTP/2 backend abstraction (delegates to PureHTTP2.jl)
+include("http2_backend.jl")
+
+# 4a. PureHTTP2 adapter for the raised AbstractGRPCStream contract (feature 020)
+include("backends/purehttp2.jl")
+
+# 4b. HTTP.jl HTTP/2 backend adapter (feature 020)
+include("backends/httpjl.jl")
+include("backends/nghttp2.jl")
+
+# 5. Context and streams (depend on config, errors)
+include("context.jl")
+include("streams.jl")
+
+# 6. Interceptors (depend on context, errors)
+include("interceptors.jl")
+
+# 7. Dispatch (depends on interceptors, context, errors)
+include("dispatch.jl")
+
+# 8. Proto definitions (needed before server.jl for reflection handling)
+include("proto/grpc/health/v1/health_pb.jl")
+include("proto/grpc/reflection/v1alpha/reflection_pb.jl")
+
+# 8b. Proto descriptors (compiled .pb files for reflection service)
+include("proto/descriptors.jl")
+
+# 8c. TLS transport (must come before server.jl — GRPCServer holds a TLSTransport)
+include("tls/transport.jl")
+
+# 9. Main server (depends on everything above including proto types and TLSTransport)
+include("server.jl")
+
+# 10. TLS certificate reload (depends on server for watcher wiring)
+include("tls/reload.jl")
+
+# 11. Built-in services (depend on server, dispatch)
+include("services/health.jl")
+include("services/reflection.jl")
+
+# Core Types
+export GRPCServer, ServerConfig, TLSConfig
+export ServerContext, PeerInfo
+export ServiceDescriptor, MethodDescriptor
+
+# Enumerations
+export ServerStatus, StatusCode, MethodType, HealthStatus, CompressionCodec
+
+# Error Types
+export GRPCError, BindError, ServiceAlreadyRegisteredError
+export InvalidServerStateError, MethodSignatureError, StreamCancelledError
+export status_code_to_http, exception_to_status_code, http2_to_grpc_status
+
+# Stream Types
+export ServerStream, ClientStream, BidiStream
+
+# Interceptor Types
+export Interceptor, MethodInfo
+export LoggingInterceptor, MetricsInterceptor, TimeoutInterceptor, RecoveryInterceptor
+
+# Server Lifecycle
+export start!, stop!
+# Note: run is extended from Base, no need to export
+
+# Service Registration
+export register!, services, service_descriptor
+
+# Interceptors
+export add_interceptor!
+
+# Health Checking
+export set_health!, get_health
+
+# TLS
+export reload_tls!
+
+# Stream Operations
+export send!, close!
+
+# Context Operations
+export set_header!, set_trailer!, get_metadata, get_metadata_string, get_metadata_binary
+export remaining_time, is_cancelled
+
+# Compression functions
+export compress, decompress, codec_name, parse_codec, negotiate_compression
+
+# Proto Descriptors (for reflection service)
+export HEALTH_DESCRIPTOR, REFLECTION_DESCRIPTOR
+export has_health_descriptor, has_reflection_descriptor
+
+# HTTP/2 Backend Abstraction
+export AbstractHTTP2Backend, PureHTTP2Backend, create_connection
+# HTTP.jl backend + raised stream-handler contract (feature 020)
+export HTTPjlBackend, Nghttp2Backend, AbstractGRPCStream, serve_grpc
+
+# HTTP/2 Stream State (for advanced use cases)
+export can_send, StreamError
+
+# Precompilation workload for faster time-to-first-execution
+@compile_workload begin
+    # Create a server (common first operation)
+    server = GRPCServer("0.0.0.0", 50051)
+
+    # Exercise configuration paths
+    _ = ServerConfig()
+    _ = ServerConfig(max_message_size=8*1024*1024)
+
+    # Exercise error types
+    err = GRPCError(StatusCode.OK, "test")
+    _ = sprint(show, err)
+
+    # Exercise context creation
+    ctx = ServerContext()
+    _ = is_cancelled(ctx)
+    _ = remaining_time(ctx)
+
+    # Exercise compression
+    data = Vector{UInt8}("Hello, gRPC!")
+    compressed = compress(data, CompressionCodec.GZIP)
+    _ = decompress(compressed, CompressionCodec.GZIP)
+    _ = codec_name(CompressionCodec.GZIP)
+    _ = parse_codec("gzip")
+
+    # Note: ServiceDescriptor with MethodDescriptor is tested in the test suite
+    # We skip it in precompile workload to avoid type registry warnings during precompilation
+
+    # Exercise interceptor creation
+    _ = LoggingInterceptor()
+    _ = MetricsInterceptor()
+    _ = RecoveryInterceptor()
+
+    # Exercise health status
+    set_health!(server, HealthStatus.SERVING)
+    _ = get_health(server)
+
+    # Exercise show methods
+    _ = sprint(show, server)
+    _ = sprint(show, ctx)
 end
 
-const GRPC_HEADER_SIZE = 5
-
-"""
-    GRPC_OK = 0
-
-gRPC status code `OK`: not an error, returned on success. The canonical gRPC
-status codes are exported as `GRPC_*` integer constants and listed in
-[`GRPC_CODE_TABLE`](@ref). Pass one to [`gRPCServiceCallException`](@ref) to set
-the `grpc-status` trailer. See the
-[gRPC status code reference](https://grpc.io/docs/guides/status-codes/) for the
-full semantics of each.
-"""
-const GRPC_OK = 0
-
-"gRPC status code `CANCELLED` (1): the operation was cancelled, typically by the caller."
-const GRPC_CANCELLED = 1
-
-"gRPC status code `UNKNOWN` (2): an unknown error, for example an exception with no mapped status."
-const GRPC_UNKNOWN = 2
-
-"gRPC status code `INVALID_ARGUMENT` (3): the client supplied an argument that is invalid regardless of system state."
-const GRPC_INVALID_ARGUMENT = 3
-
-"gRPC status code `DEADLINE_EXCEEDED` (4): the deadline expired before the operation could complete."
-const GRPC_DEADLINE_EXCEEDED = 4
-
-"gRPC status code `NOT_FOUND` (5): a requested entity was not found."
-const GRPC_NOT_FOUND = 5
-
-"gRPC status code `ALREADY_EXISTS` (6): the entity a client attempted to create already exists."
-const GRPC_ALREADY_EXISTS = 6
-
-"gRPC status code `PERMISSION_DENIED` (7): the caller is authenticated but not authorized for the operation."
-const GRPC_PERMISSION_DENIED = 7
-
-"gRPC status code `RESOURCE_EXHAUSTED` (8): a resource is exhausted, for example a quota or the server concurrency cap."
-const GRPC_RESOURCE_EXHAUSTED = 8
-
-"gRPC status code `FAILED_PRECONDITION` (9): the system is not in the state required for the operation."
-const GRPC_FAILED_PRECONDITION = 9
-
-"gRPC status code `ABORTED` (10): the operation was aborted, often due to a concurrency conflict."
-const GRPC_ABORTED = 10
-
-"gRPC status code `OUT_OF_RANGE` (11): the operation was attempted past the valid range."
-const GRPC_OUT_OF_RANGE = 11
-
-"gRPC status code `UNIMPLEMENTED` (12): the operation is not implemented or not supported."
-const GRPC_UNIMPLEMENTED = 12
-
-"gRPC status code `INTERNAL` (13): an internal error; also the default mapping for an unhandled handler exception."
-const GRPC_INTERNAL = 13
-
-"gRPC status code `UNAVAILABLE` (14): the service is currently unavailable, usually a transient condition."
-const GRPC_UNAVAILABLE = 14
-
-"gRPC status code `DATA_LOSS` (15): unrecoverable data loss or corruption."
-const GRPC_DATA_LOSS = 15
-
-"gRPC status code `UNAUTHENTICATED` (16): the request lacks valid authentication credentials."
-const GRPC_UNAUTHENTICATED = 16
-
-"""
-    GRPC_CODE_TABLE::Dict{Int64,String}
-
-Maps each gRPC status code to its canonical name (for example `3 => "INVALID_ARGUMENT"`).
-Used when formatting a [`gRPCServiceCallException`](@ref) for display.
-"""
-const GRPC_CODE_TABLE = Dict{Int64,String}(
-    0 => "OK",
-    1 => "CANCELLED",
-    2 => "UNKNOWN",
-    3 => "INVALID_ARGUMENT",
-    4 => "DEADLINE_EXCEEDED",
-    5 => "NOT_FOUND",
-    6 => "ALREADY_EXISTS",
-    7 => "PERMISSION_DENIED",
-    8 => "RESOURCE_EXHAUSTED",
-    9 => "FAILED_PRECONDITION",
-    10 => "ABORTED",
-    11 => "OUT_OF_RANGE",
-    12 => "UNIMPLEMENTED",
-    13 => "INTERNAL",
-    14 => "UNAVAILABLE",
-    15 => "DATA_LOSS",
-    16 => "UNAUTHENTICATED",
-)
-
-function Base.showerror(io::IO, e::gRPCServiceCallException)
-    print(
-        io,
-        "gRPCServiceCallException(grpc_status=$(get(GRPC_CODE_TABLE, e.grpc_status, "UNKNOWN_CODE"))($(e.grpc_status)), message=\"$(e.message)\")",
-    )
-end
-
-include("Utils.jl")
-include("gRPC.jl")
-include("Server.jl")
-include("Unary.jl")
-include("Streaming.jl")
-include("ProtoBuf.jl")
-
-export gRPCMethod, gRPCRouter, gRPCContext
-export handle!, serve, serve!
-export metadata, set_initial_metadata!, set_trailing_metadata!
-export deadline_exceeded, iscancelled
-export grpc_register_service_codegen
-
-export gRPCException, gRPCServiceCallException
-
-export GRPC_OK,
-    GRPC_CANCELLED,
-    GRPC_UNKNOWN,
-    GRPC_INVALID_ARGUMENT,
-    GRPC_DEADLINE_EXCEEDED,
-    GRPC_NOT_FOUND,
-    GRPC_ALREADY_EXISTS,
-    GRPC_PERMISSION_DENIED,
-    GRPC_RESOURCE_EXHAUSTED,
-    GRPC_FAILED_PRECONDITION,
-    GRPC_ABORTED,
-    GRPC_OUT_OF_RANGE,
-    GRPC_UNIMPLEMENTED,
-    GRPC_INTERNAL,
-    GRPC_UNAVAILABLE,
-    GRPC_DATA_LOSS,
-    GRPC_UNAUTHENTICATED
-export GRPC_CODE_TABLE
-
-function __init__()
-    grpc_register_service_codegen()
-end
-
-@setup_workload begin
-    @compile_workload begin
-        # Exercise descriptor construction and handler registration (no socket).
-        router = gRPCRouter()
-        m = gRPCMethod{Vector{UInt8},false,Vector{UInt8},false}("/pkg.Svc/M")
-        handle!(router, m, (req, ctx) -> req)
-    end
-end
-
-end # module gRPCServer
+end # module

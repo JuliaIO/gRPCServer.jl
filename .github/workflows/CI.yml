@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    tags: ['*']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    # A deadlocked test run must fail fast instead of burning the 6h GitHub
+    # Actions ceiling: the suite completes in well under 10 min when healthy.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'  # LTS
+          - '1'     # Latest stable
+        os:
+          - ubuntu-latest
+          - windows-latest
+        arch:
+          - x64
+        include:
+          # macOS uses Apple Silicon (aarch64)
+          - os: macOS-latest
+            arch: aarch64
+            version: '1.10'
+          - os: macOS-latest
+            arch: aarch64
+            version: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/cache@v3
+
+      # Install grpcurl for example validation
+      - name: Install grpcurl (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          GRPCURL_VERSION="1.8.9"
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin grpcurl
+          grpcurl --version
+
+      # Downloaded rather than installed via Homebrew: brew emits a tap-trust
+      # warning for aws/tap, which is pre-tapped on the macOS runner image and
+      # unrelated to this project. A direct download is also faster and pins the
+      # version, matching the Linux and Windows steps.
+      - name: Install grpcurl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          GRPCURL_VERSION="1.8.9"
+          mkdir -p "$HOME/bin"
+          curl -sSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_osx_arm64.tar.gz" | tar -xz -C "$HOME/bin" grpcurl
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/grpcurl" --version
+
+      - name: Install grpcurl (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $GRPCURL_VERSION = "1.8.9"
+          Invoke-WebRequest -Uri "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_windows_x86_64.zip" -OutFile grpcurl.zip
+          Expand-Archive -Path grpcurl.zip -DestinationPath $env:USERPROFILE\bin
+          echo "$env:USERPROFILE\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:USERPROFILE\bin\grpcurl.exe" --version
+
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  nghttp2:
+    # The optional nghttp2 backend, on the latest stable Julia only.
+    #
+    # It cannot join the matrix above. Nghttp2Wrapper.jl requires Julia 1.12 —
+    # it calls nghttp2's size_t API, added in nghttp2 1.57.0, and nghttp2_jll is
+    # a standard library, so the 1.10 LTS ships 1.52.0 and cannot satisfy it.
+    # gRPCServer declares its test dependencies once, in [extras], for the whole
+    # matrix; adding Nghttp2Wrapper there would break dependency resolution on
+    # the LTS job outright rather than skipping these tests.
+    #
+    # Hence a separate environment and a separate job. The suite in
+    # test/backends/ covers the opposite case — the extension absent — and runs
+    # everywhere.
+    name: nghttp2 backend (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v3
+      - name: Build the nghttp2 environment
+        # A named shared environment, so nothing is written into the checkout.
+        run: |
+          julia --project=@nghttp2 -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path = pwd()))
+            Pkg.add(["Nghttp2Wrapper", "gRPCClient", "ProtoBuf", "Test"])'
+      - name: Run the nghttp2 end-to-end tests
+        # Restrict loading to this environment plus the standard library.
+        # Without it a developer's default environment silently completes any
+        # missing dependency, so the tests pass locally and fail here — which is
+        # exactly what happened with ProtoBuf. `@stdlib` must stay: dropping it
+        # hides Sockets and Test, which no environment declares explicitly.
+        env:
+          JULIA_LOAD_PATH: "@:@stdlib"
+        run: julia --project=@nghttp2 test/nghttp2/run_nghttp2_tests.jl

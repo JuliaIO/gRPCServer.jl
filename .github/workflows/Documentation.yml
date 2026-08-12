@@ -1,44 +1,51 @@
+# Builds and deploys the manual.
+#
+# This lived as a `docs:` job inside CI.yml, which dated from the initial
+# implementation. Split out to match PureHTTP2.jl and Nghttp2Wrapper.jl, and so
+# that a docs run no longer shares CI.yml's concurrency group: pushing to a pull
+# request cancelled the in-flight docs build along with the test matrix, even
+# when the push touched no documentation.
+#
+# Triggers are deliberately identical to CI.yml's, so the split changes nothing
+# about *when* the manual is built. deploydocs only publishes from `develop`
+# (devbranch in docs/make.jl) and from tags; other runs build and discard, which
+# is what makes this a useful pull-request check.
 name: Documentation
+
 on:
   push:
-    branches: ["master"]
-    tags: ["*"]
+    branches:
+      - main
+      - develop
+    tags: ['*']
   pull_request:
-    branches: ["master"]
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-# Deploying to the gh-pages branch needs write access to repository contents;
-# statuses:write lets Documenter report the doc preview status on pull requests.
-permissions:
-  contents: write
-  statuses: write
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
 jobs:
   docs:
-    name: Build and deploy documentation
+    name: Build and deploy Documentation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    permissions:
+      contents: write   # required for the gh-pages push by Documenter.deploydocs
+      statuses: write   # reports the deploy status back to the commit
     steps:
-      # Third-party actions are pinned to a full-length commit SHA (the tag in
-      # the trailing comment is for humans), matching the policy in ci.yml so a
-      # moved or compromised tag cannot silently change what runs in CI.
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v3
         with:
-          persist-credentials: false
-      - uses: julia-actions/setup-julia@4c0cb0fce8556fdb04a90347310e5db8b1f98fb9 # v2
-        with:
-          version: '1.10'
-      - uses: julia-actions/cache@d10a6fd8f31b12404a54613ebad242900567f2b9 # v2
-      - name: Instantiate docs environment
+          version: '1'
+      - uses: julia-actions/cache@v3
+      - name: Configure doc environment
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.develop(PackageSpec(path = pwd()))
+            Pkg.develop(PackageSpec(path=pwd()))
             Pkg.instantiate()'
-      - name: Build and deploy
-        run: julia --project=docs docs/make.jl
+      - name: Build and deploy docs
         env:
-          # GITHUB_TOKEN deploys via the gh-pages branch; set DOCUMENTER_KEY as a
-          # repository secret to deploy with an SSH deploy key instead.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+        run: julia --project=docs docs/make.jl
