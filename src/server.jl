@@ -1570,6 +1570,15 @@ const _INCOMPLETE_REQUEST_MESSAGE =
 
 Route and execute one gRPC call (any of the four RPC types) using only the
 [`AbstractGRPCStream`](@ref) contract, so it works for any HTTP/2 backend.
+
+Framing-layer `GRPCError`s — a hostile/oversize/compressed/truncated request, an
+extra frame on a single-message RPC, or a response larger than
+`max_send_message_length` — never escape as transport errors. They are mapped to
+a trailers-only gRPC status response (a headers block plus `grpc-status`
+trailers, or just the trailers once response headers have already been sent),
+mirroring the UNIMPLEMENTED path, so a client sees a proper gRPC status instead
+of a bare HTTP/2 500 with no grpc-status. Any other exception propagates to the
+backend.
 """
 function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
     path = grpc_path(gs)
@@ -1586,99 +1595,136 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         return nothing
     end
     service, method_desc = result
-    ctx = _grpc_context_from_metadata(metadata, peer, path)
-    max_send = server.config.max_message_size
 
     if server.config.log_requests
         @info "gRPC request" method=path peer=peer
     end
 
-    mt = method_desc.method_type
-    if mt == MethodType.UNARY
-        data = read_message!(gs)
-        if data === nothing
-            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
-                                       UInt8[]; content_type=content_type, max_send_message_length=max_send)
-            return nothing
-        end
-        # Require exactly one request message: reading one more frame consumes the
-        # body to end-of-stream (no abandoned-request reset) and rejects extra
-        # frames (bounded drain).
-        expect_half_close!(gs)
-        status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
-        send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
-
-    elseif mt == MethodType.SERVER_STREAMING
-        data = read_message!(gs)
-        if data === nothing
-            send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
-                                       UInt8[]; content_type=content_type, max_send_message_length=max_send)
-            return nothing
-        end
-        expect_half_close!(gs)
-        send_response_headers!(gs, _grpc_ok_headers(content_type))
-        encode_buf = IOBuffer()
-        send_cb = (message, _compress) -> begin
-            grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
-            send_message!(gs, take!(encode_buf))
-        end
-        close_cb = () -> nothing
-        status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
-        send_trailers!(gs, _grpc_status_trailers(status, message))
-
-    elseif mt == MethodType.CLIENT_STREAMING
-        # Lazy receive: read one request at a time (the client half-closes when done).
-        recv_cb = function()
-            m = read_message!(gs)
-            m === nothing && return nothing
-            return deserialize_message(m, method_desc.input_type)
-        end
-        cancel_cb = () -> is_cancelled(gs)
-        status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
-        send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
-        # The handler may have returned before the client half-closed; abort the
-        # read side so the transport does not see an abandoned request.
-        abort_request!(gs)
-
-    elseif mt == MethodType.BIDI_STREAMING
-        send_response_headers!(gs, _grpc_ok_headers(content_type))
-        if service.name == "grpc.reflection.v1alpha.ServerReflection"
-            # Reflection is request-response: handle each request incrementally and
-            # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
-            while (m = read_message!(gs)) !== nothing
-                status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
-                if status != StatusCode.OK
-                    send_trailers!(gs, _grpc_status_trailers(status, message))
-                    return nothing
-                end
-                isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
+    # A GRPCError escaping the framing layer (hostile request frames, send-side
+    # oversize, and — once the strict timeout parser lands — a malformed
+    # grpc-timeout) must reach the client as a proper gRPC status in a trailers
+    # block. Without this mapping the exception escapes to the transport, which
+    # answers a bare HTTP/2 500 with no grpc-status and closes the connection:
+    # a client that trusts transport success would read that as a silent empty
+    # success. Headers may already have been sent (send-side oversize throws
+    # inside `send_grpc_response_generic` after its headers block, or inside a
+    # streaming `send_cb` closure), so only emit a headers block when the
+    # response did not get that far; the trailers are best-effort because the
+    # peer may have gone away. Non-GRPCError exceptions still propagate.
+    headers_sent = false
+    try
+        ctx = _grpc_context_from_metadata(metadata, peer, path)
+        max_send = server.config.max_message_size
+        mt = method_desc.method_type
+        if mt == MethodType.UNARY
+            data = read_message!(gs)
+            if data === nothing
+                headers_sent = true
+                send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                           UInt8[]; content_type=content_type, max_send_message_length=max_send)
+                return nothing
             end
-            send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
+            # Require exactly one request message: reading one more frame consumes the
+            # body to end-of-stream (no abandoned-request reset) and rejects extra
+            # frames (bounded drain).
+            expect_half_close!(gs)
+            status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
+            headers_sent = true
+            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
+
+        elseif mt == MethodType.SERVER_STREAMING
+            data = read_message!(gs)
+            if data === nothing
+                headers_sent = true
+                send_grpc_response_generic(gs, StatusCode.INTERNAL, _INCOMPLETE_REQUEST_MESSAGE,
+                                           UInt8[]; content_type=content_type, max_send_message_length=max_send)
+                return nothing
+            end
+            expect_half_close!(gs)
+            send_response_headers!(gs, _grpc_ok_headers(content_type))
+            headers_sent = true
+            encode_buf = IOBuffer()
+            send_cb = (message, _compress) -> begin
+                grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
+                send_message!(gs, take!(encode_buf))
+            end
+            close_cb = () -> nothing
+            status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
+            send_trailers!(gs, _grpc_status_trailers(status, message))
+
+        elseif mt == MethodType.CLIENT_STREAMING
+            # Lazy receive: read one request at a time (the client half-closes when done).
+            recv_cb = function()
+                m = read_message!(gs)
+                m === nothing && return nothing
+                return deserialize_message(m, method_desc.input_type)
+            end
+            cancel_cb = () -> is_cancelled(gs)
+            status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
+            headers_sent = true
+            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
+            # The handler may have returned before the client half-closed; abort the
+            # read side so the transport does not see an abandoned request.
+            abort_request!(gs)
+
+        elseif mt == MethodType.BIDI_STREAMING
+            send_response_headers!(gs, _grpc_ok_headers(content_type))
+            headers_sent = true
+            if service.name == "grpc.reflection.v1alpha.ServerReflection"
+                # Reflection is request-response: handle each request incrementally and
+                # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
+                while (m = read_message!(gs)) !== nothing
+                    status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
+                    if status != StatusCode.OK
+                        send_trailers!(gs, _grpc_status_trailers(status, message))
+                        return nothing
+                    end
+                    isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
+                end
+                send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
+                return nothing
+            end
+            # User-defined bidi: read each request lazily and emit responses live, so
+            # request-response exchanges are not deadlocked.
+            recv_cb = function()
+                m = read_message!(gs)
+                m === nothing && return nothing
+                return deserialize_message(m, method_desc.input_type)
+            end
+            encode_buf = IOBuffer()
+            send_cb = (message, _compress) -> begin
+                grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
+                send_message!(gs, take!(encode_buf))
+            end
+            close_cb = () -> nothing
+            cancel_cb = () -> is_cancelled(gs)
+            status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
+            send_trailers!(gs, _grpc_status_trailers(status, message))
+            # The handler may have returned before the client half-closed; abort the
+            # read side so the transport does not see an abandoned request.
+            abort_request!(gs)
+
+        else
+            send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+            headers_sent = true
+            send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Unsupported method type"))
+        end
+    catch e
+        if e isa GRPCError
+            if !headers_sent
+                try
+                    send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+                catch
+                end
+            end
+            try
+                send_trailers!(gs, _grpc_status_trailers(e.code, e.message))
+            catch err
+                @error "Failed to send gRPC error trailers" method=path code=e.code message=e.message exception=(err, catch_backtrace())
+            end
             return nothing
         end
-        # User-defined bidi: read each request lazily and emit responses live, so
-        # request-response exchanges are not deadlocked.
-        recv_cb = function()
-            m = read_message!(gs)
-            m === nothing && return nothing
-            return deserialize_message(m, method_desc.input_type)
-        end
-        encode_buf = IOBuffer()
-        send_cb = (message, _compress) -> begin
-            grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
-            send_message!(gs, take!(encode_buf))
-        end
-        close_cb = () -> nothing
-        cancel_cb = () -> is_cancelled(gs)
-        status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
-        send_trailers!(gs, _grpc_status_trailers(status, message))
-        # The handler may have returned before the client half-closed; abort the
-        # read side so the transport does not see an abandoned request.
-        abort_request!(gs)
-
-    else
-        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
-        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Unsupported method type"))
+        rethrow()
     end
     return nothing
 end
