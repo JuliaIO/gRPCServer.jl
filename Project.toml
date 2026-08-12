@@ -1,6 +1,6 @@
 name = "gRPCServer"
 uuid = "608c6337-0d7d-447f-bb69-0f5674ee3959"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["gRPCServer Contributors"]
 
 [deps]
@@ -25,7 +25,7 @@ gRPCServerNghttp2Ext = "Nghttp2Wrapper"
 
 [compat]
 CodecZlib = "0.7"
-HTTP = "2.1"
+HTTP = "^2.5"
 JSON = "1"
 Nghttp2Wrapper = "0.3"
 PrecompileTools = "1"

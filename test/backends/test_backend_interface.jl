@@ -1,8 +1,7 @@
 # Contract tests for the raised HTTP/2 backend interface (feature 020).
 #
-# Covers the abstraction surface and the PureHTTP2 adapter's method dispatch.
-# Behavioral/serving coverage arrives once the dispatch path is rewired onto
-# AbstractGRPCStream (foundational refactor, in progress).
+# Covers the abstraction surface, the PureHTTP2 adapter's method dispatch, and
+# backend-agnostic call dispatch over the AbstractGRPCStream contract.
 
 using Test
 using gRPCServer

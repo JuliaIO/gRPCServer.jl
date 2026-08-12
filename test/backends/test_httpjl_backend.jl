@@ -1,8 +1,8 @@
 # Tests for the HTTP.jl HTTP/2 backend (feature 020).
 #
-# Currently covers the backend type surface and the capability/version guard
-# (US4). End-to-end serving tests will be added once serve_grpc(::HTTPjlBackend)
-# and the AbstractGRPCStream dispatch refactor land.
+# Covers the backend type surface, the capability/version guard, and the wired
+# end-to-end path (serve_grpc + dispatch_grpc_call) incl. bounded shutdown with
+# an in-flight stream.
 
 using Test
 using gRPCServer

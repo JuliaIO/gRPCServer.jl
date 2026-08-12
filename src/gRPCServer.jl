@@ -198,4 +198,11 @@ export can_send, StreamError
     _ = sprint(show, ctx)
 end
 
+function __init__()
+    # Code generation registration (Phase 2) hooks in here. Currently a
+    # no-op placeholder so the merged package has the same init seam as the
+    # csvance implementation (grpc_register_service_codegen).
+    return nothing
+end
+
 end # module

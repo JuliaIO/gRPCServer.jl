@@ -57,9 +57,9 @@ create_connection(::PureHTTP2Backend) = PureHTTP2.HTTP2Connection()
 # higher-level contract a backend implements so the gRPC dispatch layer can
 # drive any backend uniformly. See contracts/httpjl-backend-interface.md.
 #
-# NOTE: these are introduced additively. The server's request path is not yet
-# refactored onto them (that is the foundational refactor, tracked separately);
-# the default backend remains PureHTTP2Backend until an adapter is wired in.
+# NOTE: the request path IS refactored onto this contract: the HTTPjl backend
+# (the default) drives dispatch through serve_grpc and dispatch_grpc_call; the
+# PureHTTP2 backend still runs its legacy frame loop (tracked separately).
 # ---------------------------------------------------------------------------
 
 """

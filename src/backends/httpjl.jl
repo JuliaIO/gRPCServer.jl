@@ -6,10 +6,9 @@
 # trailers, incremental bidirectional streaming). HTTP.jl owns the listener and
 # the TLS/ALPN handshake itself.
 #
-# STATUS: the backend type and its capability/version guard are implemented and
-# tested. The full `serve_grpc(::HTTPjlBackend, ...)` adapter and the matching
-# refactor of the gRPC dispatch path onto AbstractGRPCStream are the remaining
-# foundational work; until that lands, the default backend stays PureHTTP2Backend.
+# STATUS: wired and default. HTTPjlBackend is the default backend and
+# `serve_grpc(::HTTPjlBackend, ...)` is fully implemented; `dispatch_grpc_call`
+# drives all four RPC types through the AbstractGRPCStream contract.
 
 """
     HTTPJL_MIN_VERSION
