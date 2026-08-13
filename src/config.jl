@@ -174,6 +174,9 @@ struct ServerConfig
     compression_threshold::Int
     supported_codecs::Vector{CompressionCodec.T}
 
+    # HTTP/2 flow-control windows (HTTP.jl listener); nothing = HTTP.jl defaults
+    http2_settings::Union{HTTP.HTTP2Settings, Nothing}
+
     function ServerConfig(;
         max_connections::Union{Int, Nothing}=nothing,
         max_concurrent_streams::Int=100,
@@ -195,7 +198,8 @@ struct ServerConfig
             CompressionCodec.GZIP,
             CompressionCodec.DEFLATE,
             CompressionCodec.IDENTITY
-        ]
+        ],
+        http2_settings::Union{HTTP.HTTP2Settings, Nothing}=nothing
     )
         # Validation
         if max_concurrent_streams < 1
@@ -231,7 +235,8 @@ struct ServerConfig
             log_requests,
             compression_enabled,
             compression_threshold,
-            supported_codecs
+            supported_codecs,
+            http2_settings
         )
     end
 end

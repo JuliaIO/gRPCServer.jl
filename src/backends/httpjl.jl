@@ -278,11 +278,19 @@ closed by `stop!`).
 function serve_grpc(::HTTPjlBackend, server, on_call)
     handler = function (http_stream)
         gs = HTTPjlGRPCStream(http_stream, server.config.max_message_size)
-        # Peer extraction from HTTP.jl streams is a future refinement.
+        # NOTE: HTTP.peeraddr(stream) is read-only on the surface
+        # (_require_server_stream no-op + TCP.remote_addr field read), but on
+        # HTTP.jl 2.6.4 calling it on an h2 server stream deterministically
+        # corrupts the subsequent request-body read (messages decode empty or
+        # garbled). Kept as the placeholder stub; peer extraction needs an
+        # upstream HTTP.jl/Reseau fix. See the Phase 4 notes in EXECUTION_LOG.
         peer = PeerInfo(IPv4(0), 0)
         on_call(gs, peer)
         return nothing
     end
+    # HTTP2Settings is upstream since HTTP.jl 2.1.0 (floor is ^2.5), so the
+    # configured flow-control windows are passed unconditionally.
+    http2_settings = server.config.http2_settings
     if server.config.tls !== nothing
         # HTTP.jl owns the TLS/ALPN handshake. HTTP.jl 2.x is built on Reseau, so
         # its TLS.Listener is a Reseau.TLS.Listener — build one from the gRPCServer
@@ -290,7 +298,7 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         reseau_cfg = _to_reseau_config(server.config.tls)
         listener = Reseau.TLS.listen("tcp", string(server.host, ":", server.port),
                                      reseau_cfg; backlog=128, reuseaddr=true)
-        return HTTP.listen!(handler, listener)
+        return HTTP.listen!(handler, listener; http2_settings=http2_settings)
     end
-    return HTTP.listen!(handler, server.host, server.port)
+    return HTTP.listen!(handler, server.host, server.port; http2_settings=http2_settings)
 end

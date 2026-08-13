@@ -686,6 +686,8 @@ function serve!(
         tls = tls_cfg,
         idle_timeout = idle_timeout isa Nothing ? nothing : Float64(idle_timeout),
         http2_backend = HTTPjlBackend(),
+        h2_initial_window_size = Int(h2_initial_window_size),
+        h2_connection_window_size = Int(h2_connection_window_size),
     )
     port == 0 && (server.port = 0)
 

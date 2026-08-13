@@ -104,7 +104,9 @@ mutable struct GRPCServer
             CompressionCodec.IDENTITY
         ],
         http2_backend::AbstractHTTP2Backend=HTTPjlBackend(),
-        context::Any=nothing
+        context::Any=nothing,
+        h2_initial_window_size::Int=65535,
+        h2_connection_window_size::Int=65535
     )
         # Validate host and port
         if port < 1 || port > 65535
@@ -128,7 +130,11 @@ mutable struct GRPCServer
             log_requests=log_requests,
             compression_enabled=compression_enabled,
             compression_threshold=compression_threshold,
-            supported_codecs=supported_codecs
+            supported_codecs=supported_codecs,
+            http2_settings=HTTP.HTTP2Settings(
+                initial_window_size=h2_initial_window_size,
+                connection_window_size=h2_connection_window_size,
+            ),
         )
 
         server = new(
