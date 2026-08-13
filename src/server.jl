@@ -1589,21 +1589,33 @@ end
 # grpc-message + grpc-status). When `ctx === nothing` (rejection paths with no
 # handler), the current behavior is unchanged.
 function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc", max_send_message_length::Integer=4 * 1024 * 1024, ctx::Union{ServerContext,Nothing}=nothing)
-    if ctx === nothing
-        send_response_headers!(gs, _grpc_ok_headers(content_type))
-    else
-        send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
-    end
+    send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
     # A valid proto3 message may encode to zero bytes when every field has its default value.
     # Successful unary calls must still emit its five-byte gRPC message frame. A trailers-only
     # success is interpreted by standard clients as "no response message" (`None` in Python).
     (status == StatusCode.OK || !isempty(data)) && send_message!(gs, take!(grpc_encode_message_iobuffer(data; max_send_message_length = max_send_message_length)))
-    if ctx === nothing
-        send_trailers!(gs, _grpc_status_trailers(status, message))
-    else
-        send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
-    end
+    send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
     return nothing
+end
+
+# The handler's set_header!/set_trailer! output is usually empty; skip the
+# formatting allocations (get_response_headers/get_response_trailers build fresh
+# vectors, iterate dicts, percent-encode) when there is nothing to merge, so the
+# happy path stays allocation-light (A4: no per-message allocation increase vs
+# the csvance implementation). Both fallbacks produce identical wire output: the
+# gRPC headers block, and grpc-status + percent-encoded grpc-message trailers.
+function _ctx_response_headers(ctx::Union{ServerContext, Nothing}, content_type::String)
+    if ctx === nothing || isempty(ctx.response_headers)
+        return _grpc_ok_headers(content_type)
+    end
+    return vcat(_grpc_ok_headers(content_type), get_response_headers(ctx))
+end
+
+function _ctx_response_trailers(ctx::Union{ServerContext, Nothing}, status::StatusCode.T, message::String)
+    if ctx === nothing || isempty(ctx.trailers)
+        return _grpc_status_trailers(status, message)
+    end
+    return get_response_trailers(ctx, Int(status), message)
 end
 
 # A backend reports "no complete request message" as `nothing` — the stream ended
@@ -1748,7 +1760,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 return nothing
             end
             expect_half_close!(gs)
-            send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
+            send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
             headers_sent = true
             encode_buf = IOBuffer()
             send_cb = (message, _compress) -> begin
@@ -1758,7 +1770,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             close_cb = () -> nothing
             status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
             status, message = _apply_deadline(ctx, status, message)
-            send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
+            send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
 
         elseif mt == MethodType.CLIENT_STREAMING
             # Lazy receive: read one request at a time (the client half-closes when done).
@@ -1781,7 +1793,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             abort_request!(gs)
 
         elseif mt == MethodType.BIDI_STREAMING
-            send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
+            send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
             headers_sent = true
             if service.name == "grpc.reflection.v1alpha.ServerReflection"
                 # Reflection is request-response: handle each request incrementally and
@@ -1790,13 +1802,13 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                     status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
                     status, message = _apply_deadline(ctx, status, message)
                     if status != StatusCode.OK
-                        send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
+                        send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
                         return nothing
                     end
                     isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
                 end
                 final_status, final_message = _apply_deadline(ctx, StatusCode.OK, "")
-                send_trailers!(gs, get_response_trailers(ctx, Int(final_status), final_message))
+                send_trailers!(gs, _ctx_response_trailers(ctx, final_status, final_message))
                 return nothing
             end
             # User-defined bidi: read each request lazily and emit responses live, so
@@ -1819,7 +1831,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             end
             status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
             status, message = _apply_deadline(ctx, status, message)
-            send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
+            send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
             # The handler may have returned before the client half-closed; abort the
             # read side so the transport does not see an abandoned request.
             abort_request!(gs)
