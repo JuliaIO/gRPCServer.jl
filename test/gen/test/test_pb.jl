@@ -4,6 +4,7 @@
 import ProtoBuf as PB
 import gRPCClient
 import gRPCServer
+using gRPCServer: GRPCServer
 using ProtoBuf: OneOf
 using ProtoBuf.EnumX: @enumx
 
@@ -83,20 +84,12 @@ TestService_TestRPC_Client(
 	host, port;
 	TRequest=TestRequest,
 	TResponse=TestResponse,
-	secure=false,
 	grpc=gRPCClient.grpc_global_handle(),
-	deadline=10,
-	keepalive=60,
-	max_send_message_length = 4*1024*1024,
-	max_recieve_message_length = 4*1024*1024,
+	options...
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, false}(
 	host, port, "/test.TestService/TestRPC";
-	secure=secure,
 	grpc=grpc,
-	deadline=deadline,
-	keepalive=keepalive,
-	max_send_message_length=max_send_message_length,
-	max_recieve_message_length=max_recieve_message_length,
+	options...
 )
 export TestService_TestRPC_Client
 
@@ -104,20 +97,12 @@ TestService_TestServerStreamRPC_Client(
 	host, port;
 	TRequest=TestRequest,
 	TResponse=TestResponse,
-	secure=false,
 	grpc=gRPCClient.grpc_global_handle(),
-	deadline=10,
-	keepalive=60,
-	max_send_message_length = 4*1024*1024,
-	max_recieve_message_length = 4*1024*1024,
+	options...
 ) = gRPCClient.gRPCServiceClient{TRequest, false, TResponse, true}(
 	host, port, "/test.TestService/TestServerStreamRPC";
-	secure=secure,
 	grpc=grpc,
-	deadline=deadline,
-	keepalive=keepalive,
-	max_send_message_length=max_send_message_length,
-	max_recieve_message_length=max_recieve_message_length,
+	options...
 )
 export TestService_TestServerStreamRPC_Client
 
@@ -125,20 +110,12 @@ TestService_TestClientStreamRPC_Client(
 	host, port;
 	TRequest=TestRequest,
 	TResponse=TestResponse,
-	secure=false,
 	grpc=gRPCClient.grpc_global_handle(),
-	deadline=10,
-	keepalive=60,
-	max_send_message_length = 4*1024*1024,
-	max_recieve_message_length = 4*1024*1024,
+	options...
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, false}(
 	host, port, "/test.TestService/TestClientStreamRPC";
-	secure=secure,
 	grpc=grpc,
-	deadline=deadline,
-	keepalive=keepalive,
-	max_send_message_length=max_send_message_length,
-	max_recieve_message_length=max_recieve_message_length,
+	options...
 )
 export TestService_TestClientStreamRPC_Client
 
@@ -146,20 +123,12 @@ TestService_TestBidirectionalStreamRPC_Client(
 	host, port;
 	TRequest=TestRequest,
 	TResponse=TestResponse,
-	secure=false,
 	grpc=gRPCClient.grpc_global_handle(),
-	deadline=10,
-	keepalive=60,
-	max_send_message_length = 4*1024*1024,
-	max_recieve_message_length = 4*1024*1024,
+	options...
 ) = gRPCClient.gRPCServiceClient{TRequest, true, TResponse, true}(
 	host, port, "/test.TestService/TestBidirectionalStreamRPC";
-	secure=secure,
 	grpc=grpc,
-	deadline=deadline,
-	keepalive=keepalive,
-	max_send_message_length=max_send_message_length,
-	max_recieve_message_length=max_recieve_message_length,
+	options...
 )
 export TestService_TestBidirectionalStreamRPC_Client
 # gRPCClient.jl END
@@ -167,15 +136,15 @@ export TestService_TestBidirectionalStreamRPC_Client
 TestService_TestRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, false}("/test.TestService/TestRPC")
 export TestService_TestRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
+# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
 TestService_TestServerStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, true}("/test.TestService/TestServerStreamRPC")
 export TestService_TestServerStreamRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
+# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
 TestService_TestClientStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, false}("/test.TestService/TestClientStreamRPC")
 export TestService_TestClientStreamRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer v0.1 (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the Streaming docs.
+# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
 TestService_TestBidirectionalStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, true}("/test.TestService/TestBidirectionalStreamRPC")
 export TestService_TestBidirectionalStreamRPC_Method
 
@@ -187,5 +156,60 @@ function register_TestService!(router; allow_unstable_streaming=false, TestRPC=n
 	return router
 end
 export register_TestService!
+
+function register_TestService!(server::GRPCServer; TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
+	methods = Dict{String, gRPCServer.MethodDescriptor}()
+	if TestRPC !== nothing
+		handler, raw_request, raw_response = TestRPC isa Tuple ? TestRPC : (TestRPC, false, false)
+		methods["TestRPC"] = gRPCServer.MethodDescriptor(
+			"TestRPC",
+			gRPCServer.MethodType.UNARY,
+			TestRequest,
+			TestResponse,
+			handler;
+			raw_request=raw_request,
+			raw_response=raw_response,
+		)
+	end
+	if TestServerStreamRPC !== nothing
+		handler, raw_request, raw_response = TestServerStreamRPC isa Tuple ? TestServerStreamRPC : (TestServerStreamRPC, false, false)
+		methods["TestServerStreamRPC"] = gRPCServer.MethodDescriptor(
+			"TestServerStreamRPC",
+			gRPCServer.MethodType.SERVER_STREAMING,
+			TestRequest,
+			TestResponse,
+			handler;
+			raw_request=raw_request,
+			raw_response=raw_response,
+		)
+	end
+	if TestClientStreamRPC !== nothing
+		handler, raw_request, raw_response = TestClientStreamRPC isa Tuple ? TestClientStreamRPC : (TestClientStreamRPC, false, false)
+		methods["TestClientStreamRPC"] = gRPCServer.MethodDescriptor(
+			"TestClientStreamRPC",
+			gRPCServer.MethodType.CLIENT_STREAMING,
+			TestRequest,
+			TestResponse,
+			handler;
+			raw_request=raw_request,
+			raw_response=raw_response,
+		)
+	end
+	if TestBidirectionalStreamRPC !== nothing
+		handler, raw_request, raw_response = TestBidirectionalStreamRPC isa Tuple ? TestBidirectionalStreamRPC : (TestBidirectionalStreamRPC, false, false)
+		methods["TestBidirectionalStreamRPC"] = gRPCServer.MethodDescriptor(
+			"TestBidirectionalStreamRPC",
+			gRPCServer.MethodType.BIDI_STREAMING,
+			TestRequest,
+			TestResponse,
+			handler;
+			raw_request=raw_request,
+			raw_response=raw_response,
+		)
+	end
+	isempty(methods) && return server
+	gRPCServer.register_service!(server.dispatcher, gRPCServer.ServiceDescriptor("test.TestService", methods))
+	return server
+end
 
 # gRPCServer.jl END

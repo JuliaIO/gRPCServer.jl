@@ -32,6 +32,11 @@ using Logging
 using Sockets
 using UUIDs
 using ProtoBuf
+
+# The CodeGenerators submodule is NOT brought in by `using ProtoBuf`; the
+# codegen callbacks (src/codegen.jl) reference CodeGenerators types
+# (ServiceType, RPCType, Context, ...) directly.
+import ProtoBuf.CodeGenerators
 using CodecZlib
 using TranscodingStreams
 using PrecompileTools
@@ -86,6 +91,12 @@ include("interceptors.jl")
 
 # 7. Dispatch (depends on interceptors, context, errors)
 include("dispatch.jl")
+
+# 7b. ProtoBuf code generation: defines grpc_register_service_codegen() and the
+#     import_cb/service_cb handlers registered under the "gRPCServer.jl" key.
+#     __init__ registers them so a protojl run emits *_Method builders and
+#     register_<Service>! helpers alongside gRPCClient's stubs.
+include("codegen.jl")
 
 # 8. Proto definitions (needed before server.jl for reflection handling)
 include("proto/grpc/health/v1/health_pb.jl")
@@ -165,6 +176,10 @@ export HTTPjlBackend, Nghttp2Backend, AbstractGRPCStream, serve_grpc
 # HTTP/2 Stream State (for advanced use cases)
 export can_send, StreamError
 
+# ProtoBuf code generation (re-exported so `using gRPCServer` exposes protojl
+# to code-generation workflows; gRPCClient.jl does not export it)
+export protojl
+
 # Precompilation workload for faster time-to-first-execution
 @compile_workload begin
     # Create a server (common first operation)
@@ -208,9 +223,10 @@ export can_send, StreamError
 end
 
 function __init__()
-    # Code generation registration (Phase 2) hooks in here. Currently a
-    # no-op placeholder so the merged package has the same init seam as the
-    # csvance implementation (grpc_register_service_codegen).
+    # Register the "gRPCServer.jl" ProtoBuf code-generation handler so a single
+    # protojl run (with gRPCClient.jl loaded too) emits server descriptors
+    # alongside the client stubs.
+    grpc_register_service_codegen()
     return nothing
 end
 
