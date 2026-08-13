@@ -83,6 +83,8 @@ mutable struct GRPCServer
         host::String,
         port::Int;
         max_message_size::Int=4 * 1024 * 1024,
+        max_receive_message_length::Union{Int, Nothing}=nothing,  # nothing => max_message_size
+        max_send_message_length::Union{Int, Nothing}=nothing,     # nothing => max_message_size
         max_concurrent_streams::Int=100,
         max_connections::Union{Int, Nothing}=nothing,
         max_concurrent_requests::Union{Int, Nothing}=nothing,
@@ -125,6 +127,8 @@ mutable struct GRPCServer
             max_concurrent_requests=max_concurrent_requests,
             max_queued_requests=max_queued_requests,
             max_message_size=max_message_size,
+            max_receive_message_length=max_receive_message_length,
+            max_send_message_length=max_send_message_length,
             keepalive_interval=keepalive_interval,
             keepalive_timeout=keepalive_timeout,
             idle_timeout=idle_timeout,
@@ -1814,7 +1818,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
         if is_cancelled(gs)
             ctx.cancelled = true
         end
-        max_send = server.config.max_message_size
+        max_send = server.config.max_send_message_length
         mt = method_desc.method_type
         if mt == MethodType.UNARY
             data = read_message!(gs)

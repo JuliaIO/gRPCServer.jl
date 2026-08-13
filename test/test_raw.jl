@@ -193,3 +193,59 @@ end
         close(server)
     end
 end
+
+@testset "Asymmetric receive/send message caps" begin
+    # The per-direction caps are enforced at runtime as GRPCError(RESOURCE_EXHAUSTED),
+    # not as ArgumentError (which is reserved for zero/negative config values).
+    # Wire sizes (proto3 packs repeated u64): 3000 elements ~ 5.9 KiB, 50000 ~ 133 KiB.
+
+    # recv cap small (4 KiB), send cap large (1 MiB): a big response passes,
+    # a big request is rejected with RESOURCE_EXHAUSTED before dispatch.
+    server = GRPCServer("127.0.0.1", 1; max_receive_message_length = 4096, max_send_message_length = 1 * 1024 * 1024)
+    server.port = 0
+    register_TestService_TestRPC!(server) do ctx, req
+        TestResponse(collect(UInt64, 1:req.test_response_sz))
+    end
+    start!(server)
+    port = HTTP.port(server)
+    sleep(0.3)
+    try
+        client = TestService_TestRPC_Client("127.0.0.1", port; deadline = 10)
+        resp = gRPCClient.grpc_sync_request(client, TestRequest(50000, UInt64[]))
+        @test length(resp.data) == 50000
+        err = try
+            gRPCClient.grpc_sync_request(client, TestRequest(1, collect(UInt64, 1:3000)))
+            nothing
+        catch e
+            e
+        end
+        @test err isa gRPCClient.gRPCServiceCallException
+        @test err.grpc_status == 8  # RESOURCE_EXHAUSTED
+    finally
+        close(server)
+    end
+
+    # recv cap large (1 MiB), send cap small (4 KiB): a big request passes
+    # through the recv cap, but the ~5.9 KiB response is rejected on the send side.
+    server = GRPCServer("127.0.0.1", 1; max_receive_message_length = 1 * 1024 * 1024, max_send_message_length = 4096)
+    server.port = 0
+    register_TestService_TestRPC!(server) do ctx, req
+        TestResponse(collect(UInt64, 1:req.test_response_sz))
+    end
+    start!(server)
+    port = HTTP.port(server)
+    sleep(0.3)
+    try
+        client = TestService_TestRPC_Client("127.0.0.1", port; deadline = 10)
+        err = try
+            gRPCClient.grpc_sync_request(client, TestRequest(3000, UInt64[]))
+            nothing
+        catch e
+            e
+        end
+        @test err isa gRPCClient.gRPCServiceCallException
+        @test err.grpc_status == 8  # RESOURCE_EXHAUSTED
+    finally
+        close(server)
+    end
+end

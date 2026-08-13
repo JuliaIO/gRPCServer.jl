@@ -48,6 +48,31 @@ using gRPCServer
         @test config.debug_mode == true
     end
 
+    @testset "ServerConfig Per-Direction Message Caps" begin
+        # Defaults: both directions inherit the common max_message_size.
+        config = ServerConfig()
+        @test config.max_receive_message_length == 4 * 1024 * 1024
+        @test config.max_send_message_length == 4 * 1024 * 1024
+        @test config.max_message_size == 4 * 1024 * 1024
+
+        # A receive override refines only the receive side; the common cap
+        # seeds the other, and max_message_size reports the larger of the two.
+        config = ServerConfig(max_message_size = 16 * 1024 * 1024, max_receive_message_length = 4 * 1024 * 1024)
+        @test config.max_receive_message_length == 4 * 1024 * 1024
+        @test config.max_send_message_length == 16 * 1024 * 1024
+        @test config.max_message_size == 16 * 1024 * 1024
+
+        # A send override alone leaves the receive side at the common cap.
+        config = ServerConfig(max_send_message_length = 8 * 1024 * 1024)
+        @test config.max_receive_message_length == 4 * 1024 * 1024
+        @test config.max_send_message_length == 8 * 1024 * 1024
+        @test config.max_message_size == 8 * 1024 * 1024
+
+        # Per-direction validation is independent of max_message_size.
+        @test_throws ArgumentError ServerConfig(max_receive_message_length = 0)
+        @test_throws ArgumentError ServerConfig(max_send_message_length = -1)
+    end
+
     @testset "ServerConfig Show Method" begin
         config = ServerConfig(enable_health_check=true)
         str = sprint(show, config)

@@ -112,7 +112,11 @@ Configuration container for gRPC server options.
   `RESOURCE_EXHAUSTED` status (no queueing, no waiting). The value has no effect (default: 1000)
 
 ## Message Limits
-- `max_message_size::Int`: Maximum message size in bytes (default: 4MB)
+- `max_message_size::Int`: Maximum message size in bytes (default: 4MB). Seeds both the receive
+  and send caps; override one side with `max_receive_message_length` / `max_send_message_length`
+  (each defaults to `max_message_size`). The receive cap is enforced by the framing layer on
+  incoming request messages (HTTPjl backend); the send cap is enforced when encoding response
+  messages. The `ServerConfig.max_message_size` field always reports the larger of the two.
 
 ## Timeouts (in seconds)
 - `keepalive_interval::Union{Float64, Nothing}`: Interval for keepalive pings (nothing = disabled)
@@ -159,8 +163,12 @@ struct ServerConfig
     max_concurrent_requests::Union{Int, Nothing}
     max_queued_requests::Int
 
-    # Message limits
+    # Message limits. `max_message_size` is the common cap: it seeds both
+    # directions, and the per-direction overrides refine one side. The field
+    # always holds the largest message the server carries either way.
     max_message_size::Int
+    max_receive_message_length::Int
+    max_send_message_length::Int
 
     # Timeouts (in seconds)
     keepalive_interval::Union{Float64, Nothing}
@@ -201,7 +209,9 @@ struct ServerConfig
         max_concurrent_streams::Int=100,
         max_concurrent_requests::Union{Int, Nothing}=nothing,
         max_queued_requests::Int=1000,
-        max_message_size::Int=4 * 1024 * 1024,  # 4MB
+        max_message_size::Int=4 * 1024 * 1024,  # 4MB, seeds both directions
+        max_receive_message_length::Union{Int, Nothing}=nothing,  # nothing => max_message_size
+        max_send_message_length::Union{Int, Nothing}=nothing,     # nothing => max_message_size
         keepalive_interval::Union{Float64, Nothing}=nothing,
         keepalive_timeout::Float64=20.0,
         idle_timeout::Union{Float64, Nothing}=nothing,
@@ -233,6 +243,14 @@ struct ServerConfig
         if max_message_size < 1
             throw(ArgumentError("max_message_size must be at least 1"))
         end
+        recv_len = something(max_receive_message_length, max_message_size)
+        send_len = something(max_send_message_length, max_message_size)
+        if recv_len < 1
+            throw(ArgumentError("max_receive_message_length must be at least 1"))
+        end
+        if send_len < 1
+            throw(ArgumentError("max_send_message_length must be at least 1"))
+        end
         if keepalive_timeout <= 0
             throw(ArgumentError("keepalive_timeout must be positive"))
         end
@@ -254,7 +272,9 @@ struct ServerConfig
             max_concurrent_streams,
             max_concurrent_requests,
             max_queued_requests,
-            max_message_size,
+            max(recv_len, send_len),
+            recv_len,
+            send_len,
             keepalive_interval,
             keepalive_timeout,
             idle_timeout,
@@ -281,6 +301,10 @@ end
 function Base.show(io::IO, config::ServerConfig)
     print(io, "ServerConfig(")
     print(io, "max_message_size=", config.max_message_size)
+    if config.max_receive_message_length != config.max_send_message_length
+        print(io, ", max_receive_message_length=", config.max_receive_message_length)
+        print(io, ", max_send_message_length=", config.max_send_message_length)
+    end
     print(io, ", max_concurrent_streams=", config.max_concurrent_streams)
     if config.tls !== nothing
         print(io, ", tls=enabled")

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Asymmetric message caps: `max_receive_message_length` and
+  `max_send_message_length`.** The single `max_message_size` knob stays as the
+  common default seeding both directions; each new kwarg overrides one side
+  (`GRPCServer` and `ServerConfig`). The receive cap is enforced by the framing
+  layer on incoming request messages (HTTPjl backend), the send cap when
+  encoding response messages, and both violations surface to the client as
+  `RESOURCE_EXHAUSTED`, never as a config-style `ArgumentError`. Zero or
+  negative per-direction values are rejected at construction time, like the
+  common cap.
+
 - **`stop_serving!` for `Nghttp2Backend`.** The generic method just closes the
   handle, which dropped both of gRPCServer's shutdown arguments: a forced stop
   still waited out the grace period, and a caller asking for thirty seconds

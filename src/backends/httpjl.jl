@@ -277,7 +277,7 @@ closed by `stop!`).
 """
 function serve_grpc(::HTTPjlBackend, server, on_call)
     handler = function (http_stream)
-        gs = HTTPjlGRPCStream(http_stream, server.config.max_message_size)
+        gs = HTTPjlGRPCStream(http_stream, server.config.max_receive_message_length)
         # NOTE: HTTP.peeraddr(stream) is read-only on the surface
         # (_require_server_stream no-op + TCP.remote_addr field read), but on
         # HTTP.jl 2.6.4 calling it on an h2 server stream deterministically
