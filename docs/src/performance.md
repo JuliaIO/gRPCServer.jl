@@ -13,8 +13,8 @@ julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
 julia --project=benchmark --threads=auto benchmark/run.jl
 ```
 
-See [Concurrency](concurrency.md) for how task stickiness and the thread count
-affect handler parallelism.
+See [Advanced Topics — Concurrency model](examples/advanced.md#Concurrency-model)
+for how per-stream tasks and the thread count affect handler parallelism.
 
 ## HTTP/2 flow-control window and large uploads
 
@@ -26,24 +26,26 @@ invisible, but over a network with a 10 ms round trip it caps uploads near 6 MB/
 regardless of message size. Downloads (server to client) are not affected the
 same way, since HTTP.jl already batches outgoing DATA frames.
 
-[`serve!`](@ref) exposes three keywords that raise the windows, forwarded to
-`HTTP.listen!` (they require the vendored HTTP.jl fork that implements them; see
-the package `Project.toml`). All default to the protocol defaults, so behavior is
+`GRPCServer` exposes two keywords that raise the receive windows, forwarded to
+the HTTP/2 backend. All default to the protocol defaults, so behavior is
 unchanged unless set:
 
 - `h2_initial_window_size` (default `65535`): the per-stream receive window the
   server advertises via `SETTINGS_INITIAL_WINDOW_SIZE`
 - `h2_connection_window_size` (default `65535`): the connection-level receive
   window, applied with an initial `WINDOW_UPDATE` when above 65535
-- `h2_max_buffered_bytes` (default `262144`): the per-stream receive buffer cap.
-  It must be at least `h2_initial_window_size`
+
+These keywords are honored only by [`HTTPjlBackend`](@ref). On
+`PureHTTP2Backend` and `Nghttp2Backend`, explicitly setting a non-default (or
+even default) value raises [`UnsupportedFeatureError`](@ref) at construction
+instead of being silently ignored; omit them to use those backends' defaults.
 
 ```julia
 # Size the window to the bandwidth-delay product, e.g. 8 MiB for a high-BDP link.
-serve!(router, "0.0.0.0", 50051;
+server = GRPCServer("0.0.0.0", 50051;
     h2_initial_window_size = 8 * 1024 * 1024,
-    h2_connection_window_size = 8 * 1024 * 1024,
-    h2_max_buffered_bytes = 8 * 1024 * 1024)
+    h2_connection_window_size = 8 * 1024 * 1024)
+run(server)
 ```
 
 To benefit in both directions, the client must advertise a matching receive

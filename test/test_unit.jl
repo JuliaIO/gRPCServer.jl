@@ -30,49 +30,49 @@ end
 end
 
 @testset "Context metadata / deadline / cancellation" begin
-    # A bare server-side HTTP.Stream is enough to build a context; none of these
-    # accessors touch the underlying socket.
-    req = HTTP.Request(
-        "POST",
-        "/test.TestService/TestRPC",
-        ["grpc-timeout" => "1S", "x-meta" => "hello"],
+    # A bare ServerContext is enough to build a context; none of these
+    # accessors touch the network.
+    ctx = gRPCServer.ServerContext(;
+        method = "/test.TestService/TestRPC",
+        metadata = Dict{String, Union{String, Vector{UInt8}}}("x-meta" => "hello"),
+        deadline = now() + Dates.Second(60),
     )
-    ctx = gRPCServer.gRPCContext(nothing, req.target, req.headers, "", Int64(0), HTTP.Stream(req))
 
-    # metadata(): present key, and the default fallback for an absent key.
-    @test gRPCServer.metadata(ctx, "x-meta") == "hello"
-    @test gRPCServer.metadata(ctx, "absent") == ""
-    @test gRPCServer.metadata(ctx, "absent", "dflt") == "dflt"
+    # get_metadata_string(): present key, and nothing for an absent key.
+    @test gRPCServer.get_metadata_string(ctx, "x-meta") == "hello"
+    @test gRPCServer.get_metadata_string(ctx, "absent") === nothing
 
-    # set_trailing_metadata! queues a trailer pair.
-    gRPCServer.set_trailing_metadata!(ctx, "x-trailer", "bye")
-    @test ("x-trailer" => "bye") in ctx.trailing_metadata
+    # set_trailer! queues a trailer pair (keys are lowercased on the wire).
+    gRPCServer.set_trailer!(ctx, "x-trailer", "bye")
+    @test ("x-trailer" => "bye") in ctx.trailers
 
-    # set_initial_metadata! queues a header pair, but is rejected once the
-    # response head has been sent.
-    gRPCServer.set_initial_metadata!(ctx, "x-init", "hi")
-    @test ("x-init" => "hi") in ctx.initial_metadata
-    ctx.initial_sent = true
-    @test_throws ArgumentError gRPCServer.set_initial_metadata!(ctx, "x-late", "nope")
+    # set_header! queues a response-header pair (keys are lowercased on the wire).
+    gRPCServer.set_header!(ctx, "x-init", "hi")
+    @test ("x-init" => "hi") in ctx.response_headers
 
-    # deadline_exceeded(): false with no deadline (0) and with a future one,
-    # true once the deadline is in the past. iscancelled() folds in the deadline.
-    @test gRPCServer.deadline_exceeded(ctx) == false
-    ctx.deadline_ns = Int64(time_ns()) + 60_000_000_000
-    @test gRPCServer.deadline_exceeded(ctx) == false
-    @test gRPCServer.iscancelled(ctx) == false
-    ctx.deadline_ns = Int64(time_ns()) - 1
-    @test gRPCServer.deadline_exceeded(ctx) == true
-    @test gRPCServer.iscancelled(ctx) == true
-    # A peer cancellation also reports cancelled regardless of the deadline.
-    ctx.deadline_ns = Int64(0)
-    ctx.cancelled[] = true
-    @test gRPCServer.iscancelled(ctx) == true
+    # Deadline: remaining_time() is positive while the deadline is in the
+    # future, and nothing when no deadline is set. The dispatch finish path maps
+    # an elapsed deadline to DEADLINE_EXCEEDED (exercised end-to-end by the
+    # deadline testsets elsewhere in the suite).
+    @test gRPCServer.remaining_time(ctx) > 0
+    ctx.deadline = nothing
+    @test gRPCServer.remaining_time(ctx) === nothing
+
+    # Cancellation: is_cancelled() reflects the cancelled flag.
+    @test gRPCServer.is_cancelled(ctx) == false
+    gRPCServer.cancel!(ctx)
+    @test gRPCServer.is_cancelled(ctx) == true
 end
 
 @testset "Malformed request body -> INVALID_ARGUMENT" begin
     using gRPCServer:
-        grpc_encode_message_iobuffer, FrameReader, read_message!, _decode_request
+        grpc_encode_message_iobuffer, FrameReader, read_message!, deserialize_message
+
+    # Ensure the type registry knows the generated TestRequest (registration via
+    # the codegen path auto-populates it, but this testset runs before any
+    # server is built, so seed it explicitly under the derived proto name).
+    type_name = gRPCServer._type_to_proto_name(TestRequest)
+    gRPCServer.get_type_registry()[type_name] = TestRequest
 
     # A length-delimited field header (field 2, wire type 2) that claims five more
     # bytes than are present is invalid protobuf. Framed as a raw body and decoded
@@ -82,18 +82,20 @@ end
     framed = take!(grpc_encode_message_iobuffer(bad))
     io = read_message!(FrameReader(IOBuffer(framed), 4 * 1024 * 1024))
     err = try
-        _decode_request(io, TestRequest)
+        deserialize_message(io, type_name)
         nothing
     catch e
         e
     end
-    @test err isa gRPCServiceCallException
-    @test err.grpc_status == gRPCServer.GRPC_INVALID_ARGUMENT
+    @test err isa GRPCError
+    @test err.code == StatusCode.INVALID_ARGUMENT
+    # The message must not leak decoder internals (a stack trace / source line).
+    @test !occursin("Stacktrace", err.message)
 
     # A well-formed body still decodes through the same wrapper.
     good = take!(grpc_encode_message_iobuffer(TestRequest(3, UInt64[])))
     io2 = read_message!(FrameReader(IOBuffer(good), 4 * 1024 * 1024))
-    @test _decode_request(io2, TestRequest).test_response_sz == 3
+    @test deserialize_message(io2, type_name).test_response_sz == 3
 end
 
 @testset "Compressed frame -> UNIMPLEMENTED" begin
@@ -110,56 +112,64 @@ end
     catch e
         e
     end
-    @test err isa gRPCServiceCallException
-    @test err.grpc_status == gRPCServer.GRPC_UNIMPLEMENTED
+    @test err isa GRPCError
+    @test err.code == StatusCode.UNIMPLEMENTED
 end
 
-@testset "Streaming registration is gated in v0.1" begin
-    # Streaming RPCs are unstable in v0.1: handle! must reject them unless the
-    # caller explicitly opts in, while unary registration is unaffected.
-    unary = gRPCServer.gRPCMethod{TestRequest,false,TestResponse,false}("/t.S/U")
-    server_stream = gRPCServer.gRPCMethod{TestRequest,false,TestResponse,true}("/t.S/SS")
-    client_stream = gRPCServer.gRPCMethod{TestRequest,true,TestResponse,false}("/t.S/CS")
-    bidi = gRPCServer.gRPCMethod{TestRequest,true,TestResponse,true}("/t.S/BD")
-    noop2 = (a, b) -> a
-    noop3 = (a, b, c) -> a
+@testset "Registration-time handler validation" begin
+    # The Phase 5 codegen registers handlers through register_<Service>_<Rpc>!,
+    # which validates the handler shape at registration time (not at call time):
+    # wrong arity, wrong argument types, and raw/typed mismatches throw
+    # ArgumentError; untyped/vararg handlers and matching shapes register.
+    server = gRPCServer.GRPCServer("127.0.0.1", 1)
 
-    # Unary registers freely, with or without the keyword.
-    @test gRPCServer.handle!(gRPCServer.gRPCRouter(), unary, noop2) isa gRPCServer.gRPCRouter
-    @test gRPCServer.handle!(
-        gRPCServer.gRPCRouter(),
-        unary,
-        noop2;
-        allow_unstable_streaming = true,
-    ) isa gRPCServer.gRPCRouter
+    # Correct unary shape registers.
+    @test register_TestService_TestRPC!(server, (ctx, req::TestRequest) -> TestResponse()) === server
 
-    # Each streaming shape throws without the opt-in, and the message points the
-    # user at the keyword.
-    for m in (server_stream, client_stream, bidi)
-        fn = m === client_stream ? noop2 : noop3
-        err = try
-            gRPCServer.handle!(gRPCServer.gRPCRouter(), m, fn)
-            nothing
-        catch e
-            e
-        end
-        @test err isa ArgumentError
-        @test occursin("allow_unstable_streaming", err.msg)
-        # Opting in registers successfully.
-        @test gRPCServer.handle!(
-            gRPCServer.gRPCRouter(),
-            m,
-            fn;
-            allow_unstable_streaming = true,
-        ) isa gRPCServer.gRPCRouter
-    end
-
-    # The do-block form forwards the keyword.
-    @test gRPCServer.handle!(
-        gRPCServer.gRPCRouter(),
-        bidi;
-        allow_unstable_streaming = true,
-    ) do in, out, ctx
+    # Wrong arity (a server-streaming-shaped handler on a unary RPC) is caught.
+    err = try
+        register_TestService_TestRPC!(server, (ctx, req, stream) -> nothing)
         nothing
-    end isa gRPCServer.gRPCRouter
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("not callable", err.msg)
+
+    # Wrong argument type is caught.
+    err2 = try
+        register_TestService_TestRPC!(server, (ctx, req::Int) -> TestResponse())
+        nothing
+    catch e
+        e
+    end
+    @test err2 isa ArgumentError
+
+    # A typed handler with raw_request=true (the handler must then take raw
+    # Vector{UInt8}) is caught.
+    err3 = try
+        register_TestService_TestServerStreamRPC!(
+            server,
+            (ctx, req::TestRequest, stream) -> nothing;
+            raw_request = true,
+        )
+        nothing
+    catch e
+        e
+    end
+    @test err3 isa ArgumentError
+
+    # Raw sides take Vector{UInt8}: a matching raw-shaped handler registers.
+    @test register_TestService_TestServerStreamRPC!(
+        server,
+        (ctx, req::Vector{UInt8}, stream) -> nothing;
+        raw_request = true,
+    ) === server
+
+    # The do-block form is the canonical ergonomic path.
+    server2 = gRPCServer.GRPCServer("127.0.0.1", 1)
+    register_TestService_TestClientStreamRPC!(server2) do ctx, stream
+        TestResponse()
+    end
+    @test "test.TestService" in services(server2)
 end

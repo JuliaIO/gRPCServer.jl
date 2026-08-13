@@ -1,0 +1,34 @@
+// interop_test.proto - Integration test service for gRPCClient.jl interop
+syntax = "proto3";
+
+package interop;
+
+// Test service covering all four RPC patterns
+service InteropTestService {
+  // Unary: echo request back as response
+  rpc Echo (InteropRequest) returns (InteropResponse);
+
+  // Server streaming: return multiple responses from a single request
+  rpc StreamResponses (InteropRequest) returns (stream InteropResponse);
+
+  // Client streaming: aggregate multiple requests into one response
+  rpc CollectRequests (stream InteropRequest) returns (InteropResponse);
+
+  // Bidirectional streaming: echo each request as a response
+  rpc BiDiExchange (stream InteropRequest) returns (stream InteropResponse);
+
+  // Unary: always returns a gRPC error (error code specified in request id)
+  rpc Fail (InteropRequest) returns (InteropResponse);
+}
+
+// Generic request message for interoperability tests
+message InteropRequest {
+  int32 id = 1;       // Unique request identifier
+  string payload = 2; // Arbitrary payload
+}
+
+// Generic response message for interoperability tests
+message InteropResponse {
+  int32 id = 1;       // Echoed request identifier
+  string result = 2;  // Response payload
+}

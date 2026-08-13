@@ -1,82 +1,85 @@
-# Reusable TestService server implementation, matching gRPCClient.jl's test
-# expectations. Echo semantics:
+# Reusable TestService server implementation on the merged API via the generated
+# codegen interface (register_TestService_<Rpc>! from test/gen/test/test_pb.jl).
+# Echo semantics:
 #   unary TestRPC(req):  data = 1:req.test_response_sz
 #   server-stream:       emit req.test_response_sz messages, message i = 1:i
 #   client-stream:       count n requests, return 1:n
 #   bidi:                for the i-th request, emit 1:i
 #
-# Handlers are registered via inline gRPCMethod descriptors rather than the
-# generated register_TestService!, so this file is portable to a test harness
-# whose generated stub is client-only (e.g. gRPCClient.jl's). It assumes the
-# TestRequest / TestResponse types are already in scope.
+# Assumes the generated test/gen/test/test_pb.jl is already included in the
+# enclosing module (TestRequest / TestResponse / register_TestService_*! in
+# scope), and that gRPCServer / HTTP are loaded.
 
-const TESTSERVICE_TestRPC =
-    gRPCServer.gRPCMethod{TestRequest,false,TestResponse,false}("/test.TestService/TestRPC")
-const TESTSERVICE_TestServerStreamRPC =
-    gRPCServer.gRPCMethod{TestRequest,false,TestResponse,true}(
-        "/test.TestService/TestServerStreamRPC",
-    )
-const TESTSERVICE_TestClientStreamRPC =
-    gRPCServer.gRPCMethod{TestRequest,true,TestResponse,false}(
-        "/test.TestService/TestClientStreamRPC",
-    )
-const TESTSERVICE_TestBidirectionalStreamRPC =
-    gRPCServer.gRPCMethod{TestRequest,true,TestResponse,true}(
-        "/test.TestService/TestBidirectionalStreamRPC",
-    )
+"""
+    build_test_server(; port, kwargs...) -> GRPCServer
 
-function build_test_router(;
-    max_receive_message_length = 4 * 1024 * 1024,
-    max_send_message_length = 4 * 1024 * 1024,
-)
-    router = gRPCServer.gRPCRouter(;
-        max_receive_message_length = max_receive_message_length,
-        max_send_message_length = max_send_message_length,
-    )
+Construct a STOPPED `GRPCServer` with the standard test.TestService (the four
+RPC types with echo semantics) registered through the generated
+`register_TestService_<Rpc>!` functions. `kwargs...` go to the `GRPCServer`
+constructor (max_message_size, max_concurrent_requests, idle_timeout, ...).
+"""
+function build_test_server(; port::Int=1, kwargs...)
+    server = gRPCServer.GRPCServer("127.0.0.1", port; kwargs...)
 
-    gRPCServer.handle!(router, TESTSERVICE_TestRPC) do req, ctx
+    register_TestService_TestRPC!(server) do ctx, req
         TestResponse(collect(UInt64, 1:req.test_response_sz))
     end
 
-    # Streaming is unstable in v0.1 and gated behind allow_unstable_streaming;
-    # the test suite opts in to exercise it (against the patched HTTP.jl fork).
-    gRPCServer.handle!(
-        router,
-        TESTSERVICE_TestServerStreamRPC;
-        allow_unstable_streaming = true,
-    ) do req, out, ctx
+    register_TestService_TestServerStreamRPC!(server) do ctx, req, stream
         for i = 1:req.test_response_sz
-            put!(out, TestResponse(collect(UInt64, 1:i)))
+            send!(stream, TestResponse(collect(UInt64, 1:i)))
         end
+        nothing
     end
 
-    gRPCServer.handle!(
-        router,
-        TESTSERVICE_TestClientStreamRPC;
-        allow_unstable_streaming = true,
-    ) do in, ctx
+    register_TestService_TestClientStreamRPC!(server) do ctx, stream
         n = 0
-        for _ in in
+        for _ in stream
             n += 1
         end
         TestResponse(collect(UInt64, 1:n))
     end
 
-    gRPCServer.handle!(
-        router,
-        TESTSERVICE_TestBidirectionalStreamRPC;
-        allow_unstable_streaming = true,
-    ) do in, out, ctx
+    register_TestService_TestBidirectionalStreamRPC!(server) do ctx, stream
         i = 0
-        for _ in in
+        for _ in stream
             i += 1
-            put!(out, TestResponse(collect(UInt64, 1:i)))
+            send!(stream, TestResponse(collect(UInt64, 1:i)))
         end
+        nothing
     end
 
-    return router
+    return server
 end
 
-function start_test_server(host = "127.0.0.1", port = 0; context = nothing, kwargs...)
-    return gRPCServer.serve!(build_test_router(), host, port; context = context, kwargs...)
+"""
+    start_test_server(host="127.0.0.1", port=0; context=nothing, kwargs...) -> GRPCServer
+
+Build ([`build_test_server`](@ref)) and start a TestService server. `port=0`
+binds an ephemeral port — `GRPCServer`'s constructor rejects 0, so construct
+with a placeholder port and mutate before `start!` (the same trick the legacy
+`serve!` used); `HTTP.port(server)` then reports the real bound port.
+"""
+function start_test_server(host="127.0.0.1", port=0; context=nothing, kwargs...)
+    construct_port = port == 0 ? 1 : Int(port)
+    server = build_test_server(; port=construct_port, context=context, kwargs...)
+    port == 0 && (server.port = 0)
+    gRPCServer.start!(server)
+    return server
+end
+
+"""
+    with_test_server(f; kwargs...)
+
+Run `f(server, port)` against a started TestService server, stopping the server
+gracefully afterwards.
+"""
+function with_test_server(f; kwargs...)
+    server = start_test_server("127.0.0.1", 0; kwargs...)
+    port = HTTP.port(server)
+    try
+        f(server, port)
+    finally
+        close(server)
+    end
 end

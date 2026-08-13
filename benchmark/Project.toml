@@ -1,13 +1,11 @@
 [deps]
-gRPCServer = "b7f0dee4-5e6a-42e7-93b0-9c098bad2317"
-gRPCClient = "aaca4a50-36af-4a1d-b878-4c443f2061ad"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+gRPCServer = "f97f078e-81a3-449b-8443-3b3ae5ba1c89"
 ProtoBuf = "3349acd9-ac6a-5e09-bcdb-63829b23a429"
-HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
-Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 
-# Local sibling checkouts, mirroring the test setup. `HTTP` is the vendored fork
-# with configurable HTTP/2 flow-control windows (same source as the package
-# itself). Adjust the paths if your checkouts live elsewhere.
 [sources]
 gRPCServer = {path = ".."}
+
+[compat]
+BenchmarkTools = "1"
+julia = "1.10"

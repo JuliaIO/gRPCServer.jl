@@ -1,6 +1,20 @@
-# Heavy load sweep mirroring gRPCClient.jl's own workloads, driving the shared
-# TestService server with gRPCClient.jl. Scale with GRPC_SERVER_TEST_LOAD_N
-# (default 1000); skip entirely with GRPC_SERVER_TEST_SKIP_LOAD.
+# Migrated from the csvance test/test_load.jl to the merged API: heavy load
+# sweep mirroring gRPCClient.jl's own workloads, driving the shared TestService
+# server (codegen-registered via testservice.jl) with gRPCClient.jl. Scale with
+# GRPC_SERVER_TEST_LOAD_N (default 1000); skip entirely with
+# GRPC_SERVER_TEST_SKIP_LOAD. GRPC_DEADLINE_EXCEEDED becomes
+# Int(StatusCode.DEADLINE_EXCEEDED).
+#
+# gRPCClient.gRPCServiceCallException is gRPCClient's OWN client-side exception
+# type (grpc_status::Int) — the merge does not change gRPCClient, so the
+# client-side rejection/deadline assertions keep using it.
+
+using Test
+using gRPCServer
+import gRPCClient
+
+gRPCClient.grpc_init()
+
 
 _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
 
@@ -10,11 +24,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
     # client's "big" payload test.
     BIG = 32 * 28 * 224
 
-    server = start_test_server("127.0.0.1", 0)
-    port = HTTP.port(server)
-    sleep(0.3)
-
-    try
+    with_test_server() do server, port
         @testset "unary varying request/response" begin
             client = TestService_TestRPC_Client("127.0.0.1", port)
             reqs = Vector{gRPCClient.gRPCRequest}()
@@ -186,11 +196,9 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
                     @test false
                 catch ex
                     @test isa(ex, gRPCClient.gRPCServiceCallException)
-                    @test ex.grpc_status == GRPC_DEADLINE_EXCEEDED
+                    @test ex.grpc_status == Int(StatusCode.DEADLINE_EXCEEDED)
                 end
             end
         end
-    finally
-        close(server)
     end
 end

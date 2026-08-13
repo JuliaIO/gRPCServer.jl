@@ -1,0 +1,16 @@
+// chat.proto - Bidirectional streaming example
+syntax = "proto3";
+
+package chat;
+
+// Chat service demonstrating bidirectional streaming RPC
+service Chat {
+  // Chat allows sending and receiving messages simultaneously
+  rpc Chat (stream ChatMessage) returns (stream ChatMessage);
+}
+
+// A chat message with user and text content
+message ChatMessage {
+  string user = 1;
+  string text = 2;
+}

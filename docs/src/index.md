@@ -1,56 +1,44 @@
 # gRPCServer.jl
 
-A gRPC server for Julia built on [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl)'s
-HTTP/2 support, with code generation through
-[ProtoBuf.jl](https://github.com/JuliaIO/ProtoBuf.jl). It is the server
-counterpart to [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl): the
-same wire protocol and the same ProtoBuf.jl codegen integration, using HTTP.jl
-instead of libCURL for transport.
+A native Julia implementation of a gRPC server.
 
-Both cleartext HTTP/2 (h2c) and HTTP/2 over TLS (h2) are supported.
+## Overview
 
-!!! danger "v0.1 supports unary RPCs only"
-    Streaming RPCs (server-streaming, client-streaming, bidirectional) are
-    implemented but **unstable** in this release: they have known HTTP/2
-    lifecycle problems and are gated behind an explicit
-    `allow_unstable_streaming = true` opt-in. Use only unary RPCs in production
-    for now. See [Streaming](streaming.md) for details.
+gRPCServer.jl provides a complete gRPC server implementation in Julia, enabling you to build high-performance gRPC services. It supports all four RPC patterns, interceptors, health checking, and more.
 
 ## Features
 
-- Unary RPCs, production-ready
-- Server-streaming, client-streaming, and bidirectional RPCs, **unstable in
-  v0.1** and opt-in only (see [Streaming](streaming.md))
-- ProtoBuf.jl code generation that emits per-RPC descriptors and a
-  `register_<Service>!` helper per service
-- An Oxygen.jl-style router with user application state attached at serve time
-- Cooperative deadline and cancellation checks, request and response metadata
-- Per-request multithreading by default, with an opt-in sticky (thread-pinned)
-  task mode for IO-bound work
-- A concurrency cap with load shedding, bounded message sizes, and configurable
-  HTTP/2 flow-control windows
-- Optional raw request and response buffers for partial decoding or byte
-  forwarding
+- **All RPC Patterns**: Unary, server streaming, client streaming, and bidirectional streaming
+- **Code Generation**: one `protojl` run emits message types, gRPCClient.jl client stubs, and per-service registration functions (see [Code Generation](@ref))
+- **Protocol Buffer Support**: Seamless integration with ProtoBuf.jl for message serialization
+- **Interceptors**: Middleware pattern for cross-cutting concerns (logging, auth, metrics)
+- **Health Checking**: Standard gRPC health checking protocol (grpc.health.v1)
+- **Compression**: GZIP and DEFLATE compression support
+- **TLS Support**: Secure connections with TLS and mutual TLS (mTLS)
+- **Pluggable HTTP/2 Backend**: HTTP/2 protocol delegated to [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl); custom backends can be plugged in via `AbstractHTTP2Backend` (see [HTTP/2 Backends](@ref))
+- **Reflection**: gRPC reflection service for tooling integration
 
 ## Installation
 
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/JuliaIO/gRPCServer.jl")
+
+Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
+
+# Pkg.add("gRPCServer")  # when registered
 ```
 
-gRPCServer currently depends on a fork of HTTP.jl that adds configurable HTTP/2
-flow-control window sizes. See the package `Project.toml` for the pinned source.
+## Getting Started
 
-## Where to next
+See the [Quick Start](@ref) guide for a complete walkthrough from defining your `.proto` file to generating the server stubs, registering handlers, and running a gRPC server tested with grpcurl.
 
-- [Getting Started](getting_started.md) walks through generating code, writing a
-  handler, and serving it end to end.
-- [Code Generation](code_generation.md) covers the ProtoBuf.jl integration.
-- [Handlers](handlers.md) documents the four RPC patterns, raw buffers, error
-  handling, and the context API.
-- [Concurrency](concurrency.md) explains the threading model, sticky tasks, the
-  concurrency cap, and deadlines.
-- [TLS](tls.md), [Performance](performance.md), and [Security](security.md)
-  cover deployment concerns.
-- [API Reference](api.md) lists the full public interface.
+## Table of Contents
+
+```@contents
+Pages = ["quickstart.md", "api.md", "examples/index.md"]
+Depth = 2
+```
+
+## License
+
+MIT License

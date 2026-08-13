@@ -2,55 +2,135 @@
 
 gRPCServer integrates with [ProtoBuf.jl](https://github.com/JuliaIO/ProtoBuf.jl)
 through an external code generation handler. Loading the package registers that
-handler from its `__init__`, so you do not normally call anything by hand; you
-just run ProtoBuf.jl's `protojl` on your `.proto` files.
+handler from its `__init__` (via `grpc_register_service_codegen()`), so you do
+not normally call anything by hand — you just run ProtoBuf.jl's `protojl` on
+your `.proto` files.
+
+When [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) is also loaded,
+a single `protojl` run emits the message types, the gRPCClient.jl client
+stubs, and the gRPCServer.jl registration functions into the same generated
+file.
+
+## Running protojl
+
+Load both packages, then run `protojl` (re-exported by gRPCServer) from your
+project directory:
 
 ```julia
-using ProtoBuf, gRPCServer
-protojl("myservice.proto", "proto", "gen"; always_use_modules = true)
-```
+using ProtoBuf
+using gRPCServer
+import gRPCClient
 
-For each `service` in the `.proto`, gRPCServer emits:
-
-- one `<Service>_<Rpc>_Method` descriptor builder per RPC, and
-- a `register_<Service>!(router; ...)` convenience function.
-
-If [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) is also loaded, a
-single `protojl` run emits both client stubs and server descriptors into the
-same generated file.
-
-## Descriptor builders
-
-Each `*_Method` is a builder function (mirroring gRPCClient.jl's `*_Client`
-constructor) whose `TRequest` and `TResponse` keyword arguments default to the
-proto message types. You register a handler against a descriptor with
-[`handle!`](@ref):
-
-```julia
-handle!(router, MyService_GetThing_Method()) do req, ctx
-    Thing(query(ctx.payload.db, req.id))
-end
-```
-
-Overriding `TRequest` or `TResponse` with `Vector{UInt8}` opts a side into raw,
-undecoded protobuf bytes. See [Raw request and response buffers](handlers.md#Raw-request-and-response-buffers)
-on the Handlers page.
-
-## The `register_<Service>!` helper
-
-`register_<Service>!` registers several handlers at once by RPC name, which is
-the most concise way to wire up a service:
-
-```julia
-register_MyService!(router;
-    GetThing = (req, ctx) -> Thing(query(ctx.payload.db, req.id)),
-    ListThings = (req, out, ctx) -> (for t in things(ctx.payload.db); put!(out, t); end),
+protojl("myservice.proto", ".", "generated";
+    always_use_modules = true,
+    add_kwarg_constructors = true
 )
 ```
 
-Any RPC left unset is simply not registered.
+For a `package myservice;` in the proto, this writes:
 
-## Re-registering the handler
+```
+generated/
+└── myservice/
+    ├── myservice.jl      # module wrapper; include() + using .myservice
+    └── myservice_pb.jl   # messages + client stubs + registration functions
+```
 
-The codegen handler is registered automatically on load. If a host needs to
-register it again explicitly, call [`grpc_register_service_codegen`](@ref).
+The generated file is delimited into two blocks:
+
+- `# gRPCClient.jl BEGIN` … `# gRPCClient.jl END` — the `<Service>_<Rpc>_Client`
+  client constructors (present only when gRPCClient.jl is loaded).
+- `# gRPCServer.jl BEGIN` … `# gRPCServer.jl END` — the
+  `<Service>_<Rpc>_Method` descriptor builders, the per-RPC
+  `register_<Service>_<Rpc>!` functions, and the aggregate
+  `register_<Service>!` function.
+
+Use the generated module from your server:
+
+```julia
+using gRPCServer
+include("generated/myservice/myservice.jl")
+using .myservice
+```
+
+Regenerate whenever you change the `.proto` file; the output is deterministic
+(no timestamps or machine-specific paths).
+
+## Emitted symbols
+
+For each `service` in the `.proto`, gRPCServer emits the following (exact
+signatures from the generated output):
+
+1. **Typed descriptor builder** — one per RPC:
+
+```
+<Service>_<Rpc>_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+```
+
+2. **Per-RPC registration** — emitted in both argument orders, so the do-block
+form works:
+
+```
+register_<Service>_<Rpc>!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+register_<Service>_<Rpc>!(handler::Function, server::GRPCServer; kwargs...) -> server
+```
+
+3. **Per-service aggregate** — registers several RPCs at once by keyword:
+
+```
+register_<Service>!(server::GRPCServer; <Rpc>=nothing, ...) -> server
+```
+
+Every non-`nothing` keyword registers its RPC. Each keyword accepts a handler
+or a `(handler, raw_request, raw_response)` tuple (raw flags per method).
+All-nothing is a no-op. It is equivalent to calling the per-RPC
+`register_<Service>_<Rpc>!` functions individually.
+
+## Handler contracts
+
+The registration functions validate the handler signature at registration
+time; a mismatched shape throws `ArgumentError`. The four contracts (context
+first):
+
+| RPC type | Handler signature |
+|----------|-------------------|
+| Unary | `(ctx::gRPCServer.ServerContext, req::TReq) -> TResp` |
+| Server streaming | `(ctx, req::TReq, stream::gRPCServer.ServerStream{TResp}) -> Nothing` — send responses with `gRPCServer.send!(stream, msg)` |
+| Client streaming | `(ctx, stream::gRPCServer.ClientStream{TReq}) -> TResp` — iterate with `for req in stream` |
+| Bidirectional | `(ctx, stream::gRPCServer.BidiStream{TReq, TResp}) -> Nothing` — iterate and `gRPCServer.send!(stream, msg)` |
+
+## Raw request and response buffers
+
+The `raw_request` and `raw_response` flags override a side with
+`Vector{UInt8}`: the handler receives the raw, undecoded protobuf payload
+and/or returns raw response bytes instead of a typed message. The raw buffer
+is the protobuf message body only; the gRPC framing is still handled by the
+library.
+
+```julia
+# Both sides raw
+register_myservice_GetThing!(server, (ctx, raw) -> raw;
+    raw_request = true, raw_response = true)
+```
+
+## Registration-time validation
+
+A handler whose signature does not match the RPC's contract (wrong arity,
+wrong types, or a raw/typed mismatch) raises `ArgumentError` at
+`register_*!` time, before any request is served.
+
+## Under the hood
+
+Each generated `register_<Service>_<Rpc>!` builds a `MethodDescriptor` via the
+`*_Method` builder and calls `gRPCServer.register_method!` on the server's
+dispatcher. The runtime interface — `register_method!`, `MethodDescriptor`,
+`ServiceDescriptor`, `register!` — is documented in the
+[API Reference](api.md); an explicit walkthrough of the underlying layer lives
+in the [Advanced Examples](examples/advanced.md#The-runtime-interface-beneath-the-codegen).
+
+## Next steps
+
+- [Quick Start](quickstart.md) — end-to-end walkthrough
+- [Examples](examples/index.md) — five runnable example servers
+- [TLS](tls.md) — serving codegen-registered services over TLS
+- [API Reference](api.md) — the runtime interface beneath the codegen

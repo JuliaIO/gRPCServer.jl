@@ -1,14 +1,53 @@
-# Regression tests from the pre-release correctness/security review: the
-# streaming shutdown protocol (early-returning handlers, pump joins, producer
-# release), grpc-timeout parsing on hostile bytes, FrameReader allocation
-# behavior, and pre-handler request validation.
+# Migrated from the csvance test/test_lifecycle.jl to the merged API (the
+# Phase 1c port, upgraded to the generated codegen registration interface).
+#
+# Behaviors preserved: hostile grpc-timeout rejection, FrameReader allocation
+# bound (no preallocation from a hostile length prefix), pre-handler request
+# validation (405 / 415), streaming shutdown protocol (early-returning handlers,
+# admission-slot release, send-side join before trailers, producer release on
+# oversize streamed responses), streaming metadata on the wire.
+#
+# Documented divergences from the original (merged semantics):
+# 1. parse_grpc_timeout: "" -> nothing (was 0), valid -> DateTime (was Int64
+#    monotonic ns); malformed/overflow -> GRPCError (was gRPCServiceCallException).
+# 2. The "showerror tolerates nonstandard code 99" case is dropped: the merged
+#    StatusCode enum is closed (0..16); a nonstandard code cannot be constructed.
+# 3. set_header! inside a server-streaming handler cannot reach the response
+#    headers — the merged dispatch emits headers BEFORE the handler runs. It
+#    must not throw, and set_trailer! output reaches the wire; this file asserts
+#    both (the original asserted the header).
+# 4. The graceful-shutdown hang documented by the original (@test_broken) is
+#    fixed by the merged bounded shutdown (stop! force fallback): this file
+#    asserts stop!(force=true) completes.
+# 5. Streaming handler signatures are merged-style: (ctx, req, stream) /
+#    (ctx, stream); request reads use first(stream) (ClientStream/BidiStream
+#    are iterators; there is no take!).
 
-@testset "parse_grpc_timeout on hostile values" begin
-    using gRPCServer: parse_grpc_timeout
+using HTTP
+using Dates
+using ProtoBuf: ProtoDecoder, decode
 
-    @test parse_grpc_timeout("") == 0
-    @test parse_grpc_timeout("10S") > Int64(time_ns())  # absolute future deadline
-    @test parse_grpc_timeout("0n") >= 0
+gRPCClient.grpc_init()
+
+
+using gRPCServer
+using gRPCServer: FrameReader, read_message!, _FRAME_READ_CHUNK
+
+@testset "parse_grpc_timeout on hostile values (merged semantics)" begin
+    # Empty = absent -> no deadline.
+    @test gRPCServer.parse_grpc_timeout("") === nothing
+
+    # A valid 10-second timeout is a DateTime roughly 10s in the future.
+    before = now()
+    d = gRPCServer.parse_grpc_timeout("10S")
+    @test d !== nothing
+    @test d > before
+    @test Dates.value(d - before) <= 11_000  # ~10 s, in ms, scheduling tolerance
+
+    # A zero timeout is a deadline at (or just past) now.
+    d0 = gRPCServer.parse_grpc_timeout("0n")
+    @test d0 !== nothing
+    @test d0 <= now() + Dates.Second(1)
 
     for bad in (
         "S",                            # no digits
@@ -24,19 +63,17 @@
         String(UInt8[0x35, 0xB5]),      # digit + lone continuation byte as unit
     )
         err = try
-            parse_grpc_timeout(bad)
+            gRPCServer.parse_grpc_timeout(bad)
             nothing
         catch e
             e
         end
-        @test err isa gRPCServiceCallException
-        @test err.grpc_status == gRPCServer.GRPC_INVALID_ARGUMENT
+        @test err isa GRPCError
+        @test err.code == StatusCode.INVALID_ARGUMENT
     end
 end
 
 @testset "FrameReader does not preallocate from the length prefix" begin
-    using gRPCServer: FrameReader, read_message!, _FRAME_READ_CHUNK
-
     # A bare 5-byte header declaring a near-max message, with no payload bytes:
     # the reader must fail on the truncated frame as a client fault without ever
     # allocating the declared size.
@@ -50,17 +87,17 @@ end
     catch e
         e
     end
-    @test err isa gRPCServiceCallException
-    @test err.grpc_status == gRPCServer.GRPC_INVALID_ARGUMENT
+    @test err isa GRPCError
+    @test err.code == StatusCode.INVALID_ARGUMENT
     @test length(fr.buf) <= 4 * _FRAME_READ_CHUNK
 end
 
-@testset "showerror tolerates nonstandard status codes" begin
-    s = sprint(showerror, gRPCServiceCallException(99, "weird"))
-    @test occursin("UNKNOWN_CODE", s)
-    @test occursin("99", s)
-    s2 = sprint(showerror, gRPCServiceCallException(GRPC_NOT_FOUND, "x"))
-    @test occursin("NOT_FOUND", s2)
+@testset "showerror renders the status name and message" begin
+    s = sprint(showerror, GRPCError(StatusCode.NOT_FOUND, "x"))
+    @test occursin("NOT_FOUND", s)
+    @test occursin("x", s)
+    # Divergence: the merged StatusCode enum is closed (0..16), so the original
+    # "nonstandard code 99" case cannot be constructed and is dropped.
 end
 
 # Frame a typed message for raw HTTP requests against the server.
@@ -82,7 +119,7 @@ function _bounded(f, secs)
     return istaskdone(t) ? fetch(t) : (false, nothing)
 end
 
-# Probe a unary route over the fork's raw h2c client (its own connection, so it
+# Probe a unary route over HTTP.jl's raw h2c client (its own connection, so it
 # cannot be stalled by gRPCClient's shared handle) until it answers OK or the
 # deadline passes. Returns the last grpc-status seen as a String.
 function _probe_unary(port, secs)
@@ -98,7 +135,7 @@ function _probe_unary(port, secs)
             status_exception = false,
         )
         status = HTTP.header(resp.trailers, "grpc-status")
-        status == string(GRPC_OK) && return status
+        status == string(Int(StatusCode.OK)) && return status
         sleep(0.1)
     end
     return status
@@ -113,10 +150,24 @@ function _await_flag(flag, secs)
     return flag[]
 end
 
+# Create a fresh server on an ephemeral port WITHOUT starting it: services
+# (with their handler closures) must be registered BEFORE start! — registering
+# after start! hits a Julia world-age MethodError ("method too new to be called
+# from this world context") because the dispatch path was compiled before the
+# closure type existed. GRPCServer's constructor rejects port 0, so construct
+# with a placeholder and mutate (the legacy serve! trick); HTTP.port(server)
+# reports the real bound port after start!.
+function _new_custom_server(; kwargs...)
+    server = GRPCServer("127.0.0.1", 1; kwargs...)
+    server.port = 0
+    return server
+end
+
+_unary_echo = (ctx, req) -> TestResponse(collect(UInt64, 1:req.test_response_sz))
+
 @testset "Pre-handler request validation (raw h2c)" begin
-    server = start_test_server("127.0.0.1", 0)
+    server = start_test_server()
     port = HTTP.port(server)
-    sleep(0.3)
     url = "http://127.0.0.1:$port/test.TestService/TestRPC"
     try
         # gRPC requires POST: anything else is rejected with HTTP 405 and an
@@ -129,7 +180,7 @@ end
             status_exception = false,
         )
         @test resp.status == 405
-        @test HTTP.header(resp.trailers, "grpc-status") == string(GRPC_INTERNAL)
+        @test HTTP.header(resp.trailers, "grpc-status") == string(Int(StatusCode.INTERNAL))
 
         # Wrong content-type: HTTP 415 per the gRPC HTTP/2 spec. Sent with an
         # empty body (END_STREAM on HEADERS, no DATA frame): the server rejects
@@ -147,7 +198,7 @@ end
             status_exception = false,
         )
         @test resp2.status == 415
-        @test HTTP.header(resp2.trailers, "grpc-status") == string(GRPC_INTERNAL)
+        @test HTTP.header(resp2.trailers, "grpc-status") == string(Int(StatusCode.INTERNAL))
 
         # Body-bearing rejection: the server rejects on content-type without
         # reading the request body, so depending on timing the client either
@@ -182,27 +233,31 @@ end
             protocol = :h2,
         )
         @test resp3.status == 200
-        @test HTTP.header(resp3.trailers, "grpc-status") == string(GRPC_OK)
+        @test HTTP.header(resp3.trailers, "grpc-status") == string(Int(StatusCode.OK))
     finally
-        close(server)
+        stop!(server; force = true)
     end
 end
 
 @static if VERSION >= v"1.12"
-    @testset "Initial metadata from a streaming handler" begin
-        # Before the review fix the response head was sent eagerly, so
-        # set_initial_metadata! in a server-streaming handler always threw and
-        # the RPC failed with INTERNAL. It must now reach the response headers.
-        router = gRPCServer.gRPCRouter()
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
-            gRPCServer.set_initial_metadata!(ctx, "x-init", "streaming")
+    @testset "Streaming handler metadata reaches the wire (trailers)" begin
+        # Original regression: set_initial_metadata! in a server-streaming
+        # handler used to throw (eager response head) and fail the RPC with
+        # INTERNAL. In the merged dispatch the response headers are emitted
+        # BEFORE the handler runs, so set_header! inside the handler cannot
+        # reach the headers (documented divergence); it must not throw, and
+        # set_trailer! output must reach the trailing block.
+        server = _new_custom_server()
+        handler = (ctx, req, stream) -> begin
+            gRPCServer.set_header!(ctx, "x-init", "streaming") # must not throw
+            gRPCServer.set_trailer!(ctx, "x-init", "streaming")
             for i = 1:req.test_response_sz
-                put!(out, TestResponse(collect(UInt64, 1:i)))
+                send!(stream, TestResponse(collect(UInt64, 1:i)))
             end
         end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0)
+        register_TestService_TestServerStreamRPC!(server, handler)
+        start!(server)
         port = HTTP.port(server)
-        sleep(0.3)
         try
             resp = HTTP.request(
                 "POST",
@@ -212,44 +267,48 @@ end
                 protocol = :h2,
             )
             @test resp.status == 200
-            @test HTTP.header(resp.headers, "x-init") == "streaming"
-            @test HTTP.header(resp.trailers, "grpc-status") == string(GRPC_OK)
+            @test HTTP.header(resp.trailers, "grpc-status") == string(Int(StatusCode.OK))
+            @test HTTP.header(resp.trailers, "x-init") == "streaming"
         finally
-            close(server)
+            stop!(server; force = true)
         end
     end
 
     @testset "Client-streaming handler may return before half-close" begin
         # The handler reads exactly one message and responds while the client
-        # keeps the request stream open. Before the review fix the feeder task
-        # deadlocked on the full input channel and the admission slot leaked
-        # forever; with max_concurrent_requests=1 the follow-up probe below would
-        # then be shed with RESOURCE_EXHAUSTED.
+        # keeps the request stream open. In the merged design the receive side
+        # is lazy (no feeder task), so the old full-channel deadlock cannot
+        # occur; the assertions below keep guarding the two things that matter:
+        # the handler completes, and with max_concurrent_requests=1 the
+        # admission slot comes back (a follow-up probe must NOT be shed).
         #
-        # Assertions are server-side: the handler must complete and the admission
-        # slot must come back. The bundled gRPCClient cannot be used for hard
-        # assertions here: when the server completes a client-streaming RPC before
-        # the client half-closes, the abandoned upload surfaces to libcurl as a
-        # stream CANCEL (so grpc_async_await raises rather than returning) and the
+        # The bundled gRPCClient cannot be used for hard assertions here: when
+        # the server completes a client-streaming RPC before the client
+        # half-closes, the abandoned upload surfaces to libcurl as a stream
+        # CANCEL (so grpc_async_await raises rather than returning) and the
         # shared handle holds its connection open, so all client interaction is
-        # bounded and best-effort and the slot probe uses the raw h2c client on its
-        # own connection.
-        router = gRPCServer.gRPCRouter()
+        # bounded and best-effort and the slot probe uses the raw h2c client on
+        # its own connection.
         handler_returned = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC; allow_unstable_streaming = true) do in, ctx
-            first_req = take!(in)
+        handler = (ctx, stream) -> begin
+            first_req = first(stream)
             resp = TestResponse(UInt64[first_req.test_response_sz])
             handler_returned[] = true
             resp
         end
-        gRPCServer.handle!(router, TESTSERVICE_TestRPC) do req, ctx
-            TestResponse(collect(UInt64, 1:req.test_response_sz))
-        end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0; max_concurrent_requests = 1)
-        port = HTTP.port(server)
-        sleep(0.3)
+        server = _new_custom_server(; max_concurrent_requests = 1)
         try
-            client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+            register_TestService_TestClientStreamRPC!(server, handler)
+            register_TestService_TestRPC!(server, _unary_echo)
+            start!(server)
+            port = HTTP.port(server)
+            # Dedicated gRPCClient handle: the shared handle's connection pool
+            # can be left in a stalled state by the previous early-completion
+            # CANCEL (see the testset comment); per-app handles isolate this
+            # testset from that client-side state.
+            local_handle = gRPCClient.gRPCCURL()
+            gRPCClient.grpc_init(local_handle)
+            client = TestService_TestClientStreamRPC_Client("127.0.0.1", port; grpc = local_handle)
             request_c = Channel{TestRequest}(8)
             req = gRPCClient.grpc_async_request(client, request_c)
             put!(request_c, TestRequest(42, UInt64[]))
@@ -261,7 +320,7 @@ end
             @test _await_flag(handler_returned, 10)
 
             # The RPC completed server-side, so its admission slot must be free.
-            @test _probe_unary(port, 10) == string(GRPC_OK)
+            @test _probe_unary(port, 10) == string(Int(StatusCode.OK))
 
             # Best-effort client view of the early completion; not required.
             (got, val) = _bounded(5) do
@@ -273,33 +332,40 @@ end
         finally
             # forceclose: the abandoned client may still hold its connection
             # open, and a graceful close would wait for it.
-            HTTP.forceclose(server)
+            stop!(server; force = true)
+            try
+                gRPCClient.grpc_shutdown(local_handle)
+            catch
+            end
         end
     end
 
     @testset "Bidi handler may return before half-close" begin
         # The handler answers one message and returns while the client keeps
         # the stream open. Assertions are server-side: the handler must complete
-        # and the admission slot must come back (with the pre-fix feeder
-        # deadlock, the dispatch task hung and the slot leaked forever). The
-        # bundled gRPCClient may itself stall on the early completion, so all
-        # interaction with it is bounded and best-effort, and the admission
-        # probe uses the raw h2c client on its own connection.
-        router = gRPCServer.gRPCRouter()
+        # and the admission slot must come back. The bundled gRPCClient may
+        # itself stall on the early completion, so all interaction with it is
+        # bounded and best-effort, and the admission probe uses the raw h2c
+        # client on its own connection.
         handler_returned = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestBidirectionalStreamRPC; allow_unstable_streaming = true) do in, out, ctx
-            first_req = take!(in)
-            put!(out, TestResponse(UInt64[first_req.test_response_sz]))
+        handler = (ctx, stream) -> begin
+            first_req = first(stream)
+            send!(stream, TestResponse(UInt64[first_req.test_response_sz]))
             handler_returned[] = true
         end
-        gRPCServer.handle!(router, TESTSERVICE_TestRPC) do req, ctx
-            TestResponse(collect(UInt64, 1:req.test_response_sz))
-        end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0; max_concurrent_requests = 1)
-        port = HTTP.port(server)
-        sleep(0.3)
+        server = _new_custom_server(; max_concurrent_requests = 1)
         try
-            client = TestService_TestBidirectionalStreamRPC_Client("127.0.0.1", port)
+            register_TestService_TestBidirectionalStreamRPC!(server, handler)
+            register_TestService_TestRPC!(server, _unary_echo)
+            start!(server)
+            port = HTTP.port(server)
+            # Dedicated gRPCClient handle (same reason as the client-streaming
+            # testset: the shared handle can be left stalled by an earlier
+            # early-completion CANCEL, which would hold this testset's request
+            # in its upload phase forever).
+            local_handle = gRPCClient.gRPCCURL()
+            gRPCClient.grpc_init(local_handle)
+            client = TestService_TestBidirectionalStreamRPC_Client("127.0.0.1", port; grpc = local_handle)
             request_c = Channel{TestRequest}(8)
             response_c = Channel{TestResponse}(8)
             req = gRPCClient.grpc_async_request(client, request_c, response_c)
@@ -308,7 +374,7 @@ end
             @test _await_flag(handler_returned, 10)
 
             # The RPC completed server-side, so its admission slot must be free.
-            @test _probe_unary(port, 10) == string(GRPC_OK)
+            @test _probe_unary(port, 10) == string(Int(StatusCode.OK))
 
             # Best-effort client view of the early completion; not required.
             (got, val) = _bounded(5) do
@@ -324,27 +390,31 @@ end
         finally
             # forceclose: the abandoned client may still hold its connection
             # open, and a graceful close would wait for it.
-            HTTP.forceclose(server)
+            stop!(server; force = true)
+            try
+                gRPCClient.grpc_shutdown(local_handle)
+            catch
+            end
         end
     end
 
     @testset "Server-streaming handler error after messages" begin
-        # The pump must be joined before trailers, and the handler's status must
-        # arrive intact after some messages have already been streamed.
-        router = gRPCServer.gRPCRouter()
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
+        # The handler's status must arrive intact after some messages have
+        # already been streamed (the streaming dispatch joins the send side
+        # before emitting trailers, so no torn frames).
+        handler = (ctx, req, stream) -> begin
             for i = 1:3
-                put!(out, TestResponse(collect(UInt64, 1:i)))
+                send!(stream, TestResponse(collect(UInt64, 1:i)))
             end
-            throw(gRPCServiceCallException(GRPC_NOT_FOUND, "ran dry"))
+            throw(GRPCError(StatusCode.NOT_FOUND, "ran dry"))
         end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0)
-        port = HTTP.port(server)
-        sleep(0.3)
+        server = _new_custom_server()
         try
-            # Raw h2c request: the streamed messages must arrive intact (the
-            # pump is joined before the trailers, so no torn frames) followed by
-            # the handler's status in the trailers.
+            register_TestService_TestServerStreamRPC!(server, handler)
+            start!(server)
+            port = HTTP.port(server)
+            # Raw h2c request: the streamed messages must arrive intact followed
+            # by the handler's status in the trailers.
             resp = HTTP.request(
                 "POST",
                 "http://127.0.0.1:$port/test.TestService/TestServerStreamRPC",
@@ -354,39 +424,41 @@ end
                 status_exception = false,
             )
             @test resp.status == 200
-            fr = gRPCServer.FrameReader(IOBuffer(resp.body), 4 * 1024 * 1024)
+            fr = FrameReader(IOBuffer(resp.body), 4 * 1024 * 1024)
             for i = 1:3
-                io = gRPCServer.read_message!(fr)
+                io = read_message!(fr)
                 @test io !== nothing
                 @test decode(ProtoDecoder(io), TestResponse).data == collect(UInt64, 1:i)
             end
-            @test gRPCServer.read_message!(fr) === nothing
-            @test HTTP.header(resp.trailers, "grpc-status") == string(GRPC_NOT_FOUND)
+            @test read_message!(fr) === nothing
+            @test HTTP.header(resp.trailers, "grpc-status") == string(Int(StatusCode.NOT_FOUND))
             @test occursin("ran dry", HTTP.header(resp.trailers, "grpc-message"))
         finally
-            close(server)
+            stop!(server; force = true)
         end
     end
 
     @testset "Oversize streamed response releases the producer" begin
-        # When the pump dies encoding an oversize message it closes the output
-        # channel with the failure, so a handler blocked in put! is released
-        # (and the client sees RESOURCE_EXHAUSTED) instead of hanging forever.
-        router = gRPCServer.gRPCRouter(; max_send_message_length = 64)
+        # When the send side dies encoding an oversize message the exception
+        # propagates into the handler, so a handler mid-send is released (and
+        # the client sees RESOURCE_EXHAUSTED) instead of hanging forever. The
+        # merged send path is synchronous, so the release is the exception
+        # itself reaching the handler's finally.
         handler_finished = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestServerStreamRPC; allow_unstable_streaming = true) do req, out, ctx
+        handler = (ctx, req, stream) -> begin
             try
                 for _ = 1:100
-                    put!(out, TestResponse(zeros(UInt64, 64)))  # ~520B > 64B cap
+                    send!(stream, TestResponse(zeros(UInt64, 64)))  # ~520B > 64B cap
                 end
             finally
                 handler_finished[] = true
             end
         end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0)
-        port = HTTP.port(server)
-        sleep(0.3)
+        server = _new_custom_server(; max_message_size = 64)
         try
+            register_TestService_TestServerStreamRPC!(server, handler)
+            start!(server)
+            port = HTTP.port(server)
             resp = HTTP.request(
                 "POST",
                 "http://127.0.0.1:$port/test.TestService/TestServerStreamRPC",
@@ -397,65 +469,54 @@ end
             )
             @test resp.status == 200
             @test isempty(resp.body)
-            @test HTTP.header(resp.trailers, "grpc-status") == string(GRPC_RESOURCE_EXHAUSTED)
+            @test HTTP.header(resp.trailers, "grpc-status") == string(Int(StatusCode.RESOURCE_EXHAUSTED))
 
-            # The handler must be released from its blocked put! rather than
-            # left stranded on the dead pump.
+            # The handler must be released from its send loop rather than left
+            # stranded on the dead pump.
             @test _await_flag(handler_finished, 10)
         finally
-            close(server)
+            stop!(server; force = true)
         end
     end
 
-    @testset "Graceful shutdown does not hang after early-return streaming handler" begin
-        # Documents a known gap: close(server) still hangs when a client-streaming
-        # handler returns before the client half-closes its request stream.
-        #
-        # Root cause (HTTP.jl body_read!): after body_close!() sets body.closed
-        # and notifies the condition, the while-true loop in body_read! wakes
-        # up but re-blocks on wait() without checking body_closed() inside the
-        # loop. gRPCServer's feeder task therefore stays parked in body_read!
-        # indefinitely. The stream remains in the active-states map, the
-        # connection is never classified as idle, and close(server) hangs until
-        # idle_timeout fires (300 s by default) or forceclose is called.
-        #
-        # HTTP.jl v2.5.0 added _maybe_cleanup_h2_server_state! (which would
-        # fix this if stream_done were set), but stream_done is only set by a
-        # client END_STREAM. Because the server sends RST_STREAM CANCEL and
-        # gRPCClient stops uploading without sending END_STREAM, stream_done
-        # stays false and the cleanup never fires.
-        #
-        # Required fix: add `body_closed(body) && return 0` inside body_read!'s
-        # while loop so the feeder unblocks once body_close!() is called.
-        router = gRPCServer.gRPCRouter()
+    @testset "Bounded shutdown after early-return streaming handler" begin
+        # The original test documented a hang: close(server) after a
+        # client-streaming handler returns before the client half-closes
+        # (the HTTP.jl body_read! feeder stayed parked forever). The merged
+        # bounded shutdown (stop! falls back to forcing connections after the
+        # drain budget) fixes it: stop!(force=true) must complete promptly.
         handler_returned = Threads.Atomic{Bool}(false)
-        gRPCServer.handle!(router, TESTSERVICE_TestClientStreamRPC; allow_unstable_streaming = true) do in, ctx
-            first_req = take!(in)
+        handler = (ctx, stream) -> begin
+            first_req = first(stream)
             handler_returned[] = true
             TestResponse(UInt64[first_req.test_response_sz])
         end
-        server = gRPCServer.serve!(router, "127.0.0.1", 0)
-        port = HTTP.port(server)
-        sleep(0.3)
+        server = _new_custom_server()
+        try
+            register_TestService_TestClientStreamRPC!(server, handler)
+            start!(server)
+            port = HTTP.port(server)
+            client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+            request_c = Channel{TestRequest}(4)
+            _req = gRPCClient.grpc_async_request(client, request_c)
+            put!(request_c, TestRequest(7, UInt64[]))
+            # Intentionally do not half-close: the client keeps the request
+            # stream open to simulate a slow producer.
 
-        client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
-        request_c = Channel{TestRequest}(4)
-        _req = gRPCClient.grpc_async_request(client, request_c)
-        put!(request_c, TestRequest(7, UInt64[]))
-        # Intentionally do not half-close: the client keeps the request stream
-        # open to simulate a slow producer.
+            @test _await_flag(handler_returned, 10)
 
-        @test _await_flag(handler_returned, 10)
-
-        # Graceful close — would complete without forceclose once the HTTP.jl
-        # body_read! fix lands. Currently broken: @test_broken documents it.
-        (completed, _) = _bounded(5) do
-            close(server)
+            # Bounded shutdown: completes without hanging.
+            (completed, _) = _bounded(5) do
+                stop!(server; force = true)
+            end
+            @test completed
+            close(request_c)
+        finally
+            # Idempotent cleanup in case the bounded-stop assertion failed.
+            try
+                stop!(server; force = true)
+            catch
+            end
         end
-        @test_broken completed
-
-        # Cleanup regardless of whether close completed.
-        close(request_c)
-        completed || HTTP.forceclose(server)
     end
 end

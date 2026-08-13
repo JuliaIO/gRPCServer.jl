@@ -97,18 +97,13 @@ function encode_microbench()
 end
 
 function endtoend_bench()
-    # build_test_router defaults to 4 MiB caps; raise both for the big payloads.
-    router = build_test_router(;
-        max_receive_message_length = MAXMSG,
-        max_send_message_length = MAXMSG,
-    )
-    # Raise the server's HTTP/2 receive window (and the coordinated buffer cap)
-    # well above the 64 KiB default so client-to-server uploads are not window
-    # bound. max_buffered_bytes must be >= the advertised window.
-    server = gRPCServer.serve!(
-        router,
+    # The codegen-registered TestService server (testservice.jl). Raise
+    # max_message_size for the big payloads and the HTTP/2 receive window well
+    # above the 64 KiB default so client-to-server uploads are not window bound.
+    server = start_test_server(
         "127.0.0.1",
         0;
+        max_message_size = MAXMSG,
         h2_initial_window_size = WINDOW,
         h2_connection_window_size = WINDOW,
     )
