@@ -66,6 +66,7 @@ ServiceAlreadyRegisteredError
 InvalidServerStateError
 MethodSignatureError
 StreamCancelledError
+UnsupportedFeatureError
 status_code_to_http
 exception_to_status_code
 http2_to_grpc_status
@@ -162,6 +163,12 @@ PureHTTP2Backend
 create_connection
 HTTPjlBackend
 Nghttp2Backend
+BackendCapabilities
+backend_capabilities
+backend_defaults
+GRPCServerHTTPJl
+GRPCServerPureHTTP2
+GRPCServerNghttp2
 ```
 
 ### Raised stream-handler contract (HTTP.jl backend)

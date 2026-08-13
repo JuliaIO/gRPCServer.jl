@@ -179,13 +179,27 @@ See the [TLS](../tls.md) page for a full walkthrough.
 
 ## Compression
 
-### Server-side Compression
+### Server-side Compression (not yet implemented)
+
+Send-side response compression is not yet implemented on any backend: responses
+are always sent with `grpc-encoding: identity`. The configuration keywords for
+it (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) are
+recognized but inert, so setting them explicitly now raises
+[`UnsupportedFeatureError`](@ref) at construction instead of being silently
+ignored:
 
 ```julia
+# Raises UnsupportedFeatureError on every backend — send-side compression
+# is not implemented yet.
 server = GRPCServer(host, port;
     supported_codecs = [CompressionCodec.GZIP, CompressionCodec.DEFLATE]
 )
 ```
+
+Omit those keywords for now. **Receive-side decompression works**: the server
+accepts `grpc-encoding: gzip`/`deflate` requests and decompresses them (strictly
+on `HTTPjlBackend`, leniently on `PureHTTP2Backend`), so compressed clients are
+fully supported.
 
 ### Manual Compression
 

@@ -36,7 +36,6 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 | Request bodies larger than ~64 KB | `HTTPjlBackend` — see below |
 | The `nghttp2` C reference implementation | `Nghttp2Backend` — unary and client-streaming only |
 | Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
-| A configurable max-concurrent-streams limit | `PureHTTP2Backend` |
 | A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
 
 !!! warning "PureHTTP2 does not accept large request bodies"
@@ -55,7 +54,57 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
     not support live TLS certificate reload (`reload_tls!`) or a configurable
     max-concurrent-streams limit. mTLS over TLS 1.2 is also currently broken
     upstream in Reseau (it works over TLS 1.3). Select `PureHTTP2Backend()` if
-    you need any of these.
+    you need any of these. Setting these keywords explicitly now raises
+    [`UnsupportedFeatureError`](@ref) at construction rather than being
+    silently ignored — see [Capability validation](#capability-validation).
+
+## Capability validation
+
+Backends do not support every feature, and configuration keywords that a
+backend cannot honor used to be silently ignored. `gRPCServer` now detects
+**explicitly-set** keywords and raises [`UnsupportedFeatureError`](@ref) at
+[`GRPCServer`](@ref) construction when the chosen backend cannot honor them.
+Omitted keywords never raise.
+
+Explicitness is detected exactly: the constructor captures the configuration
+keywords in a `kwargs...` splat, so *explicitly re-passing a documented default*
+(e.g. `backlog=128` on `PureHTTP2Backend`) also raises — the signal is that you
+asked for the knob, not that you changed the value.
+
+Per-backend defaults and capabilities are queryable via
+[`backend_defaults`](@ref) and [`backend_capabilities`](@ref). The
+backend-specific constructors — [`GRPCServerHTTPJl`](@ref),
+[`GRPCServerPureHTTP2`](@ref), [`GRPCServerNghttp2`](@ref) — fix the backend
+and document in their docstrings which keywords raise on that backend.
+
+### Per-backend capability matrix
+
+| Keyword | HTTPjl | PureHTTP2 | Nghttp2 |
+|---|---|---|---|
+| TLS cert/key | ✅ | ✅ | ✅ |
+| mTLS (`client_ca`, `require_client_cert`) | ✅ | ✅ | ❌ raises |
+| `min_version`, `alpn_protocols`, `handshake_timeout_ns` | ✅ | ✅ | ❌ raises |
+| `reload_tls!` | ❌ raises | ✅ | ❌ raises |
+| `max_receive_message_length` | ✅ enforced | ❌ raises | ❌ raises |
+| `max_send_message_length`, `max_concurrent_requests` | ✅ | ✅ | ✅ |
+| `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ raises | ❌ raises | ❌ raises |
+| `max_concurrent_streams` | ❌ raises | ❌ raises | ❌ raises |
+| `idle_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout` | ✅ | ❌ raises | ❌ raises |
+| `max_header_bytes`, `reuseaddr`, `backlog` | ✅ | ❌ raises | ❌ raises |
+| `h2_initial_window_size`, `h2_connection_window_size` | ✅ | ❌ raises | ❌ raises |
+| `drain_timeout` (config) | ❌ raises (use `stop!(; timeout=)`) | ✅ | ❌ raises |
+| send-side compression (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) | ❌ raises | ❌ raises | ❌ raises |
+| receive-side decompression | ✅ strict | ✅ lenient | ⚠️ raw bytes |
+| server-streaming / bidi RPCs | ✅ | ✅ | ❌ refused `UNIMPLEMENTED` per-request |
+| client-streaming RPCs | ✅ | ✅ | ✅ |
+| `enable_reflection` | ✅ | ✅ | ❌ raises (`ServerReflectionInfo` is bidi) |
+| `enable_health_check` | ✅ | ✅ | ⚠️ `Check` works, `Watch` refused per-request |
+
+RPC-type rows (server-/bidi-streaming on `Nghttp2Backend`) are method-level
+refusals (`UNIMPLEMENTED`), not construction errors, so they do not raise.
+`max_message_size` is never gated: it seeds both directions, the send cap is
+enforced on every backend, and the receive cap is gated via the explicit
+`max_receive_message_length` keyword.
 
 ## The nghttp2 Backend
 

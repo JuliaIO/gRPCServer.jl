@@ -35,6 +35,11 @@ unchanged unless set:
 - `h2_connection_window_size` (default `65535`): the connection-level receive
   window, applied with an initial `WINDOW_UPDATE` when above 65535
 
+These keywords are honored only by [`HTTPjlBackend`](@ref). On
+`PureHTTP2Backend` and `Nghttp2Backend`, explicitly setting a non-default (or
+even default) value raises [`UnsupportedFeatureError`](@ref) at construction
+instead of being silently ignored; omit them to use those backends' defaults.
+
 ```julia
 # Size the window to the bandwidth-delay product, e.g. 8 MiB for a high-BDP link.
 server = GRPCServer("0.0.0.0", 50051;

@@ -109,7 +109,8 @@ Configuration container for gRPC server options.
 - `max_concurrent_requests::Union{Int, Nothing}`: Maximum concurrent requests (nothing or 0 = unlimited, matching the legacy csvance semantics; default: nothing)
 - `max_queued_requests::Int`: **NOT IMPLEMENTED** — accepted for API compatibility only. No request
   queue exists: a call arriving past `max_concurrent_requests` is shed immediately with a trailers-only
-  `RESOURCE_EXHAUSTED` status (no queueing, no waiting). The value has no effect (default: 1000)
+  `RESOURCE_EXHAUSTED` status (no queueing, no waiting). The value has no effect, and explicitly setting
+  it at [`GRPCServer`](@ref) construction raises [`UnsupportedFeatureError`](@ref) (default: 1000)
 
 ## Message Limits
 - `max_message_size::Int`: Maximum message size in bytes (default: 4MB). Seeds both the receive
@@ -145,6 +146,19 @@ Configuration container for gRPC server options.
 - `compression_enabled::Bool`: Enable message compression (default: true)
 - `compression_threshold::Int`: Minimum bytes before compression (default: 1024)
 - `supported_codecs::Vector{CompressionCodec.T}`: Supported compression codecs
+
+## Backend gating
+
+`ServerConfig` itself is backend-agnostic and always constructible. At
+[`GRPCServer`](@ref) construction, however, a configuration keyword that is
+**explicitly set** but unsupported by the selected HTTP/2 backend raises
+[`UnsupportedFeatureError`](@ref) instead of being silently ignored (omitted
+keywords never raise). This applies to: `max_connections`,
+`max_concurrent_streams`, `max_queued_requests`, `keepalive_interval`,
+`keepalive_timeout`, the HTTP.jl listener timeouts and knobs, the h2-window
+keywords, `drain_timeout` (some backends), send-side compression, mTLS / TLS
+sub-features (on `Nghttp2Backend`), and `enable_reflection` (on
+`Nghttp2Backend`). See [HTTP/2 Backends](@ref) for the per-backend matrix.
 
 # Example
 ```julia

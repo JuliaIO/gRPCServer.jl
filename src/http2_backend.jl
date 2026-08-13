@@ -20,7 +20,9 @@ abstract type AbstractHTTP2Backend end
 """
     PureHTTP2Backend <: AbstractHTTP2Backend
 
-Default HTTP/2 backend using PureHTTP2.jl.
+Opt-in pure-Julia HTTP/2 backend using PureHTTP2.jl (the default backend is
+[`HTTPjlBackend`](@ref); pass `http2_backend=PureHTTP2Backend()` to the
+[`GRPCServer`](@ref) constructor to select it).
 
 This backend delegates all HTTP/2 operations to the PureHTTP2 package,
 which provides a pure-Julia implementation of the HTTP/2 protocol (RFC 7540)

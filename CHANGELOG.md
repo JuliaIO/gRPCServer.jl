@@ -138,6 +138,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent client stacks
 
 ### Changed
+- **Breaking: explicitly-unsupported configuration now raises
+  `UnsupportedFeatureError` at `GRPCServer` construction.** Previously, config
+  keywords a backend could not honor (keepalive, `max_connections`,
+  `max_queued_requests`, PureHTTP2 timeouts/listener knobs/h2 windows, send-side
+  compression, `reload_tls!`, Nghttp2 mTLS/TLS sub-features, `enable_reflection`
+  on Nghttp2, …) were silently ignored. Now an **explicitly-set** keyword the
+  selected backend cannot honor raises a single `UnsupportedFeatureError`
+  listing all violations; omitted keywords never raise. Explicitness is detected
+  exactly via the constructor's `kwargs...` splat, so explicitly re-passing a
+  documented default (e.g. `backlog=128` on `PureHTTP2Backend`) also raises.
+  New exports: `UnsupportedFeatureError`, `BackendCapabilities`,
+  `backend_capabilities`, `backend_defaults`, `GRPCServerHTTPJl`,
+  `GRPCServerPureHTTP2`, `GRPCServerNghttp2`. The per-backend convenience
+  constructors fix the backend and document each backend's raising keywords in
+  their docstrings.
+- **Breaking: `GRPCServer`'s configuration keywords are now accepted via a
+  `kwargs...` splat** (the constructor previously declared them individually).
+  Call sites are unchanged, but an unknown keyword name now raises
+  `ArgumentError("unsupported keyword argument: …")` from inside the
+  constructor rather than at method dispatch, and wrong-typed values surface
+  from `ServerConfig` construction. `methods(GRPCServer)` no longer lists the
+  configuration keywords; the docstring does.
 - Documentation build now runs in strict mode (removed `warnonly` from `docs/make.jl`)
 - Updated `devbranch` to `develop` in `docs/make.jl` for Git flow compatibility
 - TLS backend switched from OpenSSL.jl to Reseau.jl. `Reseau` is now a
