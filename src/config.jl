@@ -119,6 +119,14 @@ Configuration container for gRPC server options.
 - `keepalive_timeout::Float64`: Timeout for keepalive response (default: 20.0)
 - `idle_timeout::Union{Float64, Nothing}`: Close idle connections after this time (nothing = never)
 - `drain_timeout::Float64`: Maximum time to wait for graceful shutdown (default: 30.0)
+- `read_header_timeout::Union{Float64, Nothing}`: Max seconds to read request headers before the connection is closed (default: 30.0; nothing disables). Passed through to the HTTP.jl listener.
+- `read_timeout::Union{Float64, Nothing}`: Max seconds to read request data (nothing = disabled, the default). Enabling it also terminates legitimately idle long-lived streaming connections. Passed through to the HTTP.jl listener.
+- `write_timeout::Union{Float64, Nothing}`: Max seconds to write response data (nothing = disabled, the default). Passed through to the HTTP.jl listener.
+
+## HTTP.jl listener knobs (legacy serve! pass-throughs)
+- `max_header_bytes::Int`: Maximum request-header size in bytes (default: 1MiB)
+- `reuseaddr::Bool`: Allow reusing the address on restart (default: true)
+- `backlog::Int`: Connection backlog for the listener (default: 128)
 
 ## TLS
 - `tls::Union{TLSConfig, Nothing}`: TLS configuration (nothing = insecure)
@@ -160,6 +168,17 @@ struct ServerConfig
     idle_timeout::Union{Float64, Nothing}
     drain_timeout::Float64
 
+    # Connection-level timeouts (seconds), forwarded to the HTTP.jl listener.
+    # `nothing` disables the corresponding HTTP.jl timeout.
+    read_header_timeout::Union{Float64, Nothing}
+    read_timeout::Union{Float64, Nothing}
+    write_timeout::Union{Float64, Nothing}
+
+    # HTTP.jl listener knobs (legacy serve! pass-throughs)
+    max_header_bytes::Int
+    reuseaddr::Bool
+    backlog::Int
+
     # TLS
     tls::Union{TLSConfig, Nothing}
 
@@ -187,6 +206,12 @@ struct ServerConfig
         keepalive_timeout::Float64=20.0,
         idle_timeout::Union{Float64, Nothing}=nothing,
         drain_timeout::Float64=30.0,
+        read_header_timeout::Union{Float64, Nothing}=30.0,
+        read_timeout::Union{Float64, Nothing}=nothing,
+        write_timeout::Union{Float64, Nothing}=nothing,
+        max_header_bytes::Int=1024 * 1024,
+        reuseaddr::Bool=true,
+        backlog::Int=128,
         tls::Union{TLSConfig, Nothing}=nothing,
         enable_health_check::Bool=false,
         enable_reflection::Bool=false,
@@ -217,6 +242,12 @@ struct ServerConfig
         if compression_threshold < 0
             throw(ArgumentError("compression_threshold must be non-negative"))
         end
+        if max_header_bytes < 1
+            throw(ArgumentError("max_header_bytes must be at least 1"))
+        end
+        if backlog < 1
+            throw(ArgumentError("backlog must be at least 1"))
+        end
 
         new(
             max_connections,
@@ -228,6 +259,12 @@ struct ServerConfig
             keepalive_timeout,
             idle_timeout,
             drain_timeout,
+            read_header_timeout,
+            read_timeout,
+            write_timeout,
+            max_header_bytes,
+            reuseaddr,
+            backlog,
             tls,
             enable_health_check,
             enable_reflection,

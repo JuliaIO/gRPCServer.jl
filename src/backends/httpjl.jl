@@ -289,16 +289,28 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         return nothing
     end
     # HTTP2Settings is upstream since HTTP.jl 2.1.0 (floor is ^2.5), so the
-    # configured flow-control windows are passed unconditionally.
-    http2_settings = server.config.http2_settings
-    if server.config.tls !== nothing
+    # configured flow-control windows are passed unconditionally. The legacy
+    # serve! timeout/header/reuseaddr/backlog knobs are forwarded verbatim
+    # (read_header_timeout defaults to 30s; the rest default to HTTP.jl's own
+    # disabled/1MiB/true/128 values when not configured).
+    cfg = server.config
+    server_kwargs = (
+        read_header_timeout = cfg.read_header_timeout,
+        read_timeout = cfg.read_timeout,
+        write_timeout = cfg.write_timeout,
+        idle_timeout = cfg.idle_timeout,
+        max_header_bytes = cfg.max_header_bytes,
+        http2_settings = cfg.http2_settings,
+    )
+    if cfg.tls !== nothing
         # HTTP.jl owns the TLS/ALPN handshake. HTTP.jl 2.x is built on Reseau, so
         # its TLS.Listener is a Reseau.TLS.Listener — build one from the gRPCServer
         # TLSConfig (with ALPN "h2") using the same helper as the PureHTTP2 path.
-        reseau_cfg = _to_reseau_config(server.config.tls)
+        reseau_cfg = _to_reseau_config(cfg.tls)
         listener = Reseau.TLS.listen("tcp", string(server.host, ":", server.port),
-                                     reseau_cfg; backlog=128, reuseaddr=true)
-        return HTTP.listen!(handler, listener; http2_settings=http2_settings)
+                                     reseau_cfg; backlog=cfg.backlog, reuseaddr=cfg.reuseaddr)
+        return HTTP.listen!(handler, listener; server_kwargs...)
     end
-    return HTTP.listen!(handler, server.host, server.port; http2_settings=http2_settings)
+    return HTTP.listen!(handler, server.host, server.port;
+                        server_kwargs..., reuseaddr=cfg.reuseaddr, backlog=cfg.backlog)
 end
