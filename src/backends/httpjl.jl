@@ -71,10 +71,9 @@ Constructing an `HTTPjlBackend` validates that the loaded HTTP.jl can serve
 HTTP/2 and raises a clear error otherwise.
 
 # Known limitations (current HTTP.jl)
-- No configurable max-concurrent-streams limit (HTTP.jl advertises none).
 - No live TLS certificate reload (`reload_tls!`); HTTP.jl owns the TLS context.
 
-Select `PureHTTP2Backend()` if you need either capability.
+Select `PureHTTP2Backend()` if you need certificate reload.
 """
 struct HTTPjlBackend <: AbstractHTTP2Backend
     function HTTPjlBackend()
@@ -289,8 +288,11 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         return nothing
     end
     # HTTP2Settings is upstream since HTTP.jl 2.1.0 (floor is ^2.5), so the
-    # configured flow-control windows are passed unconditionally. The legacy
-    # serve! timeout/header/reuseaddr/backlog knobs are forwarded verbatim
+    # configured flow-control windows are passed unconditionally; so is
+    # max_concurrent_streams (HTTP.jl >= 2.5, advertised via
+    # SETTINGS_MAX_CONCURRENT_STREAMS and enforced per connection with
+    # RST_STREAM REFUSED_STREAM). The legacy serve!
+    # timeout/header/reuseaddr/backlog knobs are forwarded verbatim
     # (read_header_timeout defaults to 30s; the rest default to HTTP.jl's own
     # disabled/1MiB/true/128 values when not configured).
     cfg = server.config
@@ -300,6 +302,7 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         write_timeout = cfg.write_timeout,
         idle_timeout = cfg.idle_timeout,
         max_header_bytes = cfg.max_header_bytes,
+        max_concurrent_streams = cfg.max_concurrent_streams,
         http2_settings = cfg.http2_settings,
     )
     if cfg.tls !== nothing

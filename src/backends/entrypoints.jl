@@ -32,10 +32,11 @@ Accepts the same configuration keywords as [`GRPCServer`](@ref); the backend is
 fixed to `HTTPjlBackend`. Explicitly setting a keyword this backend cannot honor
 raises [`UnsupportedFeatureError`](@ref) at construction. On this backend the
 following keywords raise (explicitly set): `max_connections`,
-`max_concurrent_streams`, `max_queued_requests`, `keepalive_interval`,
-`keepalive_timeout`, `drain_timeout` (pass `timeout=` to `stop!` instead),
-`compression_enabled=true`, `compression_threshold`, `supported_codecs`;
-[`reload_tls!`](@ref) also raises on this backend.
+`max_queued_requests`, `keepalive_interval`, `keepalive_timeout`, `drain_timeout`
+(pass `timeout=` to `stop!` instead), `compression_enabled=true`,
+`compression_threshold`, `supported_codecs`; [`reload_tls!`](@ref) also raises
+on this backend. `max_concurrent_streams` is supported (default 100, enforced
+per connection by HTTP.jl).
 
 # Example
 ```julia

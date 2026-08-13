@@ -118,9 +118,6 @@ backend_capabilities(::Type{HTTPjlBackend}) = BackendCapabilities(
     tls_reload=false,
     # max_connections is declared but never read (src/config.jl).
     max_connections=false,
-    # max_concurrent_streams is documented as not configurable:
-    # src/backends/httpjl.jl:74-77.
-    max_concurrent_streams=false,
     # max_queued_requests is documented NOT IMPLEMENTED (src/config.jl).
     queued_requests=false,
     # keepalive_interval / keepalive_timeout are declared but never read; no
@@ -133,6 +130,9 @@ backend_capabilities(::Type{HTTPjlBackend}) = BackendCapabilities(
     # identity (src/backends/httpjl.jl:166-170).
     send_compression=false,
 )
+# max_concurrent_streams is supported: HTTP.jl >= 2.5 advertises
+# SETTINGS_MAX_CONCURRENT_STREAMS and enforces it per connection
+# (src/backends/httpjl.jl serve_grpc forwards cfg.max_concurrent_streams).
 
 # PureHTTP2Backend (pure-Julia frame loop).
 backend_capabilities(::Type{PureHTTP2Backend}) = BackendCapabilities(
