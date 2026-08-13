@@ -115,7 +115,6 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
             )
         end
 
-        @static if VERSION >= v"1.12"
             @testset "Response Streaming" begin
                 client = TestService_TestServerStreamRPC_Client("127.0.0.1", port)
                 response_c = Channel{TestResponse}(N)
@@ -189,7 +188,6 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
                     @test ex.grpc_status == GRPC_DEADLINE_EXCEEDED
                 end
             end
-        end
     finally
         close(server)
     end

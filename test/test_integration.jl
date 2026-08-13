@@ -32,7 +32,6 @@
             end
         end
 
-        @static if VERSION >= v"1.12"
             @testset "server streaming" begin
                 N = 50
                 client = TestService_TestServerStreamRPC_Client("127.0.0.1", port)
@@ -78,7 +77,6 @@
                 close(request_c)
                 gRPCClient.grpc_async_await(req)
             end
-        end
     finally
         close(server)
     end
@@ -87,7 +85,6 @@ end
 # Raised HTTP/2 flow-control windows are forwarded to HTTP.listen! and the server
 # still round-trips correctly, including a multi-frame upload larger than the
 # default 64 KiB window. Exercises the serve! -> HTTP.jl-fork keyword wiring.
-@static if VERSION >= v"1.12"
     @testset "HTTP/2 window config" begin
         W = 4 * 1024 * 1024
         server = start_test_server(
@@ -116,7 +113,6 @@ end
         finally
             close(server)
         end
-    end
 
     # Invalid window config is rejected (connection window below the protocol
     # default of 65535, which HTTP2Settings cannot advertise).

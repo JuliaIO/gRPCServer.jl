@@ -108,7 +108,6 @@ end
             @test resp.data == collect(UInt64, 1:9)
         end
 
-        @static if VERSION >= v"1.12"
             @testset "raw server streaming" begin
                 N = 50
                 client =
@@ -132,7 +131,6 @@ end
                 end
                 gRPCClient.grpc_async_await(req)
             end
-        end
     finally
         close(server)
     end

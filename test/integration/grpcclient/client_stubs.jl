@@ -15,9 +15,7 @@ InteropTestService_Fail_Client(host, port; kwargs...) =
         host, port, "/interop.InteropTestService/Fail"; kwargs...
     )
 
-# Streaming stubs only available on Julia >= 1.12
-@static if VERSION >= v"1.12"
-    # Server Streaming: StreamResponses
+# Server Streaming: StreamResponses
     InteropTestService_StreamResponses_Client(host, port; kwargs...) =
         gRPCServiceClient{InteropRequest, false, InteropResponse, true}(
             host, port, "/interop.InteropTestService/StreamResponses"; kwargs...
@@ -29,9 +27,7 @@ InteropTestService_Fail_Client(host, port; kwargs...) =
             host, port, "/interop.InteropTestService/CollectRequests"; kwargs...
         )
 
-    # Bidirectional Streaming: BiDiExchange
     InteropTestService_BiDiExchange_Client(host, port; kwargs...) =
         gRPCServiceClient{InteropRequest, true, InteropResponse, true}(
             host, port, "/interop.InteropTestService/BiDiExchange"; kwargs...
         )
-end

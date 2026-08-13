@@ -188,7 +188,6 @@ end
     end
 end
 
-@static if VERSION >= v"1.12"
     @testset "Initial metadata from a streaming handler" begin
         # Before the review fix the response head was sent eagerly, so
         # set_initial_metadata! in a server-streaming handler always threw and
@@ -458,4 +457,3 @@ end
         close(request_c)
         completed || HTTP.forceclose(server)
     end
-end

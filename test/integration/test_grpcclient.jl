@@ -138,10 +138,9 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
             end
 
             # =============================================
-            # Streaming (Julia >= 1.12 only — gRPCClient disables its streaming
-            # stubs below that, independently of the process split)
+            # Streaming (all four RPC types; un-gated per A2 — gRPCClient v1.1.0
+            # streaming works on Julia 1.10/1.11 LTS)
             # =============================================
-            @static if VERSION >= v"1.12"
                 # US2 — Server Streaming
                 @testset "Server Streaming RPC Interoperability" begin
                     @testset "Server Streaming Basic" begin
@@ -224,7 +223,6 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                         end
                     end
                 end
-            end  # @static if VERSION >= v"1.12"
         end
 
         # INTERNAL error needs a server exposing a handler that throws a plain
