@@ -107,10 +107,16 @@ mutable struct HTTPjlGRPCStream <: AbstractGRPCStream
     # Lazily-created zero-copy frame reader over the request body. `Union{Nothing,...}`
     # so a stream that never reads a message allocates nothing.
     fr::Union{Nothing,FrameReader}
+    # True once the read side has been explicitly aborted ([`abort_request!`](@ref))
+    # after a streaming handler returned early. The request-body drain in
+    # [`serve_grpc`](@ref) must skip a stream in this state: the body has been
+    # closed (HTTP.jl RSTs it), and draining it would read nothing yet never
+    # report EOF, spinning forever.
+    read_side_closed::Bool
 end
 
 HTTPjlGRPCStream(stream::HTTP.Stream, max_receive_message_length::Integer) =
-    HTTPjlGRPCStream(stream, Int64(max_receive_message_length), nothing)
+    HTTPjlGRPCStream(stream, Int64(max_receive_message_length), nothing, false)
 
 # Compat one-arg constructor (protocol default receive limit).
 HTTPjlGRPCStream(stream::HTTP.Stream) = HTTPjlGRPCStream(stream, 4 * 1024 * 1024)
@@ -214,6 +220,7 @@ Unary and server-streaming RPCs instead consume the body to end-of-stream via
 [`expect_half_close!`](@ref), so no abort is needed there.
 """
 function abort_request!(s::HTTPjlGRPCStream)
+    s.read_side_closed = true
     try
         HTTP.closeread(s.stream)
     catch
@@ -223,6 +230,52 @@ function abort_request!(s::HTTPjlGRPCStream)
 end
 
 uses_serve_grpc(::HTTPjlBackend) = true
+
+# ---------------------------------------------------------------------------
+# Unread request-body drain
+#
+# The trailers-only early returns in dispatch_grpc_call (unknown method,
+# content-type rejection, method-not-allowed, admission shed, framing-layer
+# GRPCError mapping) send their grpc-status in a trailing HEADERS block without
+# ever reading the request body. HTTP.jl writes that trailing HEADERS when the
+# handler returns, but it then closes the read side of an unread body by
+# RST_STREAM(CANCEL) whenever the client's END_STREAM has not been processed
+# yet — a scheduling race that Julia 1.10 consistently loses, so the trailers
+# never reach the client (gRPCClient reports INTERNAL/CANCEL instead of the
+# real status). Consuming the body to end-of-stream before returning makes the
+# stream close cleanly, trailers intact.
+#
+# The drain is bounded so a client that never ends its request body cannot
+# wedge the handler task: past the budget it falls back to abort_request!
+# (RST). The budget floors at 64 MiB (HTTP.jl's own default max request body)
+# so a small configured receive cap cannot turn a legitimate oversized request
+# into a spurious reset, while the cap still bounds the pathological case.
+const _HTTPJL_DRAIN_BUDGET_FLOOR = 64 * 1024 * 1024
+
+function _drain_unread_request_body!(gs::HTTPjlGRPCStream)
+    gs.read_side_closed && return nothing
+    stream = gs.stream
+    eof(stream) && return nothing
+    budget = max(Int64(gs.max_receive_message_length), _HTTPJL_DRAIN_BUDGET_FLOOR)
+    buf = Vector{UInt8}(undef, 16 * 1024)
+    total = 0
+    try
+        while !eof(stream)
+            n = readbytes!(stream, buf)
+            n == 0 && break  # read side closed underneath us (client reset, abort)
+            total += n
+            if total > budget
+                abort_request!(gs)
+                return nothing
+            end
+        end
+    catch
+        # The client may have reset the stream mid-drain or the connection may
+        # have died; the response is already committed, so there is nothing to
+        # salvage — swallow and let HTTP.jl finalize the stream.
+    end
+    return nothing
+end
 
 """
     stop_serving!(::HTTPjlBackend, server; force, timeout)
@@ -285,6 +338,12 @@ function serve_grpc(::HTTPjlBackend, server, on_call)
         # upstream HTTP.jl/Reseau fix. See the Phase 4 notes in EXECUTION_LOG.
         peer = PeerInfo(IPv4(0), 0)
         on_call(gs, peer)
+        # Consume any request body the dispatch path left unread (trailers-only
+        # early returns) so HTTP.jl closes the stream cleanly with the
+        # grpc-status trailers intact instead of RST_STREAM(CANCEL) — see
+        # `_drain_unread_request_body!`. Streaming paths that already aborted
+        # the read side (read_side_closed) are skipped.
+        _drain_unread_request_body!(gs)
         return nothing
     end
     # HTTP2Settings is upstream since HTTP.jl 2.1.0 (floor is ^2.5), so the
