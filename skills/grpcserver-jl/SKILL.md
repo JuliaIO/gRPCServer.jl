@@ -34,8 +34,10 @@ protojl("greeter.proto", "proto", "generated";
 The arguments are the `.proto` file, the directory used to resolve its `import`
 statements, and the output directory. For `package helloworld`, output lands in
 `generated/helloworld/helloworld.jl` (a thin `module helloworld` wrapper) plus
-`generated/helloworld/greeter_pb.jl` (the content). Every emitted symbol carries a
-docstring with its typed handler contract — hover in your IDE to read it. Read
+`generated/helloworld/greeter_pb.jl` (the content). Every emitted server-side
+registration symbol (`<Service>_<Rpc>_Method`, `register_<Service>_<Rpc>!`,
+`register_<Service>!`) carries a docstring with its typed handler contract —
+hover in your IDE to read it. Read
 `references/codegen.md` for the full output layout, the emitted symbol list, and
 the byte-stability note.
 
@@ -138,7 +140,8 @@ throw(GRPCError(StatusCode.UNAUTHENTICATED, "missing bearer token"))
 `NOT_FOUND`, `ALREADY_EXISTS`, `PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`,
 `FAILED_PRECONDITION`, `ABORTED`, `OUT_OF_RANGE`, `UNIMPLEMENTED`, `INTERNAL`,
 `UNAVAILABLE`, `DATA_LOSS`, `UNAUTHENTICATED`, ...). Unary and client-streaming
-handlers may also `return` — a non-`GRPCError` throw becomes `INTERNAL`.
+handlers return the response value; server- and bidi-streaming handlers return
+`nothing`. A non-`GRPCError` throw becomes `INTERNAL`.
 
 ## Calling the server from Julia
 
@@ -182,6 +185,6 @@ image: `set_header!`, `set_trailer!`, `get_metadata_string`, `remaining_time`,
 | `ArgumentError` thrown at `register_...!` | Handler shape mismatch: wrong arity, wrong argument types, or a `raw_*` flag that does not match the handler's signature |
 | RPC answers `UNIMPLEMENTED` | The service name registered does not match the client's path — the path is `/{package}.{Service}/{Rpc}` and the service name is built from the proto `package` declaration |
 | Handler exceptions surface as `INTERNAL` | Only `GRPCError` maps to a specific status; any other throw becomes `INTERNAL` |
-| Server starts but requests get connection refused | `run(server)` is blocking; the server task never started. Use `@async run(server)` or `start!(server)` |
+| Server starts but requests get connection refused | The server was started inside a task that never ran, or code after the blocking `run(server)` never executes. Use `start!(server)` for a non-blocking start, or `@async run(server)` to serve on a background task |
 | Client-streaming / bidi handler never invoked | Bidi runs in batch mode: the client must close its request stream before the handler starts. A client that never closes the stream means the handler never runs |
 | Streaming handler dies mid-stream with `CANCELLED` | The client cancelled or the deadline expired; check `is_cancelled(ctx)` and unwind cleanly |

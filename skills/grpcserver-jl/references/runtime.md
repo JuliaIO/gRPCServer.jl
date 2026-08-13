@@ -23,10 +23,11 @@ gRPCServer.register_method!(server.dispatcher, "helloworld.Greeter", method)
 - `register_method!(dispatcher, service_name, method)` — newly exported; upserts
   a method onto a dispatcher. Service name is the full `package.Service`
   string, which is why the generated code passes `"helloworld.Greeter"`.
-- A service is a group of methods under one service name. To register several
-  methods by hand: build a `ServiceDescriptor(name, methods_dict, nothing)` and
-  `register!(server, service)` via a `gRPCServer.service_descriptor(::MyService)`
-  overload. The generated aggregate `register_<Service>!` does this for you.
+- Service descriptor: to register several methods by hand, build a
+  `ServiceDescriptor(name, methods_dict, nothing)` and `register!(server,
+  service)` via a `gRPCServer.service_descriptor(::MyService)` overload. The
+  generated aggregate `register_<Service>!` achieves the same end by calling
+  `register_method!` per RPC.
 
 ## GRPCServer
 
@@ -44,8 +45,8 @@ gRPCServer.register_method!(server.dispatcher, "helloworld.Greeter", method)
 | `h2_initial_window_size` / `h2_connection_window_size` | 65535 | HTTP/2 flow-control windows |
 | `tls` | `nothing` | TLS config; see `docs/src/tls.md` |
 | `enable_health_check` / `enable_reflection` | `false` | gRPC health (`grpc.health.v1.Health`) and server reflection |
-| `supported_codecs` | — | Compression codecs (e.g. `[CompressionCodec.GZIP, CompressionCodec.DEFLATE]`) |
-| `http2_backend` | — | Backend selection (HTTPjl, PureHTTP2, Reseau, Nghttp2); orthogonal to the codegen interface |
+| `supported_codecs` | `[GZIP, DEFLATE, IDENTITY]` | Compression codecs accepted on the wire |
+| `http2_backend` | — | Backend selection (HTTPjl, PureHTTP2, Nghttp2); orthogonal to the codegen interface |
 | `context` | `nothing` | App state threaded into every `ServerContext.payload` (Oxygen-style) |
 
 ## ServerContext
@@ -80,8 +81,8 @@ typed handles; `send!(stream, msg)` writes one message. See
   limiting. Auth pattern: read `get_metadata_string(ctx, "authorization")` and
   reject with `GRPCError(StatusCode.UNAUTHENTICATED, ...)`.
 - Health: with `enable_health_check = true`, `set_health!(server, "my.Service",
-  HealthStatus.NOT_SERVING)` flips a service's reported status; the service
-  name must match a registered one.
+  HealthStatus.NOT_SERVING)` flips a service's reported status (names that were
+  never registered report `SERVICE_UNKNOWN` until set).
 - Reflection: `enable_reflection = true` lets tools like grpcurl discover the
   schema without a compiled proto.
 - Compression: `supported_codecs = [CompressionCodec.GZIP, ...]` on the

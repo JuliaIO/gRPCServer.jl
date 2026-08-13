@@ -6,6 +6,9 @@ and gRPCServer registration functions in one generated module.
 
 ## Invocation
 
+Targets **proto3** (`syntax = "proto3"` at the top of the file) — the generated
+header records `(proto3 syntax)`.
+
 ```julia
 using ProtoBuf
 using gRPCServer       # mandatory BEFORE protojl: registers the server codegen hook
@@ -57,13 +60,16 @@ Per service, the generated `*_pb.jl` contains, for every RPC:
 
 | Symbol | Shape | Notes |
 |---|---|---|
-| Method builder | `<Service>_<Rpc>_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor` | Builds the descriptor; validates the handler shape at construction |
+| Method builder | `<Service>_<Rpc>_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor` | Builds the descriptor; the handler shape is validated when the method is registered via `register_method!` (see `register_<Service>_<Rpc>!`) |
 | Per-RPC registration | `register_<Service>_<Rpc>!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server` | Also emitted in reversed argument order `(handler::Function, server::GRPCServer; kwargs...)` so the do-block form works |
 | Aggregate | `register_<Service>!(server::GRPCServer; <Rpc>=nothing, ...) -> server` | One keyword per RPC; each accepts a handler or a `(handler, raw_request, raw_response)` tuple; all-nothing is a no-op |
 | Client | `<Service>_<Rpc>_Client(host, port; TRequest=..., TResponse=..., grpc=gRPCClient.grpc_global_handle(), options...)` | The gRPCClient.jl constructor; hits `/{package}.{Service}/{Rpc}` |
 
-Every emitted symbol is exported and carries a static docstring with its typed
-handler contract — the IDE-hover deliverable.
+Every emitted **server-side registration symbol** (`<Service>_<Rpc>_Method`,
+`register_<Service>_<Rpc>!`, `register_<Service>!`) is exported and carries a
+static docstring with its typed handler contract — the IDE-hover deliverable.
+(Message structs and `*_Client` constructors are exported but carry no
+docstrings; exports are emitted when `always_use_modules = true`.)
 
 The file is delimited into `# gRPCClient.jl BEGIN/END` and
 `# gRPCServer.jl BEGIN/END` blocks. Keep both when you regenerate; the client
@@ -76,7 +82,40 @@ stubs are cheap and let you smoke-test the server from Julia.
   `/helloworld.Greeter/SayHello`.
 - Registration functions are named from the *service* and *rpc* identifiers:
   `register_Greeter_SayHello!`, `register_Greeter!`. A client built from a
-  different package or service name will 404 with `UNIMPLEMENTED`.
+  different package or service name will fail with `UNIMPLEMENTED`.
+
+## Proto to Julia types
+
+Field types map the usual ProtoBuf.jl way (verified in the shipped examples:
+`double -> Float64`, `int32 -> Int32`, `string -> String`):
+
+| Proto | Julia |
+|---|---|
+| `bool` | `Bool` |
+| `int32` / `sint32` / `sfixed32` | `Int32` |
+| `int64` / `sint64` / `sfixed64` | `Int64` |
+| `uint32` / `fixed32` | `UInt32` |
+| `uint64` / `fixed64` | `UInt64` |
+| `float` | `Float32` |
+| `double` | `Float64` |
+| `string` | `String` |
+| `bytes` | `Vector{UInt8}` |
+| `repeated T` | `Vector{T}` |
+| `enum` | `EnumX.@enumx` generated type |
+| `oneof` | `ProtoBuf.OneOf` |
+| message | `struct` with keyword constructor (`add_kwarg_constructors = true`) |
+
+The gRPCClient.jl skill (`grpcclient-jl`) documents the same mapping from the
+client side, plus cross-package `import` handling.
+
+## Adding an RPC later
+
+1. Edit the `.proto` (add the `rpc` to the service).
+2. Re-run the same `protojl` command **from the same directory** (relative paths
+   are recorded in the header; see the byte-stability note below).
+3. Register the new handler with the newly generated
+   `register_<Service>_<Rpc>!` (or add it to the aggregate call).
+4. Restart the server. Never hand-edit generated files.
 
 ## Registration-time validation
 

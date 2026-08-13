@@ -19,7 +19,7 @@ description: Work on the gRPCServer.jl package itself. Covers the repository map
 | `src/interceptors.jl` | `add_interceptor!`, interceptor chain |
 | `src/services/*` | Health (`set_health!`), reflection |
 | `src/compression.jl`, `src/config.jl` | Codecs, `ServerConfig` kwargs |
-| `src/http2_backend.jl`, `src/backends/*`, `src/framing.jl` | Transport abstraction (HTTPjl default, PureHTTP2, Reseau, Nghttp2 ext) |
+| `src/http2_backend.jl`, `src/backends/*`, `src/framing.jl` | Transport abstraction (HTTPjl default, PureHTTP2, Nghttp2 ext) |
 | `src/tls/*` | TLS config, `reload_tls!`, `CertificateWatcher` |
 | `test/test_codegen.jl` | Codegen test; canonical `protojl` call form |
 | `test/gen/test/test_pb.jl` | Checked-in regenerated artifact (messages + client stubs + registration in one file) |
@@ -37,8 +37,8 @@ The generated output is the package's user-facing interface. Invariants:
 - One `protojl` run with both gRPCServer and gRPCClient loaded emits messages,
   client stubs, and registration functions (the `test/gen/test/test_pb.jl`
   shape).
-- Every emitted symbol is exported and carries a static docstring with the
-  typed handler contract.
+- Every emitted server-side registration symbol is exported and carries a
+  static docstring with the typed handler contract.
 - Registration functions come in both argument orders (do-block form works)
   plus the aggregate.
 - Emission is **byte-stable** for a given ProtoBuf + Julia version.
@@ -84,7 +84,7 @@ needed.
 
 ```bash
 # first time only: docs env has no committed Manifest
-julia --project=docs -e 'using Pkg; Pkg.develop(path="/home/csvance/Git/gRPCServer.jl"); Pkg.instantiate()'
+julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
 # then
 julia --project=docs docs/make.jl
 ```
