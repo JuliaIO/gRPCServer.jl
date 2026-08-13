@@ -118,12 +118,6 @@ include("tls/reload.jl")
 include("services/health.jl")
 include("services/reflection.jl")
 
-# 12. Legacy csvance v0.1 compat layer (LAST: thin wrappers over everything
-#     above — gRPCMethod/gRPCRouter/handle!/gRPCContext/serve!/GRPC_*/
-#     gRPCServiceCallException). Defines gRPCServiceCallException, which
-#     dispatch.jl's handle_exception recognizes at call time.
-include("compat/legacy_api.jl")
-
 # Core Types
 export GRPCServer, ServerConfig, TLSConfig
 export ServerContext, PeerInfo
@@ -188,21 +182,7 @@ export can_send, StreamError
 # to code-generation workflows; gRPCClient.jl does not export it)
 export protojl
 
-# Legacy csvance v0.1 API (compat layer — thin wrappers over the merged
-# primitives; see src/compat/legacy_api.jl). None of these collide with the
-# merged exports above.
-export gRPCMethod, gRPCRouter, handle!
-export gRPCContext, metadata, set_initial_metadata!, set_trailing_metadata!
-export deadline_exceeded, iscancelled
-export req_type, resp_type, is_req_stream, is_resp_stream
-export serve!, serve
-export GRPC_OK, GRPC_CANCELLED, GRPC_UNKNOWN, GRPC_INVALID_ARGUMENT,
-    GRPC_DEADLINE_EXCEEDED, GRPC_NOT_FOUND, GRPC_ALREADY_EXISTS,
-    GRPC_PERMISSION_DENIED, GRPC_RESOURCE_EXHAUSTED, GRPC_FAILED_PRECONDITION,
-    GRPC_ABORTED, GRPC_OUT_OF_RANGE, GRPC_UNIMPLEMENTED, GRPC_INTERNAL,
-    GRPC_UNAVAILABLE, GRPC_DATA_LOSS, GRPC_UNAUTHENTICATED
-export GRPC_CODE_TABLE
-export gRPCException, gRPCServiceCallException
+# Codegen handler registration (see src/codegen.jl)
 export grpc_register_service_codegen
 
 # Precompilation workload for faster time-to-first-execution

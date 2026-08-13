@@ -71,7 +71,7 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
                 catch e
                     e
                 end
-                @test ex isa gRPCServiceCallException
+                @test ex isa gRPCClient.gRPCServiceCallException
                 @test ex.grpc_status == 5   # NOT_FOUND
                 @test occursin("not found", ex.message)
             end
@@ -93,7 +93,7 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
                 catch e
                     e
                 end
-                @test ex isa gRPCServiceCallException
+                @test ex isa gRPCClient.gRPCServiceCallException
                 @test ex.grpc_status == 12   # UNIMPLEMENTED
                 @test occursin("HTTPjlBackend", ex.message)   # names the way out
             end

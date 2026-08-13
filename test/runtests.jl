@@ -74,23 +74,13 @@ using .TestUtils
     # gRPCClient integration tests
     include("integration/test_grpcclient.jl")
 
-    # Phase 1c ports: csvance test suite adapted to the merged API (original
-    # files stay untouched for the Phase 3 verbatim compat gate). The shared
-    # TestServiceServer harness is included guarded from each ported file.
-    include("port/test_framing.jl")
-    include("port/test_status.jl")
-    include("port/test_errors.jl")
-    include("port/test_lifecycle.jl")
-    include("port/test_raw.jl")
-    include("port/test_load.jl")
-
-    # Phase 3 A1: the csvance suite runs VERBATIM through the compat layer
-    # (src/compat/legacy_api.jl), wrapped in its own module so its
-    # TestRequest/TestResponse (from the regenerated test/gen/test/test_pb.jl)
-    # do not collide with the s-celles suite's Main.TestRequest/TestResponse
-    # (test/unit/test_reflection.jl defines those at Main top level), and so
-    # `import gRPCClient` (no exports) avoids the gRPCServiceCallException
-    # ambiguity (both packages export that name).
+    # The csvance suite, migrated to the merged API + the generated codegen
+    # interface (the compat layer it used to run through was removed). Wrapped
+    # in its own module so its TestRequest/TestResponse (from the regenerated
+    # test/gen/test/test_pb.jl) do not collide with the s-celles suite's
+    # Main.TestRequest/TestResponse (test/unit/test_reflection.jl defines those
+    # at Main top level), and so `import gRPCClient` (no exports) avoids name
+    # clashes with gRPCServer's exports.
     @eval module CsvanceSuite
     using Test, gRPCServer, HTTP, Sockets, Dates
     import gRPCClient

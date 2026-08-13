@@ -522,19 +522,6 @@ function handle_exception(e::Exception, debug_mode::Bool)::Tuple{StatusCode.T, S
         return (e.code, e.message, UInt8[])
     end
 
-    # The legacy csvance exception (defined in compat/legacy_api.jl) carries its
-    # status explicitly; pass it through verbatim. The enum constructor accepts
-    # an Int; out-of-range codes (e.g. legacy tests exercising nonstandard
-    # values) fall back to UNKNOWN rather than escaping as a second exception.
-    if e isa gRPCServiceCallException
-        code = try
-            StatusCode.T(Int(e.grpc_status))
-        catch
-            StatusCode.UNKNOWN
-        end
-        return (code, e.message, UInt8[])
-    end
-
     # Map known exceptions to status codes
     code = exception_to_status_code(e)
 

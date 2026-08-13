@@ -468,6 +468,70 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
 end
 
 """
+    wait(server::GRPCServer)
+
+Block until the server stops. The HTTP.jl backend path never notifies
+`shutdown_event` itself (the listener is closed by `stop!` through
+`stop_serving!`), so this polls `server.status` instead of waiting on the
+[`Condition`](@ref).
+"""
+function Base.wait(server::GRPCServer)
+    while server.status != ServerStatus.STOPPED
+        sleep(0.05)
+    end
+    return server
+end
+
+"""
+    close(server::GRPCServer)
+
+Graceful shutdown (the legacy csvance `close` semantics; `stop!` bounds its
+drain so `close` always terminates). For an immediate shutdown use
+`HTTP.forceclose(server)`.
+"""
+function Base.close(server::GRPCServer)
+    try
+        stop!(server)
+    catch e
+        # The merged stop! is idempotence-tolerant only up to a point: a second
+        # stop! while a graceful drain is already running (state STOPPING) throws
+        # InvalidServerStateError. For close semantics the server stopping is the
+        # desired outcome either way.
+        e isa InvalidServerStateError || rethrow()
+    end
+    return nothing
+end
+
+"""
+    HTTP.forceclose(server::GRPCServer)
+
+Immediate shutdown: `stop!(server; force=true)` — drops connections without
+waiting for in-flight streams.
+"""
+function HTTP.forceclose(server::GRPCServer)
+    try
+        stop!(server; force = true)
+    catch e
+        e isa InvalidServerStateError || rethrow()
+    end
+    return nothing
+end
+
+"""
+    HTTP.port(server::GRPCServer)
+
+Bound port. With `port=0` (ephemeral — construct with a placeholder and mutate
+before `start!`) the real port lives on the HTTP.jl backend handle after
+`start!`.
+"""
+function HTTP.port(server::GRPCServer)
+    if server.port == 0 && server.backend_handle !== nothing
+        return HTTP.port(server.backend_handle)
+    end
+    return server.port
+end
+
+"""
     run(server::GRPCServer; block::Bool=true)
 
 Start the server and optionally block until shutdown.
