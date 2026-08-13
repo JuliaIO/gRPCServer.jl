@@ -136,17 +136,21 @@ end
     end
 end
 
-# Exercise the generated raw stubs end-to-end: the server-side _RawMethod
-# constant and the client constructor's TRequest/TResponse type-override kwargs,
-# as emitted into gen/test/test_pb.jl.
+# Exercise the generated raw stubs end-to-end: the Phase 5 codegen registers
+# raw methods directly on a GRPCServer via register_<Service>_<Rpc>!(server,
+# handler; raw_request, raw_response), while the client side still uses the
+# generated *_Client constructor's TRequest/TResponse type-override kwargs, as
+# emitted into gen/test/test_pb.jl.
 @testset "Raw codegen stubs end-to-end" begin
-    router = gRPCServer.gRPCRouter()
-    raw_method = TestService_TestRPC_Method(; TRequest = Vector{UInt8}, TResponse = Vector{UInt8})
-    gRPCServer.handle!(router, raw_method) do req::Vector{UInt8}, ctx
+    # Port 0 = ephemeral: GRPCServer's constructor rejects 0, so construct with a
+    # placeholder and mutate, exactly as the compat serve! does.
+    server = gRPCServer.GRPCServer("127.0.0.1", 50000)
+    server.port = 0
+    register_TestService_TestRPC!(server; raw_request = true, raw_response = true) do ctx, req::Vector{UInt8}
         decoded = _pb_decode(TestRequest, req)
         return _pb_encode(TestResponse(collect(UInt64, 1:decoded.test_response_sz)))
     end
-    server = gRPCServer.serve!(router, "127.0.0.1", 0)
+    gRPCServer.start!(server)
     port = HTTP.port(server)
     sleep(0.3)
 

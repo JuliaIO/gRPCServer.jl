@@ -133,83 +133,222 @@ TestService_TestBidirectionalStreamRPC_Client(
 export TestService_TestBidirectionalStreamRPC_Client
 # gRPCClient.jl END
 # gRPCServer.jl BEGIN
-TestService_TestRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, false}("/test.TestService/TestRPC")
+# test.TestService.TestRPC (unary)
+"""
+    TestService_TestRPC_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+
+Build the [`gRPCServer.MethodDescriptor`](@ref) for the unary RPC `/test.TestService/TestRPC`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, req::TestRequest) -> TestResponse
+
+`raw_request=true` passes the undecoded payload as `req::Vector{UInt8}`;
+`raw_response=true` takes an already-encoded `Vector{UInt8}` return verbatim.
+Throwing a [`gRPCServer.GRPCError`](@ref) sets the response status; any other
+exception maps to INTERNAL.
+"""
+TestService_TestRPC_Method(handler; raw_request::Bool=false, raw_response::Bool=false) =
+	gRPCServer.MethodDescriptor("TestRPC", gRPCServer.MethodType.UNARY, TestRequest, TestResponse, handler; raw_request=raw_request, raw_response=raw_response)
 export TestService_TestRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
-TestService_TestServerStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, false, TResponse, true}("/test.TestService/TestServerStreamRPC")
+"""
+    register_TestService_TestRPC!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+    register_TestService_TestRPC!(handler::Function, server::GRPCServer; kwargs...) -> server
+
+Register the unary RPC `/test.TestService/TestRPC` on `server`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, req::TestRequest) -> TestResponse
+
+The handler signature is validated at registration time; a mismatched shape
+throws `ArgumentError`. See [`TestService_TestRPC_Method`](@ref) for the raw variants.
+
+# Example
+```julia
+register_TestService_TestRPC!(server) do ctx, req
+    # compute and return a TestResponse
+end
+```
+"""
+function register_TestService_TestRPC!(server::GRPCServer, handler; raw_request::Bool=false, raw_response::Bool=false)
+	gRPCServer.register_method!(server.dispatcher, "test.TestService", TestService_TestRPC_Method(handler; raw_request=raw_request, raw_response=raw_response))
+	return server
+end
+register_TestService_TestRPC!(handler::Function, server::GRPCServer; kwargs...) = register_TestService_TestRPC!(server, handler; kwargs...)
+export register_TestService_TestRPC!
+
+# test.TestService.TestServerStreamRPC (server streaming)
+"""
+    TestService_TestServerStreamRPC_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+
+Build the [`gRPCServer.MethodDescriptor`](@ref) for the server streaming RPC `/test.TestService/TestServerStreamRPC`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, req::TestRequest, stream::gRPCServer.ServerStream{TestResponse}) -> Nothing
+
+Send responses with `gRPCServer.send!(stream, msg)` and return `nothing`.
+
+`raw_request=true` passes the undecoded payload as `req::Vector{UInt8}`;
+`raw_response=true` takes an already-encoded `Vector{UInt8}` return verbatim.
+Throwing a [`gRPCServer.GRPCError`](@ref) sets the response status; any other
+exception maps to INTERNAL.
+"""
+TestService_TestServerStreamRPC_Method(handler; raw_request::Bool=false, raw_response::Bool=false) =
+	gRPCServer.MethodDescriptor("TestServerStreamRPC", gRPCServer.MethodType.SERVER_STREAMING, TestRequest, TestResponse, handler; raw_request=raw_request, raw_response=raw_response)
 export TestService_TestServerStreamRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
-TestService_TestClientStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, false}("/test.TestService/TestClientStreamRPC")
+"""
+    register_TestService_TestServerStreamRPC!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+    register_TestService_TestServerStreamRPC!(handler::Function, server::GRPCServer; kwargs...) -> server
+
+Register the server streaming RPC `/test.TestService/TestServerStreamRPC` on `server`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, req::TestRequest, stream::gRPCServer.ServerStream{TestResponse}) -> Nothing
+
+Send responses with `gRPCServer.send!(stream, msg)` and return `nothing`.
+
+The handler signature is validated at registration time; a mismatched shape
+throws `ArgumentError`. See [`TestService_TestServerStreamRPC_Method`](@ref) for the raw variants.
+
+# Example
+```julia
+register_TestService_TestServerStreamRPC!(server) do ctx, req
+    # send!(stream, msg) for each response, then return nothing
+end
+```
+"""
+function register_TestService_TestServerStreamRPC!(server::GRPCServer, handler; raw_request::Bool=false, raw_response::Bool=false)
+	gRPCServer.register_method!(server.dispatcher, "test.TestService", TestService_TestServerStreamRPC_Method(handler; raw_request=raw_request, raw_response=raw_response))
+	return server
+end
+register_TestService_TestServerStreamRPC!(handler::Function, server::GRPCServer; kwargs...) = register_TestService_TestServerStreamRPC!(server, handler; kwargs...)
+export register_TestService_TestServerStreamRPC!
+
+# test.TestService.TestClientStreamRPC (client streaming)
+"""
+    TestService_TestClientStreamRPC_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+
+Build the [`gRPCServer.MethodDescriptor`](@ref) for the client streaming RPC `/test.TestService/TestClientStreamRPC`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, stream::gRPCServer.ClientStream{TestRequest}) -> TestResponse
+
+The runtime consumes the whole request stream (waits for END_STREAM) before invoking the handler. Iterate with `for req in stream`.
+
+`raw_request=true` passes the undecoded payload as `req::Vector{UInt8}`;
+`raw_response=true` takes an already-encoded `Vector{UInt8}` return verbatim.
+Throwing a [`gRPCServer.GRPCError`](@ref) sets the response status; any other
+exception maps to INTERNAL.
+"""
+TestService_TestClientStreamRPC_Method(handler; raw_request::Bool=false, raw_response::Bool=false) =
+	gRPCServer.MethodDescriptor("TestClientStreamRPC", gRPCServer.MethodType.CLIENT_STREAMING, TestRequest, TestResponse, handler; raw_request=raw_request, raw_response=raw_response)
 export TestService_TestClientStreamRPC_Method
 
-# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.
-TestService_TestBidirectionalStreamRPC_Method(; TRequest=TestRequest, TResponse=TestResponse) = gRPCServer.gRPCMethod{TRequest, true, TResponse, true}("/test.TestService/TestBidirectionalStreamRPC")
+"""
+    register_TestService_TestClientStreamRPC!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+    register_TestService_TestClientStreamRPC!(handler::Function, server::GRPCServer; kwargs...) -> server
+
+Register the client streaming RPC `/test.TestService/TestClientStreamRPC` on `server`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, stream::gRPCServer.ClientStream{TestRequest}) -> TestResponse
+
+The runtime consumes the whole request stream (waits for END_STREAM) before invoking the handler. Iterate with `for req in stream`.
+
+The handler signature is validated at registration time; a mismatched shape
+throws `ArgumentError`. See [`TestService_TestClientStreamRPC_Method`](@ref) for the raw variants.
+
+# Example
+```julia
+register_TestService_TestClientStreamRPC!(server) do ctx, stream
+    # consume `stream` and return a TestResponse
+end
+```
+"""
+function register_TestService_TestClientStreamRPC!(server::GRPCServer, handler; raw_request::Bool=false, raw_response::Bool=false)
+	gRPCServer.register_method!(server.dispatcher, "test.TestService", TestService_TestClientStreamRPC_Method(handler; raw_request=raw_request, raw_response=raw_response))
+	return server
+end
+register_TestService_TestClientStreamRPC!(handler::Function, server::GRPCServer; kwargs...) = register_TestService_TestClientStreamRPC!(server, handler; kwargs...)
+export register_TestService_TestClientStreamRPC!
+
+# test.TestService.TestBidirectionalStreamRPC (bidirectional streaming)
+"""
+    TestService_TestBidirectionalStreamRPC_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+
+Build the [`gRPCServer.MethodDescriptor`](@ref) for the bidirectional streaming RPC `/test.TestService/TestBidirectionalStreamRPC`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, stream::gRPCServer.BidiStream{TestRequest, TestResponse}) -> Nothing
+
+The runtime runs bidi handlers in batch mode: the request stream is fully consumed before the handler starts. Iterate with `for req in stream` and send responses with `gRPCServer.send!(stream, msg)`.
+
+`raw_request=true` passes the undecoded payload as `req::Vector{UInt8}`;
+`raw_response=true` takes an already-encoded `Vector{UInt8}` return verbatim.
+Throwing a [`gRPCServer.GRPCError`](@ref) sets the response status; any other
+exception maps to INTERNAL.
+"""
+TestService_TestBidirectionalStreamRPC_Method(handler; raw_request::Bool=false, raw_response::Bool=false) =
+	gRPCServer.MethodDescriptor("TestBidirectionalStreamRPC", gRPCServer.MethodType.BIDI_STREAMING, TestRequest, TestResponse, handler; raw_request=raw_request, raw_response=raw_response)
 export TestService_TestBidirectionalStreamRPC_Method
 
-function register_TestService!(router; allow_unstable_streaming=false, TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
-	TestRPC === nothing || gRPCServer.handle!(router, TestService_TestRPC_Method(), TestRPC)
-	TestServerStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestServerStreamRPC_Method(), TestServerStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
-	TestClientStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestClientStreamRPC_Method(), TestClientStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
-	TestBidirectionalStreamRPC === nothing || gRPCServer.handle!(router, TestService_TestBidirectionalStreamRPC_Method(), TestBidirectionalStreamRPC; allow_unstable_streaming=allow_unstable_streaming)
-	return router
-end
-export register_TestService!
+"""
+    register_TestService_TestBidirectionalStreamRPC!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+    register_TestService_TestBidirectionalStreamRPC!(handler::Function, server::GRPCServer; kwargs...) -> server
 
+Register the bidirectional streaming RPC `/test.TestService/TestBidirectionalStreamRPC` on `server`.
+
+# Handler contract
+    (ctx::gRPCServer.ServerContext, stream::gRPCServer.BidiStream{TestRequest, TestResponse}) -> Nothing
+
+The runtime runs bidi handlers in batch mode: the request stream is fully consumed before the handler starts. Iterate with `for req in stream` and send responses with `gRPCServer.send!(stream, msg)`.
+
+The handler signature is validated at registration time; a mismatched shape
+throws `ArgumentError`. See [`TestService_TestBidirectionalStreamRPC_Method`](@ref) for the raw variants.
+
+# Example
+```julia
+register_TestService_TestBidirectionalStreamRPC!(server) do ctx, stream
+    # iterate `stream` and send!(stream, msg) for each response
+end
+```
+"""
+function register_TestService_TestBidirectionalStreamRPC!(server::GRPCServer, handler; raw_request::Bool=false, raw_response::Bool=false)
+	gRPCServer.register_method!(server.dispatcher, "test.TestService", TestService_TestBidirectionalStreamRPC_Method(handler; raw_request=raw_request, raw_response=raw_response))
+	return server
+end
+register_TestService_TestBidirectionalStreamRPC!(handler::Function, server::GRPCServer; kwargs...) = register_TestService_TestBidirectionalStreamRPC!(server, handler; kwargs...)
+export register_TestService_TestBidirectionalStreamRPC!
+
+"""
+    register_TestService!(server::GRPCServer; TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing) -> server
+
+Register the `test.TestService` service on `server`: every non-`nothing` keyword
+registers its RPC. Each keyword accepts a handler or a `(handler,
+raw_request, raw_response)` tuple (raw flags per method). All-nothing is a
+no-op. Equivalent to calling the per-RPC `register_<Service>_<Rpc>!`
+functions individually.
+"""
 function register_TestService!(server::GRPCServer; TestRPC=nothing, TestServerStreamRPC=nothing, TestClientStreamRPC=nothing, TestBidirectionalStreamRPC=nothing)
-	methods = Dict{String, gRPCServer.MethodDescriptor}()
 	if TestRPC !== nothing
 		handler, raw_request, raw_response = TestRPC isa Tuple ? TestRPC : (TestRPC, false, false)
-		methods["TestRPC"] = gRPCServer.MethodDescriptor(
-			"TestRPC",
-			gRPCServer.MethodType.UNARY,
-			TestRequest,
-			TestResponse,
-			handler;
-			raw_request=raw_request,
-			raw_response=raw_response,
-		)
+		register_TestService_TestRPC!(server, handler; raw_request=raw_request, raw_response=raw_response)
 	end
 	if TestServerStreamRPC !== nothing
 		handler, raw_request, raw_response = TestServerStreamRPC isa Tuple ? TestServerStreamRPC : (TestServerStreamRPC, false, false)
-		methods["TestServerStreamRPC"] = gRPCServer.MethodDescriptor(
-			"TestServerStreamRPC",
-			gRPCServer.MethodType.SERVER_STREAMING,
-			TestRequest,
-			TestResponse,
-			handler;
-			raw_request=raw_request,
-			raw_response=raw_response,
-		)
+		register_TestService_TestServerStreamRPC!(server, handler; raw_request=raw_request, raw_response=raw_response)
 	end
 	if TestClientStreamRPC !== nothing
 		handler, raw_request, raw_response = TestClientStreamRPC isa Tuple ? TestClientStreamRPC : (TestClientStreamRPC, false, false)
-		methods["TestClientStreamRPC"] = gRPCServer.MethodDescriptor(
-			"TestClientStreamRPC",
-			gRPCServer.MethodType.CLIENT_STREAMING,
-			TestRequest,
-			TestResponse,
-			handler;
-			raw_request=raw_request,
-			raw_response=raw_response,
-		)
+		register_TestService_TestClientStreamRPC!(server, handler; raw_request=raw_request, raw_response=raw_response)
 	end
 	if TestBidirectionalStreamRPC !== nothing
 		handler, raw_request, raw_response = TestBidirectionalStreamRPC isa Tuple ? TestBidirectionalStreamRPC : (TestBidirectionalStreamRPC, false, false)
-		methods["TestBidirectionalStreamRPC"] = gRPCServer.MethodDescriptor(
-			"TestBidirectionalStreamRPC",
-			gRPCServer.MethodType.BIDI_STREAMING,
-			TestRequest,
-			TestResponse,
-			handler;
-			raw_request=raw_request,
-			raw_response=raw_response,
-		)
+		register_TestService_TestBidirectionalStreamRPC!(server, handler; raw_request=raw_request, raw_response=raw_response)
 	end
-	isempty(methods) && return server
-	gRPCServer.register_service!(server.dispatcher, gRPCServer.ServiceDescriptor("test.TestService", methods))
 	return server
 end
+export register_TestService!
 
 # gRPCServer.jl END

@@ -1,10 +1,26 @@
 # ProtoBuf.jl code-generation integration (Phase 2 merge port of the legacy
-# src/ProtoBuf.jl). Registered under the key "gRPCServer.jl" so it coexists
+# src/ProtoBuf.jl; Phase 5 rework: typed, IDE-first emission targeting the
+# s-celles runtime interface — ServiceDescriptor / MethodDescriptor /
+# register_method!). Registered under the key "gRPCServer.jl" so it coexists
 # with gRPCClient.jl's handler: a single protojl run with both packages loaded
-# emits both client and server stubs.
+# emits both client stubs and server registration.
 #
 # Depends on `import ProtoBuf.CodeGenerators` in the enclosing module: `using
 # ProtoBuf` alone does NOT bring the submodule into scope.
+#
+# Emission per service (see test/gen/test/test_pb.jl for the live artifact):
+#   - per-RPC typed descriptor builder `<Service>_<Rpc>_Method(handler;
+#     raw_request=false, raw_response=false) -> MethodDescriptor`;
+#   - per-RPC registration function `register_<Service>_<Rpc>!(server, handler;
+#     raw_request=false, raw_response=false) -> server` — emitted in both
+#     argument orders so the do-block form works;
+#   - a per-service aggregate `register_<Service>!(server; <Rpc>=nothing, ...)`
+#     accepting plain handlers or `(handler, raw_request, raw_response)` tuples;
+#     all-nothing = no-op.
+# Every symbol carries a static docstring (handler contract per MethodType, raw
+# variants, streaming semantics, a do-block example) — the primary IDE-hover
+# deliverable. Registration-time handler validation lives in the runtime
+# (`register_method!`).
 
 function _resolve_type_name(ref::CodeGenerators.ReferencedType)
     name = ref.name
@@ -28,100 +44,193 @@ function _method_type_expr(rpc::CodeGenerators.RPCType)
     end
 end
 
+# Human-readable MethodType name for docstrings.
+function _method_type_name(rpc::CodeGenerators.RPCType)
+    if rpc.request_stream && rpc.response_stream
+        return "bidirectional streaming"
+    elseif rpc.request_stream
+        return "client streaming"
+    elseif rpc.response_stream
+        return "server streaming"
+    else
+        return "unary"
+    end
+end
+
+# The exact handler signature a method of this shape requires, as written into
+# docstrings. Request/response types are the generated proto types; the runtime
+# context/stream types are fully qualified.
+function _handler_contract(rpc::CodeGenerators.RPCType, request_type, response_type)
+    if rpc.request_stream && rpc.response_stream
+        return "(ctx::gRPCServer.ServerContext, stream::gRPCServer.BidiStream{$request_type, $response_type}) -> Nothing"
+    elseif rpc.request_stream
+        return "(ctx::gRPCServer.ServerContext, stream::gRPCServer.ClientStream{$request_type}) -> $response_type"
+    elseif rpc.response_stream
+        return "(ctx::gRPCServer.ServerContext, req::$request_type, stream::gRPCServer.ServerStream{$response_type}) -> Nothing"
+    else
+        return "(ctx::gRPCServer.ServerContext, req::$request_type) -> $response_type"
+    end
+end
+
+# Streaming-semantics note appended to docstrings of streaming RPCs.
+function _streaming_note(rpc::CodeGenerators.RPCType)
+    if rpc.request_stream && rpc.response_stream
+        return "The runtime runs bidi handlers in batch mode: the request stream is fully consumed before the handler starts. Iterate with `for req in stream` and send responses with `gRPCServer.send!(stream, msg)`."
+    elseif rpc.request_stream
+        return "The runtime consumes the whole request stream (waits for END_STREAM) before invoking the handler. Iterate with `for req in stream`."
+    elseif rpc.response_stream
+        return "Send responses with `gRPCServer.send!(stream, msg)` and return `nothing`."
+    end
+    return ""
+end
+
+# do-block argument names for the example in the registration docstring.
+function _do_block_args(rpc::CodeGenerators.RPCType)
+    if rpc.request_stream
+        return "ctx, stream"
+    else
+        return "ctx, req"
+    end
+end
+
+# One-line hint for the body of the do-block example (generic — codegen does not
+# know message field names).
+function _example_hint(rpc::CodeGenerators.RPCType, response_type)
+    if rpc.request_stream && rpc.response_stream
+        return "iterate `stream` and send!(stream, msg) for each response"
+    elseif rpc.request_stream
+        return "consume `stream` and return a $response_type"
+    elseif rpc.response_stream
+        return "send!(stream, msg) for each response, then return nothing"
+    else
+        return "compute and return a $response_type"
+    end
+end
+
+# Docstring for the per-RPC descriptor builder.
+function _builder_docstring(builder_name, rpc_path, mt_name, rpc, request_type, response_type)
+    contract = _handler_contract(rpc, request_type, response_type)
+    lines = String[]
+    push!(lines, "    $builder_name(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor")
+    push!(lines, "")
+    push!(lines, "Build the [`gRPCServer.MethodDescriptor`](@ref) for the $mt_name RPC `$rpc_path`.")
+    push!(lines, "")
+    push!(lines, "# Handler contract")
+    push!(lines, "    $contract")
+    note = _streaming_note(rpc)
+    if !isempty(note)
+        push!(lines, "")
+        push!(lines, note)
+    end
+    push!(lines, "")
+    push!(lines, "`raw_request=true` passes the undecoded payload as `req::Vector{UInt8}`;")
+    push!(lines, "`raw_response=true` takes an already-encoded `Vector{UInt8}` return verbatim.")
+    push!(lines, "Throwing a [`gRPCServer.GRPCError`](@ref) sets the response status; any other")
+    push!(lines, "exception maps to INTERNAL.")
+    return join(lines, "\n") * "\n"
+end
+
+# Docstring for the per-RPC registration function.
+function _register_docstring(reg_name, builder_name, rpc_path, mt_name, rpc, request_type, response_type)
+    contract = _handler_contract(rpc, request_type, response_type)
+    lines = String[]
+    push!(lines, "    $reg_name(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server")
+    push!(lines, "    $reg_name(handler::Function, server::GRPCServer; kwargs...) -> server")
+    push!(lines, "")
+    push!(lines, "Register the $mt_name RPC `$rpc_path` on `server`.")
+    push!(lines, "")
+    push!(lines, "# Handler contract")
+    push!(lines, "    $contract")
+    note = _streaming_note(rpc)
+    if !isempty(note)
+        push!(lines, "")
+        push!(lines, note)
+    end
+    push!(lines, "")
+    push!(lines, "The handler signature is validated at registration time; a mismatched shape")
+    push!(lines, "throws `ArgumentError`. See [`$builder_name`](@ref) for the raw variants.")
+    push!(lines, "")
+    push!(lines, "# Example")
+    push!(lines, "```julia")
+    push!(lines, "$reg_name(server) do $(_do_block_args(rpc))")
+    push!(lines, "    # $(_example_hint(rpc, response_type))")
+    push!(lines, "end")
+    push!(lines, "```")
+    return join(lines, "\n") * "\n"
+end
+
+# Docstring for the per-service aggregate.
+function _service_docstring(reg_name, service_full, rpc_names)
+    sig_kwargs = join(["$(rpc)=nothing" for rpc in rpc_names], ", ")
+    lines = String[]
+    push!(lines, "    $reg_name(server::GRPCServer; $sig_kwargs) -> server")
+    push!(lines, "")
+    push!(lines, "Register the `$service_full` service on `server`: every non-`nothing` keyword")
+    push!(lines, "registers its RPC. Each keyword accepts a handler or a `(handler,")
+    push!(lines, "raw_request, raw_response)` tuple (raw flags per method). All-nothing is a")
+    push!(lines, "no-op. Equivalent to calling the per-RPC `register_<Service>_<Rpc>!`")
+    push!(lines, "functions individually.")
+    return join(lines, "\n") * "\n"
+end
+
 function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Context)
     namespace = join(ctx.proto_file.preamble.namespace, ".")
     service_name = t.name
+    service_full = "$namespace.$service_name"
 
     do_export =
         CodeGenerators.is_namespaced(ctx.proto_file) || ctx.options.always_use_modules
 
-    # Per-RPC descriptor builders (the legacy gRPCMethod shape, byte-compatible
-    # with what test/test_codegen.jl asserts: the four streaming-flag positions
-    # are the literal true/false type parameters).
     for rpc in t.rpcs
-        rpc_path = "/$namespace.$service_name/$(rpc.name)"
+        rpc_path = "/$service_full/$(rpc.name)"
         request_type = _resolve_type_name(rpc.request_type)
         response_type = _resolve_type_name(rpc.response_type)
-        method_name = "$(service_name)_$(rpc.name)_Method"
-        is_streaming = rpc.request_stream || rpc.response_stream
+        builder_name = "$(service_name)_$(rpc.name)_Method"
+        reg_name = "register_$(service_name)_$(rpc.name)!"
+        mt_name = _method_type_name(rpc)
+        mt_expr = _method_type_expr(rpc)
 
-        # Streaming RPCs are unstable; flag them in the generated source so the
-        # limitation is visible at the call site.
-        is_streaming && println(
-            io,
-            "# !!! WARNING: streaming RPC; unstable in gRPCServer (known HTTP/2 lifecycle bugs). Registering it requires handle!(...; allow_unstable_streaming=true). See the streaming docs before use.",
-        )
+        println(io, "# $service_full.$(rpc.name) ($mt_name)")
 
-        # A builder function mirroring the client's *_Client constructor.
-        # TRequest / TResponse default to the generated proto types; override
-        # either (or both) with Vector{UInt8} to have the handler receive the raw
-        # request payload and/or return raw response bytes (partial decoding).
-        println(
-            io,
-            "$(method_name)(; TRequest=$request_type, TResponse=$response_type) = gRPCServer.gRPCMethod{TRequest, $(rpc.request_stream), TResponse, $(rpc.response_stream)}(\"$rpc_path\")",
-        )
-        do_export && println(io, "export $(method_name)")
+        # 1. Typed descriptor builder.
+        println(io, "\"\"\"")
+        print(io, _builder_docstring(builder_name, rpc_path, mt_name, rpc, request_type, response_type))
+        println(io, "\"\"\"")
+        println(io, "$(builder_name)(handler; raw_request::Bool=false, raw_response::Bool=false) =")
+        println(io, "\tgRPCServer.MethodDescriptor(\"$(rpc.name)\", $mt_expr, $request_type, $response_type, handler; raw_request=raw_request, raw_response=raw_response)")
+        do_export && println(io, "export $(builder_name)")
+        println(io, "")
+
+        # 2. Per-RPC registration (both argument orders — the second enables
+        #    the do-block form).
+        println(io, "\"\"\"")
+        print(io, _register_docstring(reg_name, builder_name, rpc_path, mt_name, rpc, request_type, response_type))
+        println(io, "\"\"\"")
+        println(io, "function $(reg_name)(server::GRPCServer, handler; raw_request::Bool=false, raw_response::Bool=false)")
+        println(io, "\tgRPCServer.register_method!(server.dispatcher, \"$service_full\", $(builder_name)(handler; raw_request=raw_request, raw_response=raw_response))")
+        println(io, "\treturn server")
+        println(io, "end")
+        println(io, "$(reg_name)(handler::Function, server::GRPCServer; kwargs...) = $(reg_name)(server, handler; kwargs...)")
+        do_export && println(io, "export $(reg_name)")
         println(io, "")
     end
 
-    # Per-service registration convenience (the legacy router sugar). When the
-    # service has any streaming RPC, the helper takes an `allow_unstable_streaming`
-    # keyword that is forwarded only to the streaming registrations (see handle!).
-    register_name = "register_$(service_name)!"
-    has_streaming = any(rpc -> rpc.request_stream || rpc.response_stream, t.rpcs)
+    # 3. Per-service aggregate.
     rpc_kwargs = join(["$(rpc.name)=nothing" for rpc in t.rpcs], ", ")
-    signature_kwargs =
-        has_streaming ? "allow_unstable_streaming=false, $rpc_kwargs" : rpc_kwargs
-    println(io, "function $(register_name)(router; $signature_kwargs)")
+    println(io, "\"\"\"")
+    print(io, _service_docstring("register_$(service_name)!", service_full, [rpc.name for rpc in t.rpcs]))
+    println(io, "\"\"\"")
+    println(io, "function register_$(service_name)!(server::GRPCServer; $rpc_kwargs)")
     for rpc in t.rpcs
-        method_name = "$(service_name)_$(rpc.name)_Method"
-        if rpc.request_stream || rpc.response_stream
-            println(
-                io,
-                "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name); allow_unstable_streaming=allow_unstable_streaming)",
-            )
-        else
-            println(
-                io,
-                "\t$(rpc.name) === nothing || gRPCServer.handle!(router, $(method_name)(), $(rpc.name))",
-            )
-        end
-    end
-    println(io, "\treturn router")
-    println(io, "end")
-    do_export && println(io, "export $(register_name)")
-    println(io, "")
-
-    # NEW merged form: register directly on a GRPCServer via a
-    # ServiceDescriptor + Dict{String, MethodDescriptor}. Handler kwargs accept
-    # EITHER a plain handler (raw_request=false, raw_response=false) OR a
-    # 3-tuple (handler, raw_request::Bool, raw_response::Bool) so raw
-    # Vector{UInt8} overrides are expressible. input/output types are the
-    # generated proto types; the raw flags bypass the type registry on decode
-    # and pass Vector{UInt8} through verbatim on encode (Phase 1b raw feature).
-    # When every handler kwarg is nothing, nothing is registered.
-    println(io, "function $(register_name)(server::GRPCServer; $rpc_kwargs)")
-    println(io, "\tmethods = Dict{String, gRPCServer.MethodDescriptor}()")
-    for rpc in t.rpcs
-        input_type = _resolve_type_name(rpc.request_type)
-        output_type = _resolve_type_name(rpc.response_type)
+        reg_name = "register_$(service_name)_$(rpc.name)!"
         println(io, "\tif $(rpc.name) !== nothing")
         println(io, "\t\thandler, raw_request, raw_response = $(rpc.name) isa Tuple ? $(rpc.name) : ($(rpc.name), false, false)")
-        println(io, "\t\tmethods[\"$(rpc.name)\"] = gRPCServer.MethodDescriptor(")
-        println(io, "\t\t\t\"$(rpc.name)\",")
-        println(io, "\t\t\t$(_method_type_expr(rpc)),")
-        println(io, "\t\t\t$input_type,")
-        println(io, "\t\t\t$output_type,")
-        println(io, "\t\t\thandler;")
-        println(io, "\t\t\traw_request=raw_request,")
-        println(io, "\t\t\traw_response=raw_response,")
-        println(io, "\t\t)")
+        println(io, "\t\t$(reg_name)(server, handler; raw_request=raw_request, raw_response=raw_response)")
         println(io, "\tend")
     end
-    println(io, "\tisempty(methods) && return server")
-    println(io, "\tgRPCServer.register_service!(server.dispatcher, gRPCServer.ServiceDescriptor(\"$namespace.$service_name\", methods))")
     println(io, "\treturn server")
     println(io, "end")
+    do_export && println(io, "export register_$(service_name)!")
     println(io, "")
 end
 
@@ -133,10 +242,11 @@ import_cb(io, ctx, definitions) =
         init = 0,
     ) > 0
         println(io, "import gRPCServer")
-        # The merged register_<Service>!(server::GRPCServer; ...) form annotates
-        # its first argument with the unqualified type name, so bring it into
-        # scope alongside the module import. (The protojl-generated wrapper
-        # places this file inside a `module <package>` that only sees imports.)
+        # The generated register_<Service>_<Rpc>! / register_<Service>! forms
+        # annotate their first argument with the unqualified type name, so bring
+        # it into scope alongside the module import. (The protojl-generated
+        # wrapper places this file inside a `module <package>` that only sees
+        # imports.)
         println(io, "using gRPCServer: GRPCServer")
     end
 
@@ -145,7 +255,8 @@ import_cb(io, ctx, definitions) =
 
 Register gRPCServer's external code generation handler with ProtoBuf.jl so that
 a subsequent `protojl` run emits server descriptors (`<Service>_<Rpc>_Method`
-builders and `register_<Service>!` helpers) for each `service` in the `.proto`.
+builders, `register_<Service>_<Rpc>!` registration functions, and a
+`register_<Service>!` aggregate) for each `service` in the `.proto`.
 
 This is called automatically from the module's `__init__`, so it normally does
 not need to be invoked directly. It can be called explicitly (e.g.

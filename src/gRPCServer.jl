@@ -150,6 +150,8 @@ export start!, stop!
 
 # Service Registration
 export register!, services, service_descriptor
+# Per-method registration (codegen emission + manual use)
+export register_method!
 
 # Interceptors
 export add_interceptor!

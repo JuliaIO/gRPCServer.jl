@@ -304,6 +304,119 @@ function register_service!(dispatcher::RequestDispatcher, descriptor::ServiceDes
 end
 
 """
+    _expected_handler_tuple(method::MethodDescriptor) -> Union{Tuple, Nothing}
+
+The call tuple a handler for `method` must accept, derived from its
+[`MethodType`](@ref) and its Julia input/output types. Raw sides substitute
+`Vector{UInt8}` (the raw payload). Returns `nothing` when the descriptor carries
+no Julia types (string-typed descriptors) and cannot be shape-checked.
+
+| MethodType        | Expected handler tuple                                     |
+|-------------------|------------------------------------------------------------|
+| UNARY             | `Tuple{ServerContext, ReqT}`                               |
+| SERVER_STREAMING  | `Tuple{ServerContext, ReqT, ServerStream{RespT}}`          |
+| CLIENT_STREAMING  | `Tuple{ServerContext, ClientStream{ReqT}}`                 |
+| BIDI_STREAMING    | `Tuple{ServerContext, BidiStream{ReqT, RespT}}`            |
+"""
+function _expected_handler_tuple(method::MethodDescriptor)
+    req_type = method.input_julia_type
+    resp_type = method.output_julia_type
+    (req_type === nothing || resp_type === nothing) && return nothing
+    req_type = method.raw_request ? Vector{UInt8} : req_type
+    resp_type = method.raw_response ? Vector{UInt8} : resp_type
+    if method.method_type == MethodType.UNARY
+        return Tuple{ServerContext, req_type}
+    elseif method.method_type == MethodType.SERVER_STREAMING
+        return Tuple{ServerContext, req_type, ServerStream{resp_type}}
+    elseif method.method_type == MethodType.CLIENT_STREAMING
+        return Tuple{ServerContext, ClientStream{req_type}}
+    elseif method.method_type == MethodType.BIDI_STREAMING
+        return Tuple{ServerContext, BidiStream{req_type, resp_type}}
+    end
+    return nothing
+end
+
+"""
+    _validate_method_handler!(method::MethodDescriptor)
+
+Check at registration time that `method.handler` is callable with the signature
+its [`MethodType`](@ref) requires (see [`_expected_handler_tuple`](@ref)), so
+mismatched handler shapes fail with a clear `ArgumentError` at `register_!`
+rather than a `MethodError` on the first call. Untyped/vararg handlers pass;
+wrong arity, wrong argument types, and raw/typed mismatches are rejected.
+Return types cannot be checked generically and are not validated.
+"""
+function _validate_method_handler!(method::MethodDescriptor)
+    expected = _expected_handler_tuple(method)
+    expected === nothing && return nothing
+    if !Base.hasmethod(method.handler, expected)
+        mt_name = string(method.method_type)
+        sig = join([string(nameof(typeof(t))) for t in expected.parameters], ", ")
+        throw(ArgumentError(
+            "handler for \"$(method.name)\" ($(mt_name) RPC) is not callable as " *
+            "($(sig)); expected a handler with signature " *
+            "$(_handler_signature_hint(method, expected))"
+        ))
+    end
+    return nothing
+end
+
+# Human-readable expected signature for validation error messages.
+function _handler_signature_hint(method::MethodDescriptor, expected::Type)
+    req = method.raw_request ? "Vector{UInt8}" : string(method.input_julia_type)
+    resp = method.raw_response ? "Vector{UInt8}" : string(method.output_julia_type)
+    if method.method_type == MethodType.UNARY
+        return "(ctx::ServerContext, req::$req) -> $resp"
+    elseif method.method_type == MethodType.SERVER_STREAMING
+        return "(ctx::ServerContext, req::$req, stream::ServerStream{$resp}) -> Nothing"
+    elseif method.method_type == MethodType.CLIENT_STREAMING
+        return "(ctx::ServerContext, stream::ClientStream{$req}) -> $resp"
+    elseif method.method_type == MethodType.BIDI_STREAMING
+        return "(ctx::ServerContext, stream::BidiStream{$req, $resp}) -> Nothing"
+    end
+    return string(expected)
+end
+
+"""
+    register_method!(registry::ServiceRegistry, service_name::String, method::MethodDescriptor)
+
+Register a single method under `service_name`, creating the service entry (and
+its `ServiceDescriptor`) on first use. Unlike [`register!`](@ref) (which throws
+[`ServiceAlreadyRegisteredError`](@ref) if the service exists), repeated calls
+accumulate methods onto the same service — this is the primitive the generated
+per-RPC registration functions build on. The handler shape is validated at
+registration time (see [`_validate_method_handler!`](@ref)) and the method's
+Julia types are auto-registered in the type registry.
+"""
+function register_method!(registry::ServiceRegistry, service_name::String, method::MethodDescriptor)
+    _validate_method_handler!(method)
+
+    svc = get(registry.services, service_name, nothing)
+    if svc === nothing
+        svc = ServiceDescriptor(service_name, Dict{String,MethodDescriptor}())
+        registry.services[service_name] = svc
+    end
+    svc.methods[method.name] = method
+    registry.method_lookup["/$(service_name)/$(method.name)"] = (svc, method)
+
+    # Auto-register the Julia types (mirrors ServiceRegistry.register!).
+    treg = get_type_registry()
+    method.input_julia_type !== nothing && (treg[method.input_type] = method.input_julia_type)
+    method.output_julia_type !== nothing && (treg[method.output_type] = method.output_julia_type)
+    return method
+end
+
+"""
+    register_method!(dispatcher::RequestDispatcher, service_name::String, method::MethodDescriptor)
+
+Register a single method with the dispatcher (see
+`register_method!(::ServiceRegistry, ...)`).
+"""
+function register_method!(dispatcher::RequestDispatcher, service_name::String, method::MethodDescriptor)
+    register_method!(dispatcher.registry, service_name, method)
+end
+
+"""
     add_interceptor!(dispatcher::RequestDispatcher, interceptor::Interceptor)
 
 Add a global interceptor.
