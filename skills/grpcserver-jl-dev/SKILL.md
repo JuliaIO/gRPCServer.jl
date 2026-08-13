@@ -73,7 +73,7 @@ generated files.
 timeout 3000 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-Baseline: 1,023,517 pass / 2 broken / exit 0. The root project has gRPCClient in
+Baseline: 1,023,518 pass / 2 broken / exit 0. The root project has gRPCClient in
 `[deps]` (used by the examples and the codegen tests); `test/aqua.jl` ignores it
 in the stale-deps check (`stale_deps = (; ignore = [:gRPCClient])`) because the
 package itself never loads it. Keep that pair consistent: if gRPCClient ever

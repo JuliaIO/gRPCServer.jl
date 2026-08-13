@@ -37,7 +37,8 @@ gRPCServer.register_method!(server.dispatcher, "helloworld.Greeter", method)
 |---|---|---|
 | `max_message_size` | 4 MiB | Largest accepted/sent message (send cap enforced on every backend; receive cap only on `HTTPjlBackend`) |
 | `max_concurrent_requests` | unlimited | Cap; excess requests shed with `RESOURCE_EXHAUSTED` (no queue) |
-| `max_concurrent_streams`, `max_connections`, `max_queued_requests` | — | HTTP/2 stream/connection limits — **not configurable on any backend; explicitly setting them raises `UnsupportedFeatureError`** |
+| `max_concurrent_streams` | 100 | Per-connection concurrent-stream cap, enforced by HTTP.jl via `SETTINGS_MAX_CONCURRENT_STREAMS` (`HTTPjlBackend` only; raises on `PureHTTP2Backend`/`Nghttp2Backend`) |
+| `max_connections`, `max_queued_requests` | — | Connection limits — **not configurable on any backend; explicitly setting them raises `UnsupportedFeatureError`** |
 | `read_header_timeout` | 30 s | Time to read request headers (`HTTPjlBackend` only) |
 | `read_timeout` / `write_timeout` | disabled | Per-IO timeouts (`HTTPjlBackend` only); set for long-lived streams deliberately |
 | `idle_timeout` | none | Idle connection timeout (`HTTPjlBackend` only) |
