@@ -84,6 +84,31 @@ using .TestUtils
     include("port/test_raw.jl")
     include("port/test_load.jl")
 
+    # Phase 3 A1: the csvance suite runs VERBATIM through the compat layer
+    # (src/compat/legacy_api.jl), wrapped in its own module so its
+    # TestRequest/TestResponse (from the regenerated test/gen/test/test_pb.jl)
+    # do not collide with the s-celles suite's Main.TestRequest/TestResponse
+    # (test/unit/test_reflection.jl defines those at Main top level), and so
+    # `import gRPCClient` (no exports) avoids the gRPCServiceCallException
+    # ambiguity (both packages export that name).
+    @eval module CsvanceSuite
+    using Test, gRPCServer, HTTP, Sockets, Dates
+    import gRPCClient
+    import ProtoBuf
+    using ProtoBuf: ProtoDecoder, ProtoEncoder, decode, encode
+    include("gen/test/test_pb.jl")
+    include("testservice.jl")
+    include("test_codegen.jl")
+    include("test_framing.jl")
+    include("test_status.jl")
+    include("test_unit.jl")
+    include("test_integration.jl")
+    include("test_errors.jl")
+    include("test_lifecycle.jl")
+    include("test_raw.jl")
+    include("test_load.jl")
+    end
+
     # Contract tests
     include("contract/test_grpcurl.jl")
 

@@ -110,8 +110,8 @@ end
     catch e
         e
     end
-    @test err isa gRPCServiceCallException
-    @test err.grpc_status == gRPCServer.GRPC_UNIMPLEMENTED
+    @test err isa GRPCError
+    @test err.code == StatusCode.UNIMPLEMENTED
 end
 
 @testset "Streaming registration is gated in v0.1" begin

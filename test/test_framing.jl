@@ -25,7 +25,7 @@
     @test empty_bytes[2:5] == zeros(UInt8, 4)
 
     # Oversize message is rejected.
-    @test_throws gRPCServiceCallException grpc_encode_message_iobuffer(
+    @test_throws GRPCError grpc_encode_message_iobuffer(
         TestResponse(collect(UInt64, 1:1000));
         max_send_message_length = 16,
     )
@@ -64,11 +64,11 @@
     big = IOBuffer()
     write(big, take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:1000)))))
     seekstart(big)
-    @test_throws gRPCServiceCallException read_message!(FrameReader(big, 16))
+    @test_throws GRPCError read_message!(FrameReader(big, 16))
 
     # A frame truncated mid-payload raises rather than returning a short message.
     full = take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:50))))
-    @test_throws gRPCServiceCallException read_message!(
+    @test_throws GRPCError read_message!(
         FrameReader(IOBuffer(full[1:end-3]), 4 * 1024 * 1024),
     )
 
@@ -80,7 +80,7 @@
     extra = IOBuffer()
     write(extra, take!(grpc_encode_message_iobuffer(TestResponse(collect(UInt64, 1:3)))))
     seekstart(extra)
-    @test_throws gRPCServiceCallException expect_half_close!(
+    @test_throws GRPCError expect_half_close!(
         FrameReader(extra, 4 * 1024 * 1024),
     )
 

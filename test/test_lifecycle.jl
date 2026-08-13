@@ -6,9 +6,9 @@
 @testset "parse_grpc_timeout on hostile values" begin
     using gRPCServer: parse_grpc_timeout
 
-    @test parse_grpc_timeout("") == 0
-    @test parse_grpc_timeout("10S") > Int64(time_ns())  # absolute future deadline
-    @test parse_grpc_timeout("0n") >= 0
+    @test parse_grpc_timeout("") === nothing
+    @test parse_grpc_timeout("10S") > now()  # absolute future deadline
+    @test parse_grpc_timeout("0n") !== nothing
 
     for bad in (
         "S",                            # no digits
@@ -29,8 +29,8 @@
         catch e
             e
         end
-        @test err isa gRPCServiceCallException
-        @test err.grpc_status == gRPCServer.GRPC_INVALID_ARGUMENT
+        @test err isa GRPCError
+        @test err.code == StatusCode.INVALID_ARGUMENT
     end
 end
 
@@ -50,8 +50,8 @@ end
     catch e
         e
     end
-    @test err isa gRPCServiceCallException
-    @test err.grpc_status == gRPCServer.GRPC_INVALID_ARGUMENT
+    @test err isa GRPCError
+    @test err.code == StatusCode.INVALID_ARGUMENT
     @test length(fr.buf) <= 4 * _FRAME_READ_CHUNK
 end
 

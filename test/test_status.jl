@@ -17,23 +17,24 @@ end
 
 @testset "grpc-timeout parsing" begin
     using gRPCServer: parse_grpc_timeout
+    using Dates: Second
 
-    @test parse_grpc_timeout("") == 0
-    # A 10-second timeout lands roughly 10s in the future.
-    now = Int64(time_ns())
+    @test parse_grpc_timeout("") === nothing
+    # A 10-second timeout lands roughly 10s in the future (merged strict
+    # contract: DateTime deadline, malformed -> GRPCError(INVALID_ARGUMENT)).
     d = parse_grpc_timeout("10S")
-    @test d > now
-    @test d - now <= 11_000_000_000
-    @test_throws gRPCServiceCallException parse_grpc_timeout("10X")
+    @test d > now()
+    @test d - now() <= Second(11)
+    @test_throws GRPCError parse_grpc_timeout("10X")
     # Unknown unit, missing digits, signed, non-numeric, and >8 digit values are
     # all rejected rather than silently mishandled.
-    @test_throws gRPCServiceCallException parse_grpc_timeout("S")
-    @test_throws gRPCServiceCallException parse_grpc_timeout("-5S")
-    @test_throws gRPCServiceCallException parse_grpc_timeout("1.5S")
-    @test_throws gRPCServiceCallException parse_grpc_timeout("123456789S")
+    @test_throws GRPCError parse_grpc_timeout("S")
+    @test_throws GRPCError parse_grpc_timeout("-5S")
+    @test_throws GRPCError parse_grpc_timeout("1.5S")
+    @test_throws GRPCError parse_grpc_timeout("123456789S")
     # An in-range but absurd value would overflow Int64 nanoseconds; it must map
     # to INVALID_ARGUMENT, not a silently wrapped (negative/garbage) deadline.
-    @test_throws gRPCServiceCallException parse_grpc_timeout("99999999H")
+    @test_throws GRPCError parse_grpc_timeout("99999999H")
 end
 
 @testset "Content-type acceptance" begin

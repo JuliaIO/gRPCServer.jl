@@ -673,10 +673,15 @@ function serve!(
     # for "bind an ephemeral port". Construct with a placeholder and let
     # HTTP.listen! bind port 0 at start!.
     construct_port = port == 0 ? 1 : Int(port)
+    # The merged ServerConfig has ONE max_message_size applied to both receive
+    # and send; the legacy gRPCRouter had separate caps. Enforce the stricter of
+    # the two on both directions (never exceeds either router cap).
+    max_message_size = min(router.max_receive_message_length, router.max_send_message_length)
     server = GRPCServer(
         String(host),
         construct_port;
         context = context,
+        max_message_size = max_message_size,
         max_concurrent_requests = max_concurrent_requests == 0 ? nothing : Int(max_concurrent_requests),
         tls = tls_cfg,
         idle_timeout = idle_timeout isa Nothing ? nothing : Float64(idle_timeout),
@@ -720,14 +725,26 @@ end
 # Graceful shutdown (the legacy csvance close semantics; stop! bounds its drain
 # so close always terminates). For an immediate shutdown use HTTP.forceclose.
 function Base.close(server::GRPCServer)
-    stop!(server)
+    try
+        stop!(server)
+    catch e
+        # The merged stop! is idempotence-tolerant only up to a point: a second
+        # stop! while a graceful drain is already running (state STOPPING) throws
+        # InvalidServerStateError. For close semantics the server stopping is the
+        # desired outcome either way.
+        e isa InvalidServerStateError || rethrow()
+    end
     return nothing
 end
 
 # Immediate shutdown (verbatim test_lifecycle.jl calls HTTP.forceclose on the
 # serve! result).
 function HTTP.forceclose(server::GRPCServer)
-    stop!(server; force = true)
+    try
+        stop!(server; force = true)
+    catch e
+        e isa InvalidServerStateError || rethrow()
+    end
     return nothing
 end
 

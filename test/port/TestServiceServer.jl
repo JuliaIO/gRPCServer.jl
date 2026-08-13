@@ -24,8 +24,10 @@ import gRPCClient
 using gRPCServer
 
 if !isdefined(@__MODULE__, :TestRequest)
-    # Resolve gRPCClient's repo root from the package path, then its test tree.
-    include(joinpath(dirname(dirname(pathof(gRPCClient))), "test", "gen", "test", "test_pb.jl"))
+    # Our regenerated test/gen/test/test_pb.jl (Phase 2 codegen) carries BOTH the
+    # message types AND the gRPCClient client stubs in one file — the canonical
+    # source for the ported tests.
+    include(joinpath(@__DIR__, "..", "gen", "test", "test_pb.jl"))
 end
 
 export TestRequest, TestResponse
