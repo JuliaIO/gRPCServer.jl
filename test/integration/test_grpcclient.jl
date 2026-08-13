@@ -119,7 +119,7 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                     catch e
                         e
                     end
-                    @test ex isa gRPCServiceCallException
+                    @test ex isa gRPCClient.gRPCServiceCallException
                     @test ex.grpc_status == 5  # NOT_FOUND
                     @test occursin("not found", ex.message)
                 end
@@ -132,7 +132,7 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                     catch e
                         e
                     end
-                    @test ex isa gRPCServiceCallException
+                    @test ex isa gRPCClient.gRPCServiceCallException
                     @test ex.grpc_status == 3  # INVALID_ARGUMENT
                 end
             end
@@ -241,7 +241,7 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                     catch e
                         e
                     end
-                    @test ex isa gRPCServiceCallException
+                    @test ex isa gRPCClient.gRPCServiceCallException
                     @test ex.grpc_status == 13  # INTERNAL
                 end
             end
@@ -270,7 +270,7 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
                     catch e
                         e
                     end
-                    @test ex isa gRPCServiceCallException
+                    @test ex isa gRPCClient.gRPCServiceCallException
                     @test ex.grpc_status == 5  # NOT_FOUND
                     @test occursin("not found", ex.message)
                 end
