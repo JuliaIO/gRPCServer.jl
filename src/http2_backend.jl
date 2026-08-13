@@ -69,11 +69,26 @@ Represents a single in-flight gRPC call (one HTTP/2 stream) as seen by the gRPC
 dispatch layer, independent of which HTTP/2 backend produced it.
 
 A backend adapter presents each incoming call as an `AbstractGRPCStream` and
-implements the stream operations: `grpc_path`, `request_metadata`,
+implements the stream operations: `grpc_path`, `grpc_method`, `request_metadata`,
 `read_message!`, `is_cancelled`, `send_response_headers!`, `send_message!`,
 `send_trailers!`, and `reset!`.
 """
 abstract type AbstractGRPCStream end
+
+"""
+    grpc_method(s::AbstractGRPCStream) -> String
+
+The HTTP method of the request (the `":method"` pseudo-header), used by
+[`dispatch_grpc_call`](@ref) for the strict method check (gRPC requires
+`POST`; anything else is answered with HTTP 405 + an `INTERNAL` gRPC status).
+
+Backends that cannot report the request method default to `"POST"` (the only
+valid value), so the 405 rejection never fires for them. `HTTPjlGRPCStream`
+reads the method from HTTP.jl's parsed request (HTTP.jl keeps pseudo-headers
+out of `message.headers`); the PureHTTP2 adapter reports the method from the
+stream's `:method` pseudo-header when present.
+"""
+grpc_method(::AbstractGRPCStream)::String = "POST"
 
 """
     serve_grpc(backend::AbstractHTTP2Backend, server, on_call) -> Nothing

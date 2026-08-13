@@ -120,6 +120,12 @@ HTTPjlGRPCStream(stream::HTTP.Stream) = HTTPjlGRPCStream(stream, 4 * 1024 * 1024
 
 grpc_path(s::HTTPjlGRPCStream)::String = String(s.stream.message.target)
 
+# HTTP.jl keeps pseudo-headers out of `message.headers` (so `request_metadata`
+# never contains ":method"), but stores the parsed request method in the
+# message's dedicated `method` field — that is what the strict gRPC method
+# check (POST only) reads.
+grpc_method(s::HTTPjlGRPCStream)::String = String(s.stream.message.method)
+
 function request_metadata(s::HTTPjlGRPCStream)
     return [(lowercase(String(k)), String(v)) for (k, v) in s.stream.message.headers]
 end

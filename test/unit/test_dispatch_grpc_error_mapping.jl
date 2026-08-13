@@ -24,24 +24,38 @@ using gRPCServer
 using Sockets
 
 # Minimal AbstractGRPCStream backed by the real FrameReader; records everything
-# dispatch sends back.
+# dispatch sends back. `metadata` is the request_metadata the dispatch layer
+# sees (defaults to a well-formed gRPC request); `cancelled` drives the
+# is_cancelled accessor.
 mutable struct FrameDrivenStream <: gRPCServer.AbstractGRPCStream
     path::String
     fr::Any # gRPCServer.FrameReader over the request body
+    metadata::Vector{Tuple{String, String}}
+    cancelled::Bool
     headers::Vector{Tuple{String, String}}
     messages::Vector{Vector{UInt8}}
     trailers::Vector{Tuple{String, String}}
 end
 
-function FrameDrivenStream(path::String, body::Vector{UInt8}; max_receive::Integer = 4 * 1024 * 1024)
+function FrameDrivenStream(path::String, body::Vector{UInt8};
+                           max_receive::Integer = 4 * 1024 * 1024,
+                           metadata::Vector{Tuple{String, String}} =
+                               [("content-type", "application/grpc"), ("te", "trailers")],
+                           cancelled::Bool = false)
     fr = gRPCServer.FrameReader(IOBuffer(body), Int(max_receive))
-    return FrameDrivenStream(path, fr, Tuple{String, String}[], Vector{UInt8}[], Tuple{String, String}[])
+    return FrameDrivenStream(path, fr, metadata, cancelled,
+                             Tuple{String, String}[], Vector{UInt8}[], Tuple{String, String}[])
 end
 
 gRPCServer.grpc_path(s::FrameDrivenStream) = s.path
-gRPCServer.request_metadata(s::FrameDrivenStream) =
-    [("content-type", "application/grpc"), ("te", "trailers")]
-gRPCServer.is_cancelled(s::FrameDrivenStream) = false
+gRPCServer.request_metadata(s::FrameDrivenStream) = s.metadata
+function gRPCServer.grpc_method(s::FrameDrivenStream)
+    for (name, value) in s.metadata
+        name == ":method" && return value
+    end
+    return "POST"
+end
+gRPCServer.is_cancelled(s::FrameDrivenStream) = s.cancelled
 gRPCServer.read_message!(s::FrameDrivenStream) = gRPCServer.read_message!(s.fr)
 gRPCServer.expect_half_close!(s::FrameDrivenStream) = gRPCServer.expect_half_close!(s.fr)
 function gRPCServer.send_response_headers!(s::FrameDrivenStream, headers)
@@ -82,6 +96,8 @@ function register_raw_service!(
     server::GRPCServer;
     method_type::gRPCServer.MethodType.T = gRPCServer.MethodType.UNARY,
     handler = nothing,
+    raw_request::Bool = false,
+    raw_response::Bool = false,
 )
     h = if handler !== nothing
         handler
@@ -93,7 +109,8 @@ function register_raw_service!(
     gRPCServer.register_service!(server.dispatcher, ServiceDescriptor(
         "test.Hostile",
         Dict("Echo" => MethodDescriptor(
-            "Echo", method_type, "Vector{UInt8}", "Vector{UInt8}", h,
+            "Echo", method_type, "Vector{UInt8}", "Vector{UInt8}", h;
+            raw_request = raw_request, raw_response = raw_response,
         )),
         nothing,
     ))
@@ -201,5 +218,212 @@ end
         @test length(s.messages) == 1
         @test s.messages[1] == UInt8[0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x02, 0x03]
         @test (":status", "200") in s.headers
+    end
+end
+
+@testset "L2 server features: 405/415, metadata-on-wire, deadline, shedding, payload, raw" begin
+    @testset "non-POST method -> HTTP 405 + INTERNAL trailer" begin
+        server = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]);
+                              metadata = [(":method", "GET"),
+                                          ("content-type", "application/grpc"),
+                                          ("te", "trailers")])
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test (":status", "405") in s.headers
+        @test ("content-type", "application/grpc") in s.headers
+        @test grpc_status(s) == Int(StatusCode.INTERNAL)
+        @test grpc_message(s) == "Method not allowed"
+        @test isempty(s.messages) # no handler ran
+        @test one_headers_block(s)
+    end
+
+    @testset "invalid or missing content-type -> HTTP 415 + INTERNAL trailer" begin
+        for md in (
+            [("content-type", "text/plain"), ("te", "trailers")],
+            [("te", "trailers")], # no content-type at all
+        )
+            server = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+            s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]); metadata = md)
+            gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+            @test (":status", "415") in s.headers
+            @test grpc_status(s) == Int(StatusCode.INTERNAL)
+            @test grpc_message(s) == "Unsupported content type"
+            @test isempty(s.messages)
+            @test one_headers_block(s)
+        end
+    end
+
+    @testset "handler response headers and trailers reach the wire (unary)" begin
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            handler = (ctx, req) -> begin
+                set_header!(ctx, "x-custom", "v")
+                set_trailer!(ctx, "x-tail", "t")
+                req
+            end,
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01, 0x02]))
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.OK)
+        @test ("x-custom", "v") in s.headers
+        @test ("x-tail", "t") in s.trailers
+        @test ("grpc-status", "0") in s.trailers
+        @test length(s.messages) == 1 # data still sent
+    end
+
+    @testset "set_trailer! reaches the wire on server-streaming" begin
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            method_type = gRPCServer.MethodType.SERVER_STREAMING,
+            handler = (ctx, req, stream) -> begin
+                set_trailer!(ctx, "x-tail", "t")
+                send!(stream, UInt8[0x01])
+                nothing
+            end,
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.OK)
+        @test ("x-tail", "t") in s.trailers
+        @test length(s.messages) == 1
+    end
+
+    @testset "grpc-timeout 0S -> DEADLINE_EXCEEDED even when the handler returns OK" begin
+        server = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]);
+                              metadata = [("content-type", "application/grpc"),
+                                          ("te", "trailers"),
+                                          ("grpc-timeout", "0S")])
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.DEADLINE_EXCEEDED)
+        @test grpc_message(s) == "Deadline exceeded."
+    end
+
+    @testset "cancelled stream: ctx.cancelled observed by handler, call still completes" begin
+        got_cancel = Ref(false)
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            handler = (ctx, req) -> begin
+                got_cancel[] = is_cancelled(ctx)
+                req
+            end,
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]); cancelled = true)
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test got_cancel[] == true  # dispatch mapped is_cancelled(gs) onto ctx
+        @test grpc_status(s) == Int(StatusCode.OK) # and the call completes normally
+        @test length(s.messages) == 1
+    end
+
+    @testset "load shedding: max_concurrent_requests cap" begin
+        # limit 0: unlimited (legacy csvance semantics — 0 means no cap).
+        server = register_raw_service!(GRPCServer("127.0.0.1", 50051; max_concurrent_requests = 0))
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.OK)
+        @test server.shed_total[] == 0
+        @test server.inflight[] == 0
+
+        # cap 1 with one slot already taken (simulated in-flight call): the next
+        # call is shed immediately with RESOURCE_EXHAUSTED.
+        server1 = register_raw_service!(GRPCServer("127.0.0.1", 50051; max_concurrent_requests = 1))
+        Threads.atomic_add!(server1.inflight, 1) # simulate an in-flight request
+        s1 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server1, s1, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s1) == Int(StatusCode.RESOURCE_EXHAUSTED)
+        @test grpc_message(s1) == "Server at maximum concurrent request capacity"
+        @test isempty(s1.messages)
+        @test one_headers_block(s1)
+        @test (":status", "200") in s1.headers
+        @test server1.shed_total[] == 1
+        @test server1.inflight[] == 1 # the simulated in-flight call is untouched
+
+        # nothing (default): no gating, the call succeeds.
+        server2 = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+        s2 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server2, s2, PeerInfo(IPv4(0), 0))
+        @test grpc_status(s2) == Int(StatusCode.OK)
+        @test server2.shed_total[] == 0
+        @test server2.inflight[] == 0
+
+        # limit 2 with two sequential calls: both admitted, inflight back to 0.
+        server3 = register_raw_service!(GRPCServer("127.0.0.1", 50051; max_concurrent_requests = 2))
+        for _ in 1:2
+            s3 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+            gRPCServer.dispatch_grpc_call(server3, s3, PeerInfo(IPv4(0), 0))
+            @test grpc_status(s3) == Int(StatusCode.OK)
+        end
+        @test server3.inflight[] == 0
+        @test server3.shed_total[] == 0
+    end
+
+    @testset "server context payload threads into ServerContext.payload" begin
+        seen = Ref{Any}(nothing)
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051; context = "hello"),
+            handler = (ctx, req) -> begin
+                seen[] = ctx.payload
+                req
+            end,
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test seen[] == "hello"
+        @test grpc_status(s) == Int(StatusCode.OK)
+
+        # Default: no payload set.
+        server2 = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+        @test server2.context === nothing
+        s2 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server2, s2, PeerInfo(IPv4(0), 0))
+        @test grpc_status(s2) == Int(StatusCode.OK)
+    end
+
+    @testset "raw_request: client-streaming handler receives verbatim frame payloads" begin
+        recorded = Ref{Any}(nothing)
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            method_type = gRPCServer.MethodType.CLIENT_STREAMING,
+            raw_request = true,
+            handler = (ctx, stream) -> begin
+                msgs = Vector{Vector{UInt8}}()
+                for m in stream
+                    push!(msgs, m)
+                end
+                recorded[] = msgs
+                UInt8[]
+            end,
+        )
+        body = vcat(framed(UInt8[0x01, 0x02]), framed(UInt8[0x03, 0x04, 0x05]))
+        s = FrameDrivenStream("/test.Hostile/Echo", body)
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.OK)
+        @test recorded[] == [UInt8[0x01, 0x02], UInt8[0x03, 0x04, 0x05]]
+    end
+
+    @testset "raw_response: server-streaming handler output framed verbatim" begin
+        payload = UInt8[0xDE, 0xAD, 0xBE, 0xEF]
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            method_type = gRPCServer.MethodType.SERVER_STREAMING,
+            raw_response = true,
+            handler = (ctx, req, stream) -> (send!(stream, payload); nothing),
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        @test grpc_status(s) == Int(StatusCode.OK)
+        @test length(s.messages) == 1
+        @test s.messages[1] == framed(payload)
     end
 end

@@ -30,6 +30,8 @@ end
 
 grpc_path(s::PureHTTP2GRPCStream)::String = get_path(s.stream)
 
+grpc_method(s::PureHTTP2GRPCStream)::String = something(get_method(s.stream), "POST")
+
 request_metadata(s::PureHTTP2GRPCStream) = get_metadata(s.stream)
 
 # Mirrors the existing reset check in process_completed_streams! (server.jl).

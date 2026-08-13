@@ -34,6 +34,9 @@ The main gRPC server managing connections, services, and lifecycle.
 - `status::ServerStatus.T`: Current lifecycle state
 - `dispatcher::RequestDispatcher`: Request dispatcher
 - `health_status::Dict{String, HealthStatus.T}`: Per-service health status
+- `inflight::Base.Threads.Atomic{Int}`: Requests currently admitted into dispatch (load shedding)
+- `shed_total::Base.Threads.Atomic{Int}`: Total requests rejected at the concurrency cap
+- `context::Any`: Server-level payload threaded into each request's `ServerContext.payload`
 
 # Example
 ```julia
@@ -67,6 +70,15 @@ mutable struct GRPCServer
     # Handle to the HTTP.jl server task when using HTTPjlBackend (nothing otherwise)
     backend_handle::Any
 
+    # Load-shedding counters (feature 4): in-flight admitted requests and total
+    # shed at the max_concurrent_requests cap.
+    inflight::Base.Threads.Atomic{Int}
+    shed_total::Base.Threads.Atomic{Int}
+
+    # Server-level payload threaded into every request's ServerContext.payload
+    # (feature 6). Not touched by the transport.
+    context::Any
+
     function GRPCServer(
         host::String,
         port::Int;
@@ -91,7 +103,8 @@ mutable struct GRPCServer
             CompressionCodec.DEFLATE,
             CompressionCodec.IDENTITY
         ],
-        http2_backend::AbstractHTTP2Backend=HTTPjlBackend()
+        http2_backend::AbstractHTTP2Backend=HTTPjlBackend(),
+        context::Any=nothing
     )
         # Validate host and port
         if port < 1 || port > 65535
@@ -132,7 +145,10 @@ mutable struct GRPCServer
             nothing,
             nothing,  # tls_transport - initialized in start!() when TLS configured
             http2_backend,
-            nothing   # backend_handle - set in start!() by serve_grpc backends
+            nothing,   # backend_handle - set in start!() by serve_grpc backends
+            Base.Threads.Atomic{Int}(0),  # inflight (load-shedding counter)
+            Base.Threads.Atomic{Int}(0),  # shed_total (load-shedding counter)
+            context,                      # threaded into ServerContext.payload
         )
 
         # Add logging interceptor if requested
@@ -1061,14 +1077,14 @@ function handle_server_streaming(
 
     try
         # Deserialize the single request
-        request = deserialize_message(request_data, method_desc.input_type)
+        request = deserialize_message(request_data, method_desc.input_type; raw = method_desc.raw_request)
 
         # Get the output type for serialization
         output_type = method_desc.output_julia_type
 
         # Create send callback for the ServerStream
         send_callback = function(message, compress)
-            buf = grpc_encode_message_iobuffer(serialize_message(message))
+            buf = grpc_encode_message_iobuffer(serialize_message(message; raw = method_desc.raw_response))
             send_message!(s, take!(buf))
         end
 
@@ -1254,7 +1270,7 @@ function handle_client_streaming(
             msg_data = messages[message_index[]]
             message_index[] += 1
             # Deserialize message
-            return deserialize_message(msg_data, method_desc.input_type)
+            return deserialize_message(msg_data, method_desc.input_type; raw = method_desc.raw_request)
         end
 
         # Create is_cancelled callback
@@ -1426,7 +1442,7 @@ function handle_bidi_streaming(
             end
             msg_data = messages[message_index[]]
             message_index[] += 1
-            return deserialize_message(msg_data, method_desc.input_type)
+            return deserialize_message(msg_data, method_desc.input_type; raw = method_desc.raw_request)
         end
 
         # Create send callback for responses
@@ -1435,7 +1451,7 @@ function handle_bidi_streaming(
                 @warn "Attempted to send message after stream closed" stream_id=stream.id
                 return
             end
-            buf = grpc_encode_message_iobuffer(serialize_message(message))
+            buf = grpc_encode_message_iobuffer(serialize_message(message; raw = method_desc.raw_response))
             send_message!(s, take!(buf))
         end
 
@@ -1504,7 +1520,8 @@ end
 # until that serve loop is migrated too.
 # ---------------------------------------------------------------------------
 
-function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String)::ServerContext
+function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String;
+                                       payload::Any = nothing)::ServerContext
     md = Dict{String, Union{String, Vector{UInt8}}}()
     timeout_header = nothing
     for (name, value) in metadata
@@ -1519,7 +1536,8 @@ function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String)::
         end
     end
     deadline = timeout_header !== nothing ? parse_grpc_timeout(timeout_header) : nothing
-    return ServerContext(; method=method, peer=peer, deadline=deadline, metadata=md)
+    return ServerContext(; method=method, peer=peer, deadline=deadline, metadata=md,
+                         payload=payload)
 end
 
 function _grpc_response_content_type(metadata)::String
@@ -1539,20 +1557,52 @@ _grpc_ok_headers(content_type) = [
 
 function _grpc_status_trailers(status::StatusCode.T, message::String)
     trailers = [("grpc-status", string(Int(status)))]
-    isempty(message) || push!(trailers, ("grpc-message", message))
+    # Percent-encode per the gRPC spec: grpc-message is ASCII-0x20..0x7E plus
+    # %XX escapes for anything else. Plain printable messages are unchanged.
+    isempty(message) || push!(trailers, ("grpc-message", percent_encode(message)))
     return trailers
+end
+
+# Finish-path deadline mapping, ported from the legacy `_finish_error`
+# (src/Server.jl): once the request's grpc-timeout deadline has passed, the
+# call MUST fail with DEADLINE_EXCEEDED even if the handler returned OK. A
+# status the handler already produced as DEADLINE_EXCEEDED/CANCELLED is left
+# untouched (idempotent — the handler's message wins).
+function _apply_deadline(ctx::ServerContext, status::StatusCode.T, message::String)::Tuple{StatusCode.T, String}
+    if ctx.deadline !== nothing && now() >= ctx.deadline
+        if status in (StatusCode.DEADLINE_EXCEEDED, StatusCode.CANCELLED)
+            return (status, message)
+        end
+        return (StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded.")
+    end
+    return (status, message)
 end
 
 # Unary-shaped response (headers + optional data + trailers) emitted purely
 # through the AbstractGRPCStream ops. Framing happens here, once, via
 # grpc_encode_message_iobuffer (the adapters write already-framed bytes).
-function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc", max_send_message_length::Integer=4 * 1024 * 1024)
-    send_response_headers!(gs, _grpc_ok_headers(content_type))
+#
+# When `ctx` is provided (the normal happy path), the handler's
+# ServerContext.set_header!/set_trailer! output is merged onto the wire:
+# response_headers are vcat'ed after the gRPC headers block, and the trailers
+# come from get_response_trailers(ctx, ...) (ctx.trailers + percent-encoded
+# grpc-message + grpc-status). When `ctx === nothing` (rejection paths with no
+# handler), the current behavior is unchanged.
+function send_grpc_response_generic(gs::AbstractGRPCStream, status::StatusCode.T, message::String, data::Vector{UInt8}; content_type::String="application/grpc", max_send_message_length::Integer=4 * 1024 * 1024, ctx::Union{ServerContext,Nothing}=nothing)
+    if ctx === nothing
+        send_response_headers!(gs, _grpc_ok_headers(content_type))
+    else
+        send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
+    end
     # A valid proto3 message may encode to zero bytes when every field has its default value.
     # Successful unary calls must still emit its five-byte gRPC message frame. A trailers-only
     # success is interpreted by standard clients as "no response message" (`None` in Python).
     (status == StatusCode.OK || !isempty(data)) && send_message!(gs, take!(grpc_encode_message_iobuffer(data; max_send_message_length = max_send_message_length)))
-    send_trailers!(gs, _grpc_status_trailers(status, message))
+    if ctx === nothing
+        send_trailers!(gs, _grpc_status_trailers(status, message))
+    else
+        send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
+    end
     return nothing
 end
 
@@ -1585,35 +1635,91 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
     metadata = request_metadata(gs)
     content_type = _grpc_response_content_type(metadata)
 
-    result = lookup_method(server.dispatcher.registry, path)
-    if result === nothing
-        # UNIMPLEMENTED as headers + trailers (grpc-status in a trailing HEADERS
-        # block) — universally parsed by gRPC clients, so e.g. grpcurl falls back
-        # from reflection v1 to v1alpha cleanly.
-        send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
-        send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Method not found: $path"))
+    # Strict method mapping at the front, before routing: gRPC requires POST.
+    # HTTP/2 pseudo-headers are not part of request_metadata (HTTP.jl keeps them
+    # out of `message.headers`), so the method comes from the backend's
+    # `grpc_method` accessor (defaults to "POST" for backends that cannot report
+    # it, so the 405 rejection never fires for them).
+    if grpc_method(gs) != "POST"
+        send_response_headers!(gs, [(":status", "405"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.INTERNAL, "Method not allowed"))
         return nothing
     end
-    service, method_desc = result
 
-    if server.config.log_requests
-        @info "gRPC request" method=path peer=peer
+    # Strict content-type mapping: the gRPC spec requires an application/grpc
+    # content-type (optionally with a +format suffix or parameters). Absent or
+    # non-gRPC content-type -> HTTP 415 + INTERNAL trailer.
+    request_ct = nothing
+    for (name, value) in metadata
+        if name == "content-type"
+            request_ct = value
+            break
+        end
+    end
+    if request_ct === nothing || !_is_grpc_content_type(request_ct)
+        send_response_headers!(gs, [(":status", "415"), ("content-type", content_type)])
+        send_trailers!(gs, _grpc_status_trailers(StatusCode.INTERNAL, "Unsupported content type"))
+        return nothing
     end
 
-    # A GRPCError escaping the framing layer (hostile request frames, send-side
-    # oversize, and — once the strict timeout parser lands — a malformed
-    # grpc-timeout) must reach the client as a proper gRPC status in a trailers
-    # block. Without this mapping the exception escapes to the transport, which
-    # answers a bare HTTP/2 500 with no grpc-status and closes the connection:
-    # a client that trusts transport success would read that as a silent empty
-    # success. Headers may already have been sent (send-side oversize throws
-    # inside `send_grpc_response_generic` after its headers block, or inside a
-    # streaming `send_cb` closure), so only emit a headers block when the
-    # response did not get that far; the trailers are best-effort because the
-    # peer may have gone away. Non-GRPCError exceptions still propagate.
+    # Load-shedding admission gate, before method lookup: past the
+    # max_concurrent_requests cap a call is rejected immediately with a
+    # trailers-only RESOURCE_EXHAUSTED. No request queue is implemented — see
+    # the ServerConfig.max_queued_requests doc comment. `nothing` or 0 =
+    # unlimited (legacy csvance Server.jl semantics: 0 means no cap).
+    admitted = false
+    if server.config.max_concurrent_requests !== nothing && server.config.max_concurrent_requests > 0
+        # atomic_add! returns the PRIOR count, so a prior value at or above the
+        # limit means the new request makes us full (legacy Server.jl
+        # admission semantics).
+        if Threads.atomic_add!(server.inflight, 1) >= server.config.max_concurrent_requests
+            Threads.atomic_sub!(server.inflight, 1)
+            Threads.atomic_add!(server.shed_total, 1)
+            send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+            send_trailers!(gs, _grpc_status_trailers(StatusCode.RESOURCE_EXHAUSTED, "Server at maximum concurrent request capacity"))
+            return nothing
+        end
+        admitted = true
+    end
+
+    # The outer try/finally wraps the WHOLE rest of the call — routing, the
+    # item-0 GRPCError mapping, early returns, and rethrows — so the admission
+    # slot is always released exactly once. `headers_sent` must be declared
+    # before the try so the catch block can see it.
     headers_sent = false
     try
-        ctx = _grpc_context_from_metadata(metadata, peer, path)
+        result = lookup_method(server.dispatcher.registry, path)
+        if result === nothing
+            # UNIMPLEMENTED as headers + trailers (grpc-status in a trailing HEADERS
+            # block) — universally parsed by gRPC clients, so e.g. grpcurl falls back
+            # from reflection v1 to v1alpha cleanly.
+            send_response_headers!(gs, [(":status", "200"), ("content-type", content_type)])
+            send_trailers!(gs, _grpc_status_trailers(StatusCode.UNIMPLEMENTED, "Method not found: $path"))
+            return nothing
+        end
+        service, method_desc = result
+
+        if server.config.log_requests
+            @info "gRPC request" method=path peer=peer
+        end
+
+        # A GRPCError escaping the framing layer (hostile request frames, send-side
+        # oversize, and a malformed grpc-timeout) must reach the client as a proper
+        # gRPC status in a trailers block. Without this mapping the exception escapes
+        # to the transport, which answers a bare HTTP/2 500 with no grpc-status and
+        # closes the connection: a client that trusts transport success would read
+        # that as a silent empty success. Headers may already have been sent
+        # (send-side oversize throws inside `send_grpc_response_generic` after its
+        # headers block, or inside a streaming `send_cb` closure), so only emit a
+        # headers block when the response did not get that far; the trailers are
+        # best-effort because the peer may have gone away. Non-GRPCError exceptions
+        # still propagate.
+        ctx = _grpc_context_from_metadata(metadata, peer, path; payload = server.context)
+        # Keep the handler-observed cancellation state consistent with the
+        # transport: the client may have reset the stream before ctx was built.
+        if is_cancelled(gs)
+            ctx.cancelled = true
+        end
         max_send = server.config.max_message_size
         mt = method_desc.method_type
         if mt == MethodType.UNARY
@@ -1629,8 +1735,9 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             # frames (bounded drain).
             expect_half_close!(gs)
             status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
+            status, message = _apply_deadline(ctx, status, message)
             headers_sent = true
-            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
+            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send, ctx=ctx)
 
         elseif mt == MethodType.SERVER_STREAMING
             data = read_message!(gs)
@@ -1641,7 +1748,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 return nothing
             end
             expect_half_close!(gs)
-            send_response_headers!(gs, _grpc_ok_headers(content_type))
+            send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
             headers_sent = true
             encode_buf = IOBuffer()
             send_cb = (message, _compress) -> begin
@@ -1650,38 +1757,46 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             end
             close_cb = () -> nothing
             status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
-            send_trailers!(gs, _grpc_status_trailers(status, message))
+            status, message = _apply_deadline(ctx, status, message)
+            send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
 
         elseif mt == MethodType.CLIENT_STREAMING
             # Lazy receive: read one request at a time (the client half-closes when done).
             recv_cb = function()
                 m = read_message!(gs)
                 m === nothing && return nothing
-                return deserialize_message(m, method_desc.input_type)
+                return deserialize_message(m, method_desc.input_type; raw = method_desc.raw_request)
             end
-            cancel_cb = () -> is_cancelled(gs)
+            cancel_cb = function()
+                cancelled = is_cancelled(gs)
+                cancelled && (ctx.cancelled = true)
+                return cancelled
+            end
             status, message, resp = dispatch_client_streaming(server.dispatcher, ctx, recv_cb, cancel_cb)
+            status, message = _apply_deadline(ctx, status, message)
             headers_sent = true
-            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send)
+            send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send, ctx=ctx)
             # The handler may have returned before the client half-closed; abort the
             # read side so the transport does not see an abandoned request.
             abort_request!(gs)
 
         elseif mt == MethodType.BIDI_STREAMING
-            send_response_headers!(gs, _grpc_ok_headers(content_type))
+            send_response_headers!(gs, vcat(_grpc_ok_headers(content_type), get_response_headers(ctx)))
             headers_sent = true
             if service.name == "grpc.reflection.v1alpha.ServerReflection"
                 # Reflection is request-response: handle each request incrementally and
                 # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
                 while (m = read_message!(gs)) !== nothing
                     status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
+                    status, message = _apply_deadline(ctx, status, message)
                     if status != StatusCode.OK
-                        send_trailers!(gs, _grpc_status_trailers(status, message))
+                        send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
                         return nothing
                     end
                     isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
                 end
-                send_trailers!(gs, _grpc_status_trailers(StatusCode.OK, ""))
+                final_status, final_message = _apply_deadline(ctx, StatusCode.OK, "")
+                send_trailers!(gs, get_response_trailers(ctx, Int(final_status), final_message))
                 return nothing
             end
             # User-defined bidi: read each request lazily and emit responses live, so
@@ -1689,7 +1804,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             recv_cb = function()
                 m = read_message!(gs)
                 m === nothing && return nothing
-                return deserialize_message(m, method_desc.input_type)
+                return deserialize_message(m, method_desc.input_type; raw = method_desc.raw_request)
             end
             encode_buf = IOBuffer()
             send_cb = (message, _compress) -> begin
@@ -1697,9 +1812,14 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 send_message!(gs, take!(encode_buf))
             end
             close_cb = () -> nothing
-            cancel_cb = () -> is_cancelled(gs)
+            cancel_cb = function()
+                cancelled = is_cancelled(gs)
+                cancelled && (ctx.cancelled = true)
+                return cancelled
+            end
             status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
-            send_trailers!(gs, _grpc_status_trailers(status, message))
+            status, message = _apply_deadline(ctx, status, message)
+            send_trailers!(gs, get_response_trailers(ctx, Int(status), message))
             # The handler may have returned before the client half-closed; abort the
             # read side so the transport does not see an abandoned request.
             abort_request!(gs)
@@ -1725,6 +1845,10 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             return nothing
         end
         rethrow()
+    finally
+        # Always release the admission slot: on the mapped-GRPCError path, on
+        # early returns, and on rethrow alike.
+        admitted && Threads.atomic_sub!(server.inflight, 1)
     end
     return nothing
 end

@@ -106,8 +106,10 @@ Configuration container for gRPC server options.
 ## Connection Limits
 - `max_connections::Union{Int, Nothing}`: Maximum concurrent connections (nothing = unlimited)
 - `max_concurrent_streams::Int`: Maximum streams per connection (default: 100)
-- `max_concurrent_requests::Union{Int, Nothing}`: Maximum concurrent requests (nothing = unlimited)
-- `max_queued_requests::Int`: Maximum queued requests when at capacity (default: 1000)
+- `max_concurrent_requests::Union{Int, Nothing}`: Maximum concurrent requests (nothing or 0 = unlimited, matching the legacy csvance semantics; default: nothing)
+- `max_queued_requests::Int`: **NOT IMPLEMENTED** — accepted for API compatibility only. No request
+  queue exists: a call arriving past `max_concurrent_requests` is shed immediately with a trailers-only
+  `RESOURCE_EXHAUSTED` status (no queueing, no waiting). The value has no effect (default: 1000)
 
 ## Message Limits
 - `max_message_size::Int`: Maximum message size in bytes (default: 4MB)

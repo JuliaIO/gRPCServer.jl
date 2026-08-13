@@ -99,6 +99,29 @@ using gRPCServer
         @test get_health(server, "unknown.Service") == HealthStatus.SERVICE_UNKNOWN
     end
 
+    @testset "Load-shedding counters" begin
+        server = GRPCServer("0.0.0.0", 50051; max_concurrent_requests = 4)
+        @test server.inflight isa Base.Threads.Atomic{Int}
+        @test server.shed_total isa Base.Threads.Atomic{Int}
+        @test server.inflight[] == 0
+        @test server.shed_total[] == 0
+        @test server.config.max_concurrent_requests == 4
+
+        # Default: unlimited (nothing); counters still present and zeroed.
+        server2 = GRPCServer("0.0.0.0", 50051)
+        @test server2.config.max_concurrent_requests === nothing
+        @test server2.inflight[] == 0
+        @test server2.shed_total[] == 0
+    end
+
+    @testset "Server context payload" begin
+        server = GRPCServer("0.0.0.0", 50051; context = "hello")
+        @test server.context == "hello"
+
+        server2 = GRPCServer("0.0.0.0", 50051)
+        @test server2.context === nothing
+    end
+
     @testset "Interceptor Registration" begin
         server = GRPCServer("0.0.0.0", 50051)
 
