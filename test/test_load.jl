@@ -126,12 +126,32 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
         end
 
         @static if VERSION >= v"1.12"
+            # This section is migrated verbatim from gRPCClient's own suite, which
+            # hardens it two ways (mirrored here):
+            #
+            # * The streaming stress tests move ~1000 messages through a single
+            #   call, and gRPCClient's default 10s deadline would close the stream
+            #   mid-test on a slow CI runner ("the call's own DEADLINE_EXCEEDED
+            #   then closes the stream mid-test"). Give them a deadline generous
+            #   enough to only trip when something is truly wedged.
+            # * take! on a dead stream throws a bare InvalidStateException;
+            #   take_or_diagnose surfaces the request's real failure through
+            #   grpc_async_await instead (deadline exceeded, a server error, a
+            #   transport reset, ...).
+            stream_test_deadline = 300.0
+            take_or_diagnose = (req, channel) -> try
+                take!(channel)
+            catch
+                gRPCClient.grpc_async_await(req)
+                rethrow()
+            end
+
             @testset "Response Streaming" begin
-                client = TestService_TestServerStreamRPC_Client("127.0.0.1", port)
+                client = TestService_TestServerStreamRPC_Client("127.0.0.1", port; deadline = stream_test_deadline)
                 response_c = Channel{TestResponse}(N)
                 req = gRPCClient.grpc_async_request(client, TestRequest(N, zeros(UInt64, 1)), response_c)
                 for i = 1:N
-                    resp = take!(response_c)
+                    resp = take_or_diagnose(req, response_c)
                     @test length(resp.data) == i
                     @test last(resp.data) == i
                 end
@@ -139,7 +159,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
             end
 
             @testset "Request Streaming" begin
-                client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+                client = TestService_TestClientStreamRPC_Client("127.0.0.1", port; deadline = stream_test_deadline)
                 request_c = Channel{TestRequest}(N)
                 req = gRPCClient.grpc_async_request(client, request_c)
                 for _ = 1:N
@@ -154,7 +174,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
             end
 
             @testset "Bidirectional Streaming" begin
-                client = TestService_TestBidirectionalStreamRPC_Client("127.0.0.1", port)
+                client = TestService_TestBidirectionalStreamRPC_Client("127.0.0.1", port; deadline = stream_test_deadline)
                 request_c = Channel{TestRequest}(N)
                 response_c = Channel{TestResponse}(N)
                 req = gRPCClient.grpc_async_request(client, request_c, response_c)
@@ -162,7 +182,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
                     put!(request_c, TestRequest(i, zeros(UInt64, i)))
                 end
                 for i = 1:N
-                    resp = take!(response_c)
+                    resp = take_or_diagnose(req, response_c)
                     @test length(resp.data) == i
                     @test last(resp.data) == i
                 end
@@ -171,7 +191,7 @@ _load_n() = parse(Int, get(ENV, "GRPC_SERVER_TEST_LOAD_N", "1000"))
             end
 
             @testset "Request Streaming - Large Payloads" begin
-                client = TestService_TestClientStreamRPC_Client("127.0.0.1", port)
+                client = TestService_TestClientStreamRPC_Client("127.0.0.1", port; deadline = stream_test_deadline)
                 request_c = Channel{TestRequest}(100)
                 req = gRPCClient.grpc_async_request(client, request_c)
                 for _ = 1:100
