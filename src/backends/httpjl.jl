@@ -245,12 +245,29 @@ uses_serve_grpc(::HTTPjlBackend) = true
 # real status). Consuming the body to end-of-stream before returning makes the
 # stream close cleanly, trailers intact.
 #
-# The drain is bounded so a client that never ends its request body cannot
-# wedge the handler task: past the budget it falls back to abort_request!
-# (RST). The budget floors at 64 MiB (HTTP.jl's own default max request body)
-# so a small configured receive cap cannot turn a legitimate oversized request
-# into a spurious reset, while the cap still bounds the pathological case.
+# The drain is bounded two ways so it can never wedge the handler task:
+#
+# * Byte budget: a client that never ends its request body is reset once the
+#   body exceeds `_HTTPJL_DRAIN_BUDGET_FLOOR` (64 MiB, HTTP.jl's own default
+#   max request body; a small configured receive cap must not turn a
+#   legitimate oversized request into a spurious reset).
+#
+# * Grace period: a client may deliberately keep the request stream open while
+#   awaiting this very response (bidi-style clients — grpcurl's reflection v1
+#   fallback does exactly this). For those the drain would block forever,
+#   deadlocking the handler and stalling the response, whose trailers are only
+#   flushed when the handler returns. The drain therefore runs on its own task
+#   and the handler waits at most `_HTTPJL_DRAIN_GRACE_SECONDS`; clients that
+#   half-closed (their END_STREAM is merely in flight) are drained well within
+#   the grace — the blocking read yields, HTTP.jl's connection reader processes
+#   the pending frame, and the drain finishes in microseconds (measured). A
+#   client still holding the stream open when the grace elapses falls back to
+#   the pre-change transport behavior: the handler returns, HTTP.jl flushes the
+#   trailers and then resets the unread body, which clients that keep the send
+#   side open tolerate. The abandoned drain task wakes when HTTP.jl closes the
+#   stream and exits silently.
 const _HTTPJL_DRAIN_BUDGET_FLOOR = 64 * 1024 * 1024
+const _HTTPJL_DRAIN_GRACE_SECONDS = 1.0
 
 function _drain_unread_request_body!(gs::HTTPjlGRPCStream)
     gs.read_side_closed && return nothing
@@ -259,21 +276,31 @@ function _drain_unread_request_body!(gs::HTTPjlGRPCStream)
     budget = max(Int64(gs.max_receive_message_length), _HTTPJL_DRAIN_BUDGET_FLOOR)
     buf = Vector{UInt8}(undef, 16 * 1024)
     total = 0
-    try
-        while !eof(stream)
-            n = readbytes!(stream, buf)
-            n == 0 && break  # read side closed underneath us (client reset, abort)
-            total += n
-            if total > budget
-                abort_request!(gs)
-                return nothing
+    drained = Base.Event()
+    drain = Task() do
+        try
+            while !eof(stream)
+                n = readbytes!(stream, buf)
+                n == 0 && break  # read side closed underneath us (client reset, abort)
+                total += n
+                if total > budget
+                    abort_request!(gs)
+                    break
+                end
             end
+        catch
+            # The client may have reset the stream mid-drain or the connection
+            # may have died; the response is already committed, so there is
+            # nothing to salvage — swallow and let HTTP.jl finalize the stream.
         end
-    catch
-        # The client may have reset the stream mid-drain or the connection may
-        # have died; the response is already committed, so there is nothing to
-        # salvage — swallow and let HTTP.jl finalize the stream.
+        notify(drained)
     end
+    schedule(drain)
+    timer = Timer(_HTTPJL_DRAIN_GRACE_SECONDS) do _
+        notify(drained)
+    end
+    wait(drained)
+    close(timer)
     return nothing
 end
 
