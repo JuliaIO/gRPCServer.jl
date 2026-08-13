@@ -37,7 +37,7 @@ This guide walks you through gRPCServer.jl examples in progressive order, from b
 Each example directory contains:
 - `*.proto` - Protocol buffer service definition
 - `server.jl` - Julia server implementation
-- `generated/` - Auto-generated Julia types
+- `generated/` - Auto-generated Julia types, client stubs, and registration functions
 - `README.md` - Detailed usage instructions
 
 To run any example:
@@ -58,6 +58,10 @@ julia --project=../.. server.jl
 
 ## Quick Reference
 
+Every example registers its handlers with the generated codegen registration
+functions (one `protojl` run emits messages, client stubs, and registration
+functions together).
+
 ### Unary RPC (01_hello_world)
 
 Single request, single response:
@@ -65,6 +69,10 @@ Single request, single response:
 ```julia
 function handler(ctx::ServerContext, request::RequestType)::ResponseType
     return ResponseType(...)
+end
+
+register_Greeter_SayHello!(server) do ctx, req
+    ResponseType(...)
 end
 ```
 
@@ -79,6 +87,8 @@ function handler(ctx::ServerContext, request::RequestType, stream::ServerStream{
     end
     return nothing
 end
+
+register_Greeter_SayHelloStream!(server, handler)
 ```
 
 ### Client Streaming (03_sum_numbers)
@@ -92,6 +102,8 @@ function handler(ctx::ServerContext, stream::ClientStream{RequestType})
     end
     return ResponseType(...)
 end
+
+register_Math_Sum!(server, handler)
 ```
 
 ### Bidirectional Streaming (04_chat)
@@ -106,6 +118,8 @@ function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseTyp
     close!(stream)
     return nothing
 end
+
+register_Chat_Chat!(server, handler)
 ```
 
 ### Error Handling (05_calculator)

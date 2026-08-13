@@ -17,7 +17,7 @@ Before this example, complete the streaming examples (`01_hello_world`, `02_hell
 
 - `calculator.proto` - Protocol buffer service definition with 4 methods
 - `server.jl` - Julia server implementation with error handling
-- `generated/` - Auto-generated Julia types from protobuf
+- `generated/` - Auto-generated Julia types, client stubs, and registration functions
 
 ## Running the Server
 
@@ -136,15 +136,62 @@ Expected output:
 }
 ```
 
+## Handler Contract
+
+All four methods are unary, so every handler has this signature:
+
+```julia
+function handler(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
+    return CalculatorResponse(...)
+end
+```
+
+The generated `register_Calculator!` accepts one handler per RPC:
+
+```julia
+register_Calculator!(server;
+    Add = add,
+    Subtract = subtract,
+    Multiply = multiply,
+    Divide = divide
+)
+```
+
+Handler signatures are validated at registration time. Errors are raised by
+throwing `GRPCError(StatusCode.INVALID_ARGUMENT, "Division by zero")`, which
+surfaces as the `grpc-status`/`grpc-message` trailers to the caller.
+
+## Call it from Julia
+
+In a second terminal, in the same example directory, call the Add RPC with the
+generated client stub (run `gRPCClient.grpc_init()` once before any call):
+
+```julia
+# terminal 2, same example dir
+julia --project=../.. -e '
+using gRPCServer
+include("generated/calculator/calculator.jl")
+using .calculator
+import gRPCClient
+gRPCClient.grpc_init()
+client = calculator.Calculator_Add_Client("127.0.0.1", 50052)
+resp = gRPCClient.grpc_sync_request(client, calculator.CalculatorRequest(first_number=5, second_number=3))
+@assert resp.result == 8
+println("Got: ", resp.result)
+'
+```
+
 ## Next Steps
 
 For more advanced topics like interceptors, TLS, and compression, see the main documentation.
 
 ## Regenerating Types
 
-If you modify `calculator.proto`, regenerate the Julia types:
+If you modify `calculator.proto`, regenerate the Julia types from the example
+directory (this regenerates messages, the gRPCClient.jl client stubs, and the
+gRPCServer.jl registration functions in one run):
 
-```julia
-using ProtoBuf
-protojl("calculator.proto", ".", "generated")
+```bash
+cd examples/05_calculator
+julia --project=../.. -e 'using ProtoBuf; using gRPCServer; import gRPCClient; ProtoBuf.protojl("calculator.proto", ".", "generated"; always_use_modules = true, add_kwarg_constructors = true)'
 ```

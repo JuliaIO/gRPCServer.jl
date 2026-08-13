@@ -29,8 +29,21 @@ ServiceDescriptor
 MethodDescriptor
 MethodType
 register!
+register_method!
 services
 service_descriptor
+```
+
+The generated `register_<Service>_<Rpc>!` functions build a
+`MethodDescriptor` for each RPC and call `register_method!` on the server's
+dispatcher; use the generated functions for normal services. The types and
+functions below are the underlying runtime interface the codegen sits on.
+
+Registration-time validation is performed by internal helpers:
+
+```@docs
+gRPCServer._validate_method_handler!
+gRPCServer._expected_handler_tuple
 ```
 
 ## Stream Types
@@ -110,7 +123,10 @@ get_metadata_string
 get_metadata_binary
 remaining_time
 is_cancelled
+gRPCServer.cancel!
 ```
+
+`cancel!` is not exported — call it as `gRPCServer.cancel!(ctx)`.
 
 ## Compression
 
@@ -121,6 +137,18 @@ decompress
 codec_name
 parse_codec
 negotiate_compression
+```
+
+## ProtoBuf Code Generation
+
+Loading gRPCServer registers its ProtoBuf.jl code generation handler; one
+`protojl` run (with gRPCClient.jl loaded too) emits message types, client
+stubs, and per-service registration functions in a single generated file.
+`protojl` is re-exported from ProtoBuf.jl by gRPCServer. See
+[Code Generation](@ref) for the full walkthrough.
+
+```@docs
+grpc_register_service_codegen
 ```
 
 ## HTTP/2 Backend Abstraction

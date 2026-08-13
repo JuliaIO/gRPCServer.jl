@@ -9,6 +9,7 @@ gRPCServer.jl provides a complete gRPC server implementation in Julia, enabling 
 ## Features
 
 - **All RPC Patterns**: Unary, server streaming, client streaming, and bidirectional streaming
+- **Code Generation**: one `protojl` run emits message types, gRPCClient.jl client stubs, and per-service registration functions (see [Code Generation](@ref))
 - **Protocol Buffer Support**: Seamless integration with ProtoBuf.jl for message serialization
 - **Interceptors**: Middleware pattern for cross-cutting concerns (logging, auth, metrics)
 - **Health Checking**: Standard gRPC health checking protocol (grpc.health.v1)
@@ -29,7 +30,7 @@ Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
 
 ## Getting Started
 
-See the [Quick Start](@ref) guide for a complete walkthrough from defining your `.proto` file to running a gRPC server and testing it with grpcurl.
+See the [Quick Start](@ref) guide for a complete walkthrough from defining your `.proto` file to generating the server stubs, registering handlers, and running a gRPC server tested with grpcurl.
 
 ## Table of Contents
 

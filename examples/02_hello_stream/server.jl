@@ -16,7 +16,7 @@ function say_hello_stream(
     stream::ServerStream{HelloReply}
 )::Nothing
     for i in 1:5
-        if ctx.cancelled
+        if is_cancelled(ctx)
             @warn "Stream cancelled by client"
             return nothing
         end
@@ -26,29 +26,7 @@ function say_hello_stream(
     return nothing
 end
 
-# Service definition
-struct GreeterService end
-
-function gRPCServer.service_descriptor(::GreeterService)
-    ServiceDescriptor(
-        "helloworld.Greeter",
-        Dict(
-            "SayHello" => MethodDescriptor(
-                "SayHello", MethodType.UNARY,
-                HelloRequest, HelloReply,  # Use Julia types for auto-registration
-                say_hello
-            ),
-            "SayHelloStream" => MethodDescriptor(
-                "SayHelloStream", MethodType.SERVER_STREAMING,
-                HelloRequest, HelloReply,  # Use Julia types for auto-registration
-                say_hello_stream
-            )
-        ),
-        nothing
-    )
-end
-
-# Run server
+# Register the service with the codegen registration function
 function main()
     host = "127.0.0.1"
     port = 50051
@@ -57,7 +35,7 @@ function main()
         enable_reflection = true
     )
 
-    register!(server, GreeterService())
+    register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
 
     @info "gRPC server starting" host=host port=port
     run(server)

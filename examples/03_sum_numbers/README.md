@@ -18,7 +18,7 @@ Before this example, complete `01_hello_world` (unary) and `02_hello_stream` (se
 
 - `sum.proto` - Protocol buffer service definition with client streaming RPC
 - `server.jl` - Julia server implementation with streaming handler
-- `generated/` - Auto-generated Julia types from protobuf
+- `generated/` - Auto-generated Julia types, client stubs, and registration functions
 
 ## Running the Server
 
@@ -91,7 +91,7 @@ Expected output:
 }
 ```
 
-## Handler Pattern
+## Handler Contract
 
 Client streaming handlers have this signature:
 
@@ -109,8 +109,12 @@ end
 Key points:
 - Second parameter is `ClientStream{T}` instead of a single request
 - Iterate over stream with `for request in stream`
-- Return response directly (not via stream)
-- Use `MethodType.CLIENT_STREAMING` in the descriptor
+- Return the response directly (not via stream)
+- Check `is_cancelled(ctx)` to stop early if the client disconnects
+
+The generated `register_Math!` accepts the handler as `Sum = sum_handler`;
+handler signatures are validated at registration time. The generated client
+stub for this RPC is `Math_Sum_Client`.
 
 ## Next Steps
 
@@ -118,9 +122,11 @@ Proceed to `04_chat` to learn about bidirectional streaming, where both client a
 
 ## Regenerating Types
 
-If you modify `sum.proto`, regenerate the Julia types:
+If you modify `sum.proto`, regenerate the Julia types from the example
+directory (this regenerates messages, the gRPCClient.jl client stubs, and the
+gRPCServer.jl registration functions in one run):
 
-```julia
-using ProtoBuf
-protojl("sum.proto", ".", "generated")
+```bash
+cd examples/03_sum_numbers
+julia --project=../.. -e 'using ProtoBuf; using gRPCServer; import gRPCClient; ProtoBuf.protojl("sum.proto", ".", "generated"; always_use_modules = true, add_kwarg_constructors = true)'
 ```

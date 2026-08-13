@@ -9,7 +9,7 @@ function chat_handler(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMe
     @info "Chat session started" request_id=ctx.request_id
 
     for message in stream
-        if ctx.cancelled
+        if is_cancelled(ctx)
             @warn "Chat cancelled by client"
             break
         end
@@ -26,24 +26,7 @@ function chat_handler(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMe
     return nothing
 end
 
-# Service definition
-struct ChatService end
-
-function gRPCServer.service_descriptor(::ChatService)
-    ServiceDescriptor(
-        "chat.Chat",
-        Dict(
-            "Chat" => MethodDescriptor(
-                "Chat", MethodType.BIDI_STREAMING,
-                ChatMessage, ChatMessage,
-                chat_handler
-            )
-        ),
-        nothing
-    )
-end
-
-# Run server
+# Register the service with the codegen registration function
 function main()
     host = "127.0.0.1"
     port = 50054
@@ -52,7 +35,7 @@ function main()
         enable_reflection = true
     )
 
-    register!(server, ChatService())
+    register_Chat!(server; Chat = chat_handler)
 
     @info "gRPC server starting (bidirectional streaming example)" host=host port=port
     run(server)

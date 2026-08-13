@@ -22,7 +22,7 @@ Before this example, complete:
 
 - `chat.proto` - Protocol buffer service definition with bidirectional streaming RPC
 - `server.jl` - Julia server implementation with bidirectional handler
-- `generated/` - Auto-generated Julia types from protobuf
+- `generated/` - Auto-generated Julia types, client stubs, and registration functions
 
 ## Running the Server
 
@@ -87,14 +87,14 @@ Expected output:
 }
 ```
 
-## Handler Pattern
+## Handler Contract
 
 Bidirectional streaming handlers have this signature:
 
 ```julia
 function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseType})
     for message in stream
-        if ctx.cancelled
+        if is_cancelled(ctx)
             break
         end
         # Process incoming message
@@ -112,7 +112,11 @@ Key points:
 - Send responses with `send!(stream, response)`
 - Close the stream with `close!(stream)` when done
 - Return `nothing` (responses sent via stream, not return value)
-- Use `MethodType.BIDI_STREAMING` in the descriptor
+- Check `is_cancelled(ctx)` to stop early if the client disconnects
+
+The generated `register_Chat!` accepts the handler as `Chat = chat_handler`;
+handler signatures are validated at registration time. The generated client
+stub for this RPC is `Chat_Chat_Client`.
 
 ## Comparison: All Streaming Patterns
 
@@ -129,9 +133,11 @@ You've now seen all four gRPC streaming patterns! For advanced topics like inter
 
 ## Regenerating Types
 
-If you modify `chat.proto`, regenerate the Julia types:
+If you modify `chat.proto`, regenerate the Julia types from the example
+directory (this regenerates messages, the gRPCClient.jl client stubs, and the
+gRPCServer.jl registration functions in one run):
 
-```julia
-using ProtoBuf
-protojl("chat.proto", ".", "generated")
+```bash
+cd examples/04_chat
+julia --project=../.. -e 'using ProtoBuf; using gRPCServer; import gRPCClient; ProtoBuf.protojl("chat.proto", ".", "generated"; always_use_modules = true, add_kwarg_constructors = true)'
 ```

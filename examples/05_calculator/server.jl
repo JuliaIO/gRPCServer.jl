@@ -28,46 +28,19 @@ function divide(ctx::ServerContext, request::CalculatorRequest)::CalculatorRespo
     CalculatorResponse(request.first_number / request.second_number)
 end
 
-# Service definition
-struct CalculatorService end
-
-function gRPCServer.service_descriptor(::CalculatorService)
-    ServiceDescriptor(
-        "calculator.Calculator",
-        Dict(
-            "Add" => MethodDescriptor(
-                "Add", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse,
-                add
-            ),
-            "Subtract" => MethodDescriptor(
-                "Subtract", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse,
-                subtract
-            ),
-            "Multiply" => MethodDescriptor(
-                "Multiply", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse,
-                multiply
-            ),
-            "Divide" => MethodDescriptor(
-                "Divide", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse,
-                divide
-            )
-        ),
-        nothing
-    )
-end
-
-# Run server
+# Register the service with the codegen registration function
 function main()
     server = GRPCServer("127.0.0.1", 50052;
         enable_health_check = true,
         enable_reflection = true
     )
 
-    register!(server, CalculatorService())
+    register_Calculator!(server;
+        Add = add,
+        Subtract = subtract,
+        Multiply = multiply,
+        Divide = divide
+    )
 
     @info "Calculator gRPC server starting" host="127.0.0.1" port=50052
     run(server)

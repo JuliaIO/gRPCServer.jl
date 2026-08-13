@@ -6,6 +6,7 @@ This guide demonstrates how to create a gRPC server in Julia using gRPCServer.jl
 
 - Julia 1.10 or later
 - ProtoBuf.jl for message type generation
+- [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) (optional, for the generated client stubs)
 
 ## Installation
 
@@ -43,14 +44,19 @@ message HelloReply {
 
 ## Step 2: Generate Julia Types
 
-Use ProtoBuf.jl to generate Julia types directly from the `.proto` file (no external tools needed):
+Use ProtoBuf.jl to generate Julia types directly from the `.proto` file (no external tools needed). Load **both** gRPCServer and gRPCClient first — one `protojl` run then emits the message types, the gRPCClient.jl client stubs, and the gRPCServer.jl registration functions together:
 
 ```julia
 using ProtoBuf
+using gRPCServer
+import gRPCClient
 
 # Generate Julia structs from proto file
 # Arguments: proto_file, search_path, output_directory
-protojl("greeter.proto", ".", "generated")
+protojl("greeter.proto", ".", "generated";
+    always_use_modules = true,
+    add_kwarg_constructors = true
+)
 ```
 
 This creates the following file structure:
@@ -58,11 +64,17 @@ This creates the following file structure:
 ```
 generated/
 └── helloworld/
-    ├── helloworld.jl      # Module with message types
-    └── greeter_pb.jl      # Generated protobuf definitions
+    ├── helloworld.jl      # Module wrapper
+    └── greeter_pb.jl      # Messages + client stubs + registration functions
 ```
 
-The `helloworld.jl` file exports `HelloRequest` and `HelloReply` structs that you'll use in your handlers.
+Within `greeter_pb.jl`, the `# gRPCClient.jl BEGIN`/`END` block defines the
+`Greeter_*_Client` client constructors, and the `# gRPCServer.jl BEGIN`/`END`
+block defines the `Greeter_*_Method` descriptor builders and the
+`register_Greeter_SayHello!`/`register_Greeter_SayHelloStream!`/`register_Greeter!`
+registration functions.
+
+Regenerate whenever you change the `.proto` file.
 
 ## Step 3: Implement Handlers
 
@@ -85,6 +97,10 @@ function say_hello_stream(
 )::Nothing
     name = isempty(request.name) ? "World" : request.name
     for i in 1:5
+        if is_cancelled(ctx)
+            @warn "Stream cancelled by client"
+            return nothing
+        end
         send!(stream, HelloReply(message = "Hello $(i), $(name)!"))
         sleep(0.5)  # Simulate work
     end
@@ -92,34 +108,49 @@ function say_hello_stream(
 end
 ```
 
-## Step 4: Create Service Descriptor
+Every handler receives the request context first. The four handler contracts are:
+
+| RPC type | Handler signature |
+|----------|-------------------|
+| Unary | `(ctx::ServerContext, req::TReq) -> TResp` |
+| Server streaming | `(ctx, req::TReq, stream::ServerStream{TResp}) -> Nothing` — send with `send!(stream, msg)` |
+| Client streaming | `(ctx, stream::ClientStream{TReq}) -> TResp` — iterate with `for req in stream` |
+| Bidirectional | `(ctx, stream::BidiStream{TReq, TResp}) -> Nothing` — iterate and `send!(stream, msg)` |
+
+## Step 4: Register Handlers
+
+The generated registration functions replace any hand-written service
+descriptor. Use the per-RPC do-block form:
 
 ```julia
-struct GreeterService end
+register_Greeter_SayHello!(server) do ctx, req
+    HelloReply(message = "Hello, $(req.name)!")
+end
 
-function gRPCServer.service_descriptor(::GreeterService)
-    ServiceDescriptor(
-        "helloworld.Greeter",
-        Dict(
-            "SayHello" => MethodDescriptor(
-                "SayHello",
-                MethodType.UNARY,
-                "helloworld.HelloRequest",
-                "helloworld.HelloReply",
-                say_hello
-            ),
-            "SayHelloStream" => MethodDescriptor(
-                "SayHelloStream",
-                MethodType.SERVER_STREAMING,
-                "helloworld.HelloRequest",
-                "helloworld.HelloReply",
-                say_hello_stream
-            )
-        ),
-        nothing  # File descriptor for reflection (optional)
-    )
+register_Greeter_SayHelloStream!(server) do ctx, req, stream
+    for i in 1:5
+        send!(stream, HelloReply(message = "Hello $(i), $(req.name)!"))
+    end
+    return nothing
 end
 ```
+
+or with named functions:
+
+```julia
+register_Greeter_SayHello!(server, say_hello)
+register_Greeter_SayHelloStream!(server, say_hello_stream)
+```
+
+or register several RPCs of a service at once with the aggregate form:
+
+```julia
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+```
+
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple. Handler signatures are validated at registration time — a mismatched
+shape throws an `ArgumentError`.
 
 ## Step 5: Create and Run Server
 
@@ -130,7 +161,7 @@ port = 50051
 server = GRPCServer(host, port)
 
 # Register service
-register!(server, GreeterService())
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
 
 # Start server (blocking)
 @info "Starting gRPC server" host=host port=port
@@ -170,7 +201,7 @@ function say_hello_stream(
     stream::ServerStream{HelloReply}
 )::Nothing
     for i in 1:5
-        if ctx.cancelled
+        if is_cancelled(ctx)
             @warn "Stream cancelled by client"
             return nothing
         end
@@ -178,28 +209,6 @@ function say_hello_stream(
         sleep(0.5)
     end
     return nothing
-end
-
-# Service definition
-struct GreeterService end
-
-function gRPCServer.service_descriptor(::GreeterService)
-    ServiceDescriptor(
-        "helloworld.Greeter",
-        Dict(
-            "SayHello" => MethodDescriptor(
-                "SayHello", MethodType.UNARY,
-                "helloworld.HelloRequest", "helloworld.HelloReply",
-                say_hello
-            ),
-            "SayHelloStream" => MethodDescriptor(
-                "SayHelloStream", MethodType.SERVER_STREAMING,
-                "helloworld.HelloRequest", "helloworld.HelloReply",
-                say_hello_stream
-            )
-        ),
-        nothing
-    )
 end
 
 # Run server
@@ -211,7 +220,7 @@ function main()
         enable_reflection = true
     )
 
-    register!(server, GreeterService())
+    register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
 
     @info "gRPC server starting" host=host port=port
     run(server)
@@ -224,6 +233,16 @@ Run with:
 ```bash
 julia server.jl
 ```
+
+## What Happens Under the Hood
+
+The generated `register_Greeter_*!` functions build a
+[`MethodDescriptor`](@ref) for each RPC and call
+[`register_method!`](@ref) on the server's dispatcher. They are thin wrappers
+over the runtime registration interface — see [Code Generation](@ref) for the
+emission details and the [API Reference](api.md) for the underlying types. The
+`raw_request`/`raw_response` keyword flags opt a handler into receiving and/or
+returning undecoded `Vector{UInt8}` payloads instead of typed messages.
 
 ## Testing with grpcurl
 
@@ -284,26 +303,38 @@ Expected output (5 messages streamed):
 
 ## Testing with gRPCClient.jl
 
+The same `protojl` run also generated client stubs. Call `gRPCClient.grpc_init()`
+once, then use the generated `Greeter_SayHello_Client` constructor with
+`grpc_sync_request` for unary calls:
+
 ```julia
-using gRPCClient
-include("generated/helloworld.jl")
+using gRPCServer
+include("generated/helloworld/helloworld.jl")
 using .helloworld
+import gRPCClient
 
-# Create channel
-channel = gRPCClient.Channel("localhost", 50051)
+gRPCClient.grpc_init()
+client = helloworld.Greeter_SayHello_Client("127.0.0.1", 50051)
 
-# Create stub
-stub = GreeterStub(channel)
+# Unary RPC
+resp = gRPCClient.grpc_sync_request(client, helloworld.HelloRequest(name = "Julia"))
+println(resp.message)  # "Hello, Julia!"
+```
 
-# Call unary RPC
-response = stub.SayHello(HelloRequest(name = "Julia"))
-println(response.message)  # "Hello, Julia!"
+For server streaming, pass a response `Channel` and iterate it:
 
-# Call streaming RPC
-for reply in stub.SayHelloStream(HelloRequest(name = "Julia"))
+```julia
+response_c = Channel{helloworld.HelloReply}(16)
+req = gRPCClient.grpc_async_request(client, helloworld.HelloRequest(name = "Julia"), response_c)
+for reply in response_c
     println(reply.message)
 end
+gRPCClient.grpc_async_await(req)
 ```
+
+For client streaming, send requests through a `Channel` and await the single
+response; for bidirectional streaming, pass request and response channels (see
+[gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) for the full client API).
 
 ## Adding Interceptors
 
@@ -317,6 +348,9 @@ add_interceptor!(server, MetricsInterceptor(
     on_response = (method, status, ms, size) -> record_latency(ms)
 ))
 ```
+
+Interceptors work the same way whether the service was registered through the
+generated `register_*!` functions or the runtime interface.
 
 ## Enabling TLS
 

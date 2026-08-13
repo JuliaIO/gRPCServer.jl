@@ -12,7 +12,7 @@ function sum_handler(ctx::ServerContext, stream::ClientStream{SumRequest})
     @info "Starting to receive numbers" request_id=ctx.request_id
 
     for request in stream
-        if ctx.cancelled
+        if is_cancelled(ctx)
             @warn "Stream cancelled by client"
             break
         end
@@ -25,24 +25,7 @@ function sum_handler(ctx::ServerContext, stream::ClientStream{SumRequest})
     return SumResponse(total, count)
 end
 
-# Service definition
-struct MathService end
-
-function gRPCServer.service_descriptor(::MathService)
-    ServiceDescriptor(
-        "math.Math",
-        Dict(
-            "Sum" => MethodDescriptor(
-                "Sum", MethodType.CLIENT_STREAMING,
-                SumRequest, SumResponse,
-                sum_handler
-            )
-        ),
-        nothing
-    )
-end
-
-# Run server
+# Register the service with the codegen registration function
 function main()
     host = "127.0.0.1"
     port = 50053
@@ -51,7 +34,7 @@ function main()
         enable_reflection = true
     )
 
-    register!(server, MathService())
+    register_Math!(server; Sum = sum_handler)
 
     @info "gRPC server starting (client streaming example)" host=host port=port
     run(server)

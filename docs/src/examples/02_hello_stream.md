@@ -37,23 +37,23 @@ The `stream` keyword before `HelloReply` indicates this method returns multiple 
 ```julia
 using gRPCServer
 
+# Include generated types
 include("generated/helloworld/helloworld.jl")
 using .helloworld
 
-# Unary handler (same as before)
+# Handlers
 function say_hello(ctx::ServerContext, request::HelloRequest)::HelloReply
     @info "Received request" name=request.name request_id=ctx.request_id
     HelloReply("Hello, $(request.name)!")
 end
 
-# Server streaming handler
 function say_hello_stream(
     ctx::ServerContext,
     request::HelloRequest,
     stream::ServerStream{HelloReply}
 )::Nothing
     for i in 1:5
-        if ctx.cancelled
+        if is_cancelled(ctx)
             @warn "Stream cancelled by client"
             return nothing
         end
@@ -63,28 +63,7 @@ function say_hello_stream(
     return nothing
 end
 
-# Service definition
-struct GreeterService end
-
-function gRPCServer.service_descriptor(::GreeterService)
-    ServiceDescriptor(
-        "helloworld.Greeter",
-        Dict(
-            "SayHello" => MethodDescriptor(
-                "SayHello", MethodType.UNARY,
-                HelloRequest, HelloReply,
-                say_hello
-            ),
-            "SayHelloStream" => MethodDescriptor(
-                "SayHelloStream", MethodType.SERVER_STREAMING,
-                HelloRequest, HelloReply,
-                say_hello_stream
-            )
-        ),
-        nothing
-    )
-end
-
+# Register the service with the codegen registration function
 function main()
     host = "127.0.0.1"
     port = 50051
@@ -93,7 +72,7 @@ function main()
         enable_reflection = true
     )
 
-    register!(server, GreeterService())
+    register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
 
     @info "gRPC server starting" host=host port=port
     run(server)
@@ -130,10 +109,10 @@ end
 
 ### Cancellation Handling
 
-Check `ctx.cancelled` to detect client cancellation:
+Check `is_cancelled(ctx)` to detect client cancellation:
 
 ```julia
-if ctx.cancelled
+if is_cancelled(ctx)
     @warn "Client cancelled the stream"
     return nothing
 end
@@ -141,17 +120,16 @@ end
 
 This is important for long-running streams to avoid wasting resources.
 
-### Method Type
+### Registration
 
-Use `MethodType.SERVER_STREAMING` in the `MethodDescriptor`:
+The generated `register_Greeter!` registers both RPCs in one call:
 
 ```julia
-MethodDescriptor(
-    "MethodName", MethodType.SERVER_STREAMING,
-    RequestType, ResponseType,
-    handler
-)
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
 ```
+
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple; handler signatures are validated at registration time.
 
 ## Testing
 
@@ -215,8 +193,6 @@ function handler(ctx::ServerContext, stream::ClientStream{RequestType})
 end
 ```
 
-Method type: `MethodType.CLIENT_STREAMING`
-
 ### Bidirectional Streaming
 
 Multiple requests and responses simultaneously:
@@ -231,7 +207,8 @@ function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseTyp
 end
 ```
 
-Method type: `MethodType.BIDI_STREAMING`
+Both patterns are registered the same way through the generated functions —
+see `03_sum_numbers` and `04_chat`.
 
 ## Next Steps
 

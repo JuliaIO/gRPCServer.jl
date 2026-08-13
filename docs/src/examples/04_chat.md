@@ -34,15 +34,21 @@ The `stream` keyword on BOTH request AND response indicates bidirectional stream
 ```julia
 using gRPCServer
 
+# Include generated types
 include("generated/chat/chat.jl")
 using .chat
 
-# Bidirectional streaming handler
+# Bidirectional streaming handler - receives and sends multiple messages
 function chat_handler(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMessage})
+    @info "Chat session started" request_id=ctx.request_id
+
     for message in stream
-        if ctx.cancelled
+        if is_cancelled(ctx)
+            @warn "Chat cancelled by client"
             break
         end
+
+        @info "Received message" user=message.user text=message.text
 
         # Echo back with server prefix
         response = ChatMessage("Server", "You said: $(message.text)")
@@ -50,39 +56,38 @@ function chat_handler(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMe
     end
 
     close!(stream)
+    @info "Chat session ended" request_id=ctx.request_id
     return nothing
 end
 
-# Service definition
-struct ChatService end
-
-function gRPCServer.service_descriptor(::ChatService)
-    ServiceDescriptor(
-        "chat.Chat",
-        Dict(
-            "Chat" => MethodDescriptor(
-                "Chat", MethodType.BIDI_STREAMING,
-                ChatMessage, ChatMessage,
-                chat_handler
-            )
-        ),
-        nothing
-    )
-end
-
+# Register the service with the codegen registration function
 function main()
-    server = GRPCServer("127.0.0.1", 50054;
+    host = "127.0.0.1"
+    port = 50054
+    server = GRPCServer(host, port;
         enable_health_check = true,
         enable_reflection = true
     )
 
-    register!(server, ChatService())
+    register_Chat!(server; Chat = chat_handler)
 
-    @info "gRPC server starting" port=50054
+    @info "gRPC server starting (bidirectional streaming example)" host=host port=port
     run(server)
 end
 
 main()
+```
+
+Equivalent form — the per-RPC do-block registration:
+
+```julia
+register_Chat_Chat!(server) do ctx, stream
+    for message in stream
+        send!(stream, ChatMessage("Server", "You said: $(message.text)"))
+    end
+    close!(stream)
+    return nothing
+end
 ```
 
 ## Key Concepts
@@ -105,18 +110,13 @@ end
 - Sends responses with `send!(stream, response)`
 - **Must** close the stream with `close!(stream)`
 - Returns `nothing` (responses sent via stream)
+- Check `is_cancelled(ctx)` to stop early if the client disconnects
 
-### Method Type
+### Registration
 
-Use `MethodType.BIDI_STREAMING` in the descriptor:
-
-```julia
-MethodDescriptor(
-    "Chat", MethodType.BIDI_STREAMING,
-    ChatMessage, ChatMessage,
-    handler
-)
-```
+The generated `register_Chat!` accepts the handler as `Chat = chat_handler`;
+handler signatures are validated at registration time. The generated client
+stub for this RPC is `Chat_Chat_Client`.
 
 ## Testing
 
@@ -155,12 +155,12 @@ Expected output:
 
 You've now seen all gRPC streaming patterns:
 
-| Pattern | Handler Signature | Return | Use Case |
-|---------|------------------|--------|----------|
-| Unary | `(ctx, request::T)` | Response | Simple request/response |
-| Server Streaming | `(ctx, request::T, stream::ServerStream{R})` | nothing | Downloading, real-time updates |
-| Client Streaming | `(ctx, stream::ClientStream{T})` | Response | Uploading, aggregation |
-| Bidirectional | `(ctx, stream::BidiStream{T, R})` | nothing | Chat, gaming, real-time collaboration |
+| Pattern | Handler Signature | Return | Registration |
+|---------|------------------|--------|--------------|
+| Unary | `(ctx, request::T)` | Response | `register_Greeter_SayHello!(server, handler)` |
+| Server Streaming | `(ctx, request::T, stream::ServerStream{R})` | nothing | `register_Greeter_SayHelloStream!(server, handler)` |
+| Client Streaming | `(ctx, stream::ClientStream{T})` | Response | `register_Math_Sum!(server, handler)` |
+| Bidirectional | `(ctx, stream::BidiStream{T, R})` | nothing | `register_Chat_Chat!(server, handler)` |
 
 ## Use Cases
 

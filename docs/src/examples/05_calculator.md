@@ -38,60 +38,47 @@ message CalculatorResponse {
 ```julia
 using gRPCServer
 
+# Include generated types
 include("generated/calculator/calculator.jl")
 using .calculator
 
 # Handlers
 function add(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
-    @info "Add" a=request.first_number b=request.second_number
+    @info "Add" a=request.first_number b=request.second_number request_id=ctx.request_id
     CalculatorResponse(request.first_number + request.second_number)
 end
 
 function subtract(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
-    @info "Subtract" a=request.first_number b=request.second_number
+    @info "Subtract" a=request.first_number b=request.second_number request_id=ctx.request_id
     CalculatorResponse(request.first_number - request.second_number)
 end
 
 function multiply(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
-    @info "Multiply" a=request.first_number b=request.second_number
+    @info "Multiply" a=request.first_number b=request.second_number request_id=ctx.request_id
     CalculatorResponse(request.first_number * request.second_number)
 end
 
 function divide(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
-    @info "Divide" a=request.first_number b=request.second_number
+    @info "Divide" a=request.first_number b=request.second_number request_id=ctx.request_id
     if request.second_number == 0.0
         throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Division by zero"))
     end
     CalculatorResponse(request.first_number / request.second_number)
 end
 
-# Service definition
-struct CalculatorService end
-
-function gRPCServer.service_descriptor(::CalculatorService)
-    ServiceDescriptor(
-        "calculator.Calculator",
-        Dict(
-            "Add" => MethodDescriptor("Add", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse, add),
-            "Subtract" => MethodDescriptor("Subtract", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse, subtract),
-            "Multiply" => MethodDescriptor("Multiply", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse, multiply),
-            "Divide" => MethodDescriptor("Divide", MethodType.UNARY,
-                CalculatorRequest, CalculatorResponse, divide)
-        ),
-        nothing
-    )
-end
-
+# Register the service with the codegen registration function
 function main()
     server = GRPCServer("127.0.0.1", 50052;
         enable_health_check = true,
         enable_reflection = true
     )
 
-    register!(server, CalculatorService())
+    register_Calculator!(server;
+        Add = add,
+        Subtract = subtract,
+        Multiply = multiply,
+        Divide = divide
+    )
 
     @info "Calculator gRPC server starting" host="127.0.0.1" port=50052
     run(server)
@@ -119,17 +106,19 @@ Common status codes:
 
 ### Multiple Methods in One Service
 
-Register multiple methods in the `ServiceDescriptor`:
+Register all four handlers with the generated aggregate function:
 
 ```julia
-Dict(
-    "Method1" => MethodDescriptor(...),
-    "Method2" => MethodDescriptor(...),
-    "Method3" => MethodDescriptor(...)
+register_Calculator!(server;
+    Add = add,
+    Subtract = subtract,
+    Multiply = multiply,
+    Divide = divide
 )
 ```
 
-Each method can have its own handler function with appropriate logic.
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple; handler signatures are validated at registration time.
 
 ### Numeric Types
 
@@ -145,6 +134,24 @@ julia --project=../.. server.jl
 ```
 
 Note: This example uses port 50052 (different from hello world examples).
+
+### Call Add from Julia
+
+In a second terminal, same directory, using the generated client stub (call
+`gRPCClient.grpc_init()` once before any call):
+
+```julia
+using gRPCServer
+include("generated/calculator/calculator.jl")
+using .calculator
+import gRPCClient
+
+gRPCClient.grpc_init()
+client = calculator.Calculator_Add_Client("127.0.0.1", 50052)
+resp = gRPCClient.grpc_sync_request(client, calculator.CalculatorRequest(first_number=5, second_number=3))
+@assert resp.result == 8
+println("Got: ", resp.result)
+```
 
 ### Test Add
 

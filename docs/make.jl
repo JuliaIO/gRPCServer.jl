@@ -15,8 +15,10 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Quick Start" => "quickstart.md",
+        "Code Generation" => "code_generation.md",
         "TLS" => "tls.md",
         "HTTP/2 Backends" => "http2-backends.md",
+        "Performance" => "performance.md",
         "API Reference" => "api.md",
         "Examples" => [
             "Overview" => "examples/index.md",

@@ -8,7 +8,7 @@ using gRPCServer
         unbound_args = true,
         undefined_exports = true,
         project_extras = true,
-        stale_deps = true,
+        stale_deps = (; ignore = [:gRPCClient]),
         deps_compat = false,  # Stdlib packages don't need compat entries
         piracies = false  # Disable type piracy checks for now
     )

@@ -1,0 +1,25 @@
+{
+  "name": "grpcserver-jl",
+  "owner": {
+    "name": "s-celles",
+    "url": "https://github.com/s-celles/gRPCServer.jl"
+  },
+  "metadata": {
+    "description": "Agent skills for gRPCServer.jl, the Julia gRPC server.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "grpcserver-jl",
+      "source": "./",
+      "description": "Skills for building gRPC servers in Julia with gRPCServer.jl's codegen interface, and for developing the package itself.",
+      "version": "1.0.0",
+      "category": "development",
+      "keywords": [
+        "julia",
+        "grpc",
+        "protobuf"
+      ]
+    }
+  ]
+}

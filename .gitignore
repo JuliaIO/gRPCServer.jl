@@ -35,6 +35,12 @@
 !src/
 !src/**
 
+# Agent skills (Claude registry, mirrors gRPCClient.jl)
+!skills/
+!skills/**
+!.claude-plugin/
+!.claude-plugin/**
+
 # Package extensions (weak dependencies)
 !ext/
 !ext/*.jl

@@ -11,7 +11,9 @@ The **default backend is `HTTPjlBackend`**, which serves gRPC over
 backend, `PureHTTP2Backend` (the pure-Julia
 [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) implementation of
 RFC 7540/7541), remains a fully-supported, opt-in alternative. Observable gRPC
-behavior is identical across backends.
+behavior is identical across backends. The backend choice is orthogonal to the
+codegen interface: services registered through the generated `register_*!`
+functions run identically on every backend.
 
 ## Selecting a Backend
 

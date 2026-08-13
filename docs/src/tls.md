@@ -7,7 +7,9 @@ The TLS path performs genuine `h2` selection during the handshake via OpenSSL's
 before any HTTP/2 bytes are exchanged.
 
 This page walks you through setting up a TLS gRPC server in about fifteen
-minutes.
+minutes. The server can serve any codegen-registered service (see
+[Quick Start](@ref)); TLS is configured on the `GRPCServer` itself, so
+registration is unchanged.
 
 ## What you need
 
