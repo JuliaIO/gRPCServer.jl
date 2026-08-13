@@ -1760,16 +1760,29 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 return nothing
             end
             expect_half_close!(gs)
-            send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
-            headers_sent = true
             encode_buf = IOBuffer()
+            # Response headers are deferred until the first response message so
+            # handler-set initial metadata (ctx.response_headers) reaches the
+            # wire — the legacy csvance behavior (headers sent with the first
+            # message). A handler that errors before sending anything yields a
+            # clean trailers-only error response.
             send_cb = (message, _compress) -> begin
+                if !headers_sent
+                    send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
+                    headers_sent = true
+                end
                 grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
                 send_message!(gs, take!(encode_buf))
             end
             close_cb = () -> nothing
             status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
             status, message = _apply_deadline(ctx, status, message)
+            # A successful stream with zero messages still needs a headers block
+            # (a trailers-only response is reserved for non-OK status).
+            if !headers_sent
+                send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
+                headers_sent = true
+            end
             send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
 
         elseif mt == MethodType.CLIENT_STREAMING
@@ -1793,8 +1806,15 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             abort_request!(gs)
 
         elseif mt == MethodType.BIDI_STREAMING
-            send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
-            headers_sent = true
+            # Like server-streaming: response headers go out with the first
+            # response message so handler-set initial metadata reaches the wire.
+            ensure_headers_sent = () -> begin
+                if !headers_sent
+                    send_response_headers!(gs, _ctx_response_headers(ctx, content_type))
+                    headers_sent = true
+                end
+                return nothing
+            end
             if service.name == "grpc.reflection.v1alpha.ServerReflection"
                 # Reflection is request-response: handle each request incrementally and
                 # reply live (mirrors handle_bidi_streaming_incremental on PureHTTP2).
@@ -1802,12 +1822,17 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                     status, message, resp = dispatch_streaming_message(server.dispatcher, ctx, m, method_desc, service)
                     status, message = _apply_deadline(ctx, status, message)
                     if status != StatusCode.OK
+                        ensure_headers_sent()
                         send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
                         return nothing
                     end
-                    isempty(resp) || send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
+                    if !isempty(resp)
+                        ensure_headers_sent()
+                        send_message!(gs, take!(grpc_encode_message_iobuffer(resp; max_send_message_length = max_send)))
+                    end
                 end
                 final_status, final_message = _apply_deadline(ctx, StatusCode.OK, "")
+                ensure_headers_sent()
                 send_trailers!(gs, _ctx_response_trailers(ctx, final_status, final_message))
                 return nothing
             end
@@ -1820,6 +1845,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             end
             encode_buf = IOBuffer()
             send_cb = (message, _compress) -> begin
+                ensure_headers_sent()
                 grpc_encode_message_iobuffer(message, encode_buf; max_send_message_length = max_send)
                 send_message!(gs, take!(encode_buf))
             end
@@ -1831,6 +1857,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             end
             status, message = dispatch_bidi_streaming(server.dispatcher, ctx, recv_cb, send_cb, close_cb, cancel_cb)
             status, message = _apply_deadline(ctx, status, message)
+            ensure_headers_sent()
             send_trailers!(gs, _ctx_response_trailers(ctx, status, message))
             # The handler may have returned before the client half-closed; abort the
             # read side so the transport does not see an abandoned request.
