@@ -35,19 +35,28 @@ gRPCServer.register_method!(server.dispatcher, "helloworld.Greeter", method)
 
 | Kwarg | Default | Meaning |
 |---|---|---|
-| `max_message_size` | 4 MiB | Largest accepted/sent message |
+| `max_message_size` | 4 MiB | Largest accepted/sent message (send cap enforced on every backend; receive cap only on `HTTPjlBackend`) |
 | `max_concurrent_requests` | unlimited | Cap; excess requests shed with `RESOURCE_EXHAUSTED` (no queue) |
-| `max_concurrent_streams`, `max_connections`, `max_queued_requests` | — | HTTP/2 stream/connection limits |
-| `read_header_timeout` | 30 s | Time to read request headers |
-| `read_timeout` / `write_timeout` | disabled | Per-IO timeouts; set for long-lived streams deliberately |
-| `idle_timeout` | none | Idle connection timeout |
-| `keepalive_interval` / `keepalive_timeout` | — | HTTP/2 ping keepalive |
-| `h2_initial_window_size` / `h2_connection_window_size` | 65535 | HTTP/2 flow-control windows |
-| `tls` | `nothing` | TLS config; see `docs/src/tls.md` |
-| `enable_health_check` / `enable_reflection` | `false` | gRPC health (`grpc.health.v1.Health`) and server reflection |
-| `supported_codecs` | `[GZIP, DEFLATE, IDENTITY]` | Compression codecs accepted on the wire |
-| `http2_backend` | — | Backend selection (HTTPjl, PureHTTP2, Nghttp2); orthogonal to the codegen interface |
+| `max_concurrent_streams`, `max_connections`, `max_queued_requests` | — | HTTP/2 stream/connection limits — **not configurable on any backend; explicitly setting them raises `UnsupportedFeatureError`** |
+| `read_header_timeout` | 30 s | Time to read request headers (`HTTPjlBackend` only) |
+| `read_timeout` / `write_timeout` | disabled | Per-IO timeouts (`HTTPjlBackend` only); set for long-lived streams deliberately |
+| `idle_timeout` | none | Idle connection timeout (`HTTPjlBackend` only) |
+| `keepalive_interval` / `keepalive_timeout` | — | HTTP/2 ping keepalive — **not implemented on any backend; explicitly setting them raises `UnsupportedFeatureError`** |
+| `h2_initial_window_size` / `h2_connection_window_size` | 65535 | HTTP/2 flow-control windows (`HTTPjlBackend` only) |
+| `tls` | `nothing` | TLS config; see `docs/src/tls.md` (cert/key on every backend; mTLS / `min_version` / `alpn_protocols` / `handshake_timeout_ns` on `HTTPjlBackend` + `PureHTTP2Backend` only) |
+| `enable_health_check` / `enable_reflection` | `false` | gRPC health (`grpc.health.v1.Health`) and server reflection; reflection raises on `Nghttp2Backend` (bidi-only service); health `Check` works there, `Watch` is refused per-request |
+| `supported_codecs` | `[GZIP, DEFLATE, IDENTITY]` | **Send-side compression is not implemented on any backend; explicitly setting this (or `compression_threshold`, or `compression_enabled=true`) raises `UnsupportedFeatureError`. Receive-side decompression works on `HTTPjlBackend`/`PureHTTP2Backend`.** |
+| `http2_backend` | — | Backend selection (HTTPjl default, PureHTTP2, Nghttp2); orthogonal to the codegen interface |
 | `context` | `nothing` | App state threaded into every `ServerContext.payload` (Oxygen-style) |
+
+**Backend gating**: an explicitly-set keyword the selected backend cannot honor
+raises `UnsupportedFeatureError` at construction instead of being silently
+ignored. Omitted keywords never raise — explicitness is detected exactly (the
+constructor captures the config keywords in a `kwargs...` splat), so even
+explicitly re-passing a documented default raises. Query per-backend defaults
+and capabilities with `backend_defaults(backend)` / `backend_capabilities(backend)`.
+The backend-fixed constructors `GRPCServerHTTPJl` / `GRPCServerPureHTTP2` /
+`GRPCServerNghttp2` document each backend's raising keywords in their docstrings.
 
 ## ServerContext
 
@@ -85,8 +94,11 @@ typed handles; `send!(stream, msg)` writes one message. See
   never registered report `SERVICE_UNKNOWN` until set).
 - Reflection: `enable_reflection = true` lets tools like grpcurl discover the
   schema without a compiled proto.
-- Compression: `supported_codecs = [CompressionCodec.GZIP, ...]` on the
-  constructor; `compress` / `decompress` are exported for manual use.
+- Compression: receive-side decompression works (the server accepts
+  `grpc-encoding: gzip`/`deflate` requests); send-side compression is **not
+  implemented on any backend**, so `supported_codecs` / `compression_threshold`
+  / `compression_enabled=true` raise `UnsupportedFeatureError` at construction.
+  `compress` / `decompress` are exported for manual use.
 
 ## Errors
 

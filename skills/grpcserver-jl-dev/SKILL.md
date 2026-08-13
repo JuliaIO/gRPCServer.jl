@@ -19,7 +19,7 @@ description: Work on the gRPCServer.jl package itself. Covers the repository map
 | `src/interceptors.jl` | `add_interceptor!`, interceptor chain |
 | `src/services/*` | Health (`set_health!`), reflection |
 | `src/compression.jl`, `src/config.jl` | Codecs, `ServerConfig` kwargs |
-| `src/http2_backend.jl`, `src/backends/*`, `src/framing.jl` | Transport abstraction (HTTPjl default, PureHTTP2, Nghttp2 ext) |
+| `src/http2_backend.jl`, `src/backends/*`, `src/framing.jl` | Transport abstraction (HTTPjl default, PureHTTP2, Nghttp2 ext); `backends/capabilities.jl` holds the per-backend capability table + validator (`backend_capabilities`, `backend_defaults`, `UnsupportedFeatureError`), `backends/entrypoints.jl` the backend-fixed constructors `GRPCServerHTTPJl` / `GRPCServerPureHTTP2` / `GRPCServerNghttp2` |
 | `src/tls/*` | TLS config, `reload_tls!`, `CertificateWatcher` |
 | `test/test_codegen.jl` | Codegen test; canonical `protojl` call form |
 | `test/gen/test/test_pb.jl` | Checked-in regenerated artifact (messages + client stubs + registration in one file) |
@@ -73,7 +73,7 @@ generated files.
 timeout 3000 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-Baseline: 1,023,423 pass / 2 broken / exit 0. The root project has gRPCClient in
+Baseline: 1,023,517 pass / 2 broken / exit 0. The root project has gRPCClient in
 `[deps]` (used by the examples and the codegen tests); `test/aqua.jl` ignores it
 in the stale-deps check (`stale_deps = (; ignore = [:gRPCClient])`) because the
 package itself never loads it. Keep that pair consistent: if gRPCClient ever
