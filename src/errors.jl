@@ -178,6 +178,27 @@ function Base.showerror(io::IO, e::StreamCancelledError)
 end
 
 """
+    UnsupportedFeatureError <: Exception
+
+Exception thrown when a feature is explicitly requested that the selected
+HTTP/2 backend does not support.
+
+# Fields
+- `feature::Symbol`: The feature (configuration keyword) that is unsupported
+- `backend::Type`: The backend type that does not support the feature
+- `message::String`: Human-readable explanation, including the way out
+"""
+struct UnsupportedFeatureError <: Exception
+    feature::Symbol
+    backend::Type
+    message::String
+end
+
+function Base.showerror(io::IO, e::UnsupportedFeatureError)
+    print(io, "UnsupportedFeatureError: ", e.message, " (backend: ", e.backend, ")")
+end
+
+"""
     status_code_to_http(code::StatusCode.T) -> Int
 
 Map a gRPC status code to the appropriate HTTP status code.
