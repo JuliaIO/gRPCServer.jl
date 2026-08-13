@@ -74,6 +74,16 @@ using .TestUtils
     # gRPCClient integration tests
     include("integration/test_grpcclient.jl")
 
+    # Phase 1c ports: csvance test suite adapted to the merged API (original
+    # files stay untouched for the Phase 3 verbatim compat gate). The shared
+    # TestServiceServer harness is included guarded from each ported file.
+    include("port/test_framing.jl")
+    include("port/test_status.jl")
+    include("port/test_errors.jl")
+    include("port/test_lifecycle.jl")
+    include("port/test_raw.jl")
+    include("port/test_load.jl")
+
     # Contract tests
     include("contract/test_grpcurl.jl")
 
