@@ -138,6 +138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent client stacks
 
 ### Changed
+- **`max_concurrent_streams` is now supported on `HTTPjlBackend`.** HTTP.jl
+  (>= 2.5, within the existing `^2.5` compat floor) advertises
+  `SETTINGS_MAX_CONCURRENT_STREAMS` and enforces the cap per connection with
+  `RST_STREAM REFUSED_STREAM`; `serve_grpc` now forwards
+  `cfg.max_concurrent_streams` (default 100) to `HTTP.listen!`. Explicitly
+  setting the keyword no longer raises on the default backend; it still raises
+  `UnsupportedFeatureError` on `PureHTTP2Backend` and `Nghttp2Backend`.
 - **Breaking: explicitly-unsupported configuration now raises
   `UnsupportedFeatureError` at `GRPCServer` construction.** Previously, config
   keywords a backend could not honor (keepalive, `max_connections`,

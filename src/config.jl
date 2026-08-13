@@ -153,12 +153,13 @@ Configuration container for gRPC server options.
 [`GRPCServer`](@ref) construction, however, a configuration keyword that is
 **explicitly set** but unsupported by the selected HTTP/2 backend raises
 [`UnsupportedFeatureError`](@ref) instead of being silently ignored (omitted
-keywords never raise). This applies to: `max_connections`,
-`max_concurrent_streams`, `max_queued_requests`, `keepalive_interval`,
-`keepalive_timeout`, the HTTP.jl listener timeouts and knobs, the h2-window
-keywords, `drain_timeout` (some backends), send-side compression, mTLS / TLS
-sub-features (on `Nghttp2Backend`), and `enable_reflection` (on
-`Nghttp2Backend`). See [HTTP/2 Backends](@ref) for the per-backend matrix.
+keywords never raise). This applies to: `max_connections`, `max_queued_requests`,
+`keepalive_interval`, `keepalive_timeout`, the HTTP.jl listener timeouts and
+knobs, the h2-window keywords, `drain_timeout` (some backends), send-side
+compression, mTLS / TLS sub-features (on `Nghttp2Backend`), `enable_reflection`
+(on `Nghttp2Backend`), and `max_concurrent_streams` (on `PureHTTP2Backend` and
+`Nghttp2Backend` — the `HTTPjlBackend` supports it). See [HTTP/2 Backends](@ref)
+for the per-backend matrix.
 
 # Example
 ```julia

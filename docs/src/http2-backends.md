@@ -35,6 +35,7 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 | Any streaming RPC type | `HTTPjlBackend` or `PureHTTP2Backend` |
 | Request bodies larger than ~64 KB | `HTTPjlBackend` — see below |
 | The `nghttp2` C reference implementation | `Nghttp2Backend` — unary and client-streaming only |
+| A configurable per-connection concurrent-stream limit | `HTTPjlBackend` (`max_concurrent_streams`, default 100) |
 | Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
 | A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
 
@@ -51,12 +52,12 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 
 !!! note "HTTP.jl backend limitations"
     Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
-    not support live TLS certificate reload (`reload_tls!`) or a configurable
-    max-concurrent-streams limit. mTLS over TLS 1.2 is also currently broken
-    upstream in Reseau (it works over TLS 1.3). Select `PureHTTP2Backend()` if
-    you need any of these. Setting these keywords explicitly now raises
-    [`UnsupportedFeatureError`](@ref) at construction rather than being
-    silently ignored — see [Capability validation](#capability-validation).
+    not support live TLS certificate reload (`reload_tls!`). mTLS over TLS 1.2
+    is also currently broken upstream in Reseau (it works over TLS 1.3). Select
+    `PureHTTP2Backend()` if you need certificate reload. Setting these keywords
+    explicitly now raises [`UnsupportedFeatureError`](@ref) at construction
+    rather than being silently ignored — see
+    [Capability validation](#capability-validation).
 
 ## Capability validation
 
@@ -88,7 +89,7 @@ and document in their docstrings which keywords raise on that backend.
 | `max_receive_message_length` | ✅ enforced | ❌ raises | ❌ raises |
 | `max_send_message_length`, `max_concurrent_requests` | ✅ | ✅ | ✅ |
 | `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ raises | ❌ raises | ❌ raises |
-| `max_concurrent_streams` | ❌ raises | ❌ raises | ❌ raises |
+| `max_concurrent_streams` | ✅ enforced per connection (default 100) | ❌ raises | ❌ raises |
 | `idle_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout` | ✅ | ❌ raises | ❌ raises |
 | `max_header_bytes`, `reuseaddr`, `backlog` | ✅ | ❌ raises | ❌ raises |
 | `h2_initial_window_size`, `h2_connection_window_size` | ✅ | ❌ raises | ❌ raises |
