@@ -77,6 +77,11 @@ include("backends/purehttp2.jl")
 include("backends/httpjl.jl")
 include("backends/nghttp2.jl")
 
+# 4c. Backend capability validation (capability table, per-backend defaults,
+#     constructor kwarg checks) — depends on errors, config, http2_backend, and
+#     the three backend types
+include("backends/capabilities.jl")
+
 # 4c. Strict HTTP/2/gRPC header helpers (parse_grpc_timeout, percent_encode,
 #     _clip, _is_grpc_content_type) — depend on errors; must precede context.jl
 #     which uses them
@@ -111,6 +116,9 @@ include("tls/transport.jl")
 # 9. Main server (depends on everything above including proto types and TLSTransport)
 include("server.jl")
 
+# 9b. Per-backend convenience constructors (depend on the GRPCServer constructor)
+include("backends/entrypoints.jl")
+
 # 10. TLS certificate reload (depends on server for watcher wiring)
 include("tls/reload.jl")
 
@@ -129,6 +137,7 @@ export ServerStatus, StatusCode, MethodType, HealthStatus, CompressionCodec
 # Error Types
 export GRPCError, BindError, ServiceAlreadyRegisteredError
 export InvalidServerStateError, MethodSignatureError, StreamCancelledError
+export UnsupportedFeatureError
 export status_code_to_http, exception_to_status_code, http2_to_grpc_status
 
 # Stream Types
@@ -174,6 +183,9 @@ export has_health_descriptor, has_reflection_descriptor
 export AbstractHTTP2Backend, PureHTTP2Backend, create_connection
 # HTTP.jl backend + raised stream-handler contract (feature 020)
 export HTTPjlBackend, Nghttp2Backend, AbstractGRPCStream, serve_grpc
+# Backend capability validation + per-backend convenience constructors
+export BackendCapabilities, backend_capabilities, backend_defaults
+export GRPCServerHTTPJl, GRPCServerPureHTTP2, GRPCServerNghttp2
 
 # HTTP/2 Stream State (for advanced use cases)
 export can_send, StreamError

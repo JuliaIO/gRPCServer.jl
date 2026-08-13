@@ -38,6 +38,28 @@ The main gRPC server managing connections, services, and lifecycle.
 - `shed_total::Base.Threads.Atomic{Int}`: Total requests rejected at the concurrency cap
 - `context::Any`: Server-level payload threaded into each request's `ServerContext.payload`
 
+# Configuration keywords
+
+The HTTP/2 backend is selected with `http2_backend::AbstractHTTP2Backend` (default
+[`HTTPjlBackend`](@ref)); `context::Any` carries a server-level payload. The remaining
+configuration keywords mirror the [`ServerConfig`](@ref) fields:
+`max_message_size`, `max_receive_message_length`, `max_send_message_length`,
+`max_concurrent_streams`, `max_connections`, `max_concurrent_requests`,
+`max_queued_requests`, `keepalive_interval`, `keepalive_timeout`, `idle_timeout`,
+`drain_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout`,
+`max_header_bytes`, `reuseaddr`, `backlog`, `tls::Union{TLSConfig, Nothing}`,
+`enable_health_check`, `enable_reflection`, `debug_mode`, `log_requests`,
+`compression_enabled`, `compression_threshold`, `supported_codecs`,
+`h2_initial_window_size`, `h2_connection_window_size`.
+
+Backends do not support every feature. Explicitly specifying a keyword the chosen
+backend cannot honor raises [`UnsupportedFeatureError`](@ref) at construction instead
+of silently ignoring it (omitted keywords never raise). Per-backend defaults and the
+supported keyword set are declared by [`backend_defaults`](@ref) and
+[`backend_capabilities`](@ref); for convenience, see the backend-specific constructors
+[`GRPCServerHTTPJl`](@ref), [`GRPCServerPureHTTP2`](@ref), and
+[`GRPCServerNghttp2`](@ref), whose docstrings list each backend's raising keywords.
+
 # Example
 ```julia
 server = GRPCServer("0.0.0.0", 50051)
@@ -82,83 +104,49 @@ mutable struct GRPCServer
     function GRPCServer(
         host::String,
         port::Int;
-        max_message_size::Int=4 * 1024 * 1024,
-        max_receive_message_length::Union{Int, Nothing}=nothing,  # nothing => max_message_size
-        max_send_message_length::Union{Int, Nothing}=nothing,     # nothing => max_message_size
-        max_concurrent_streams::Int=100,
-        max_connections::Union{Int, Nothing}=nothing,
-        max_concurrent_requests::Union{Int, Nothing}=nothing,
-        max_queued_requests::Int=1000,
-        keepalive_interval::Union{Float64, Nothing}=nothing,
-        keepalive_timeout::Float64=20.0,
-        idle_timeout::Union{Float64, Nothing}=nothing,
-        drain_timeout::Float64=30.0,
-        read_header_timeout::Union{Float64, Nothing}=30.0,
-        read_timeout::Union{Float64, Nothing}=nothing,
-        write_timeout::Union{Float64, Nothing}=nothing,
-        max_header_bytes::Int=1024 * 1024,
-        reuseaddr::Bool=true,
-        backlog::Int=128,
-        tls::Union{TLSConfig, Nothing}=nothing,
-        enable_health_check::Bool=false,
-        enable_reflection::Bool=false,
-        debug_mode::Bool=false,
-        log_requests::Bool=false,
-        compression_enabled::Bool=true,
-        compression_threshold::Int=1024,
-        supported_codecs::Vector{CompressionCodec.T}=[
-            CompressionCodec.GZIP,
-            CompressionCodec.DEFLATE,
-            CompressionCodec.IDENTITY
-        ],
         http2_backend::AbstractHTTP2Backend=HTTPjlBackend(),
         context::Any=nothing,
-        h2_initial_window_size::Int=65535,
-        h2_connection_window_size::Int=65535
+        kwargs...
     )
         # Validate host and port
         if port < 1 || port > 65535
             throw(ArgumentError("Port must be between 1 and 65535: $port"))
         end
 
+        # The configuration keywords are captured by `kwargs...` (none are
+        # declared), so `keys(kwargs)` is exactly the set the caller explicitly
+        # passed — including explicitly-passed defaults. This lets the
+        # constructor reject features the chosen backend cannot honor with
+        # `UnsupportedFeatureError` instead of silently ignoring them.
+        # Per-backend defaults come from `backend_defaults` (a fresh
+        # `ServerConfig()` by default). See src/backends/capabilities.jl.
+        _check_known_kwargs(kwargs)
+        explicit = keys(kwargs)
+        merged = merge(backend_defaults(http2_backend), NamedTuple(kwargs))
+
+        # ServerConfig is built FIRST so config range errors (e.g. an invalid
+        # h2_connection_window_size, rejected by HTTP.HTTP2Settings) keep
+        # throwing ArgumentError; capability validation only runs on a valid
+        # configuration.
+        config_kwargs = (;
+            (k => v for (k, v) in pairs(merged) if k ∉ (:h2_initial_window_size, :h2_connection_window_size, :http2_settings))...,
+        )
         config = ServerConfig(;
-            max_connections=max_connections,
-            max_concurrent_streams=max_concurrent_streams,
-            max_concurrent_requests=max_concurrent_requests,
-            max_queued_requests=max_queued_requests,
-            max_message_size=max_message_size,
-            max_receive_message_length=max_receive_message_length,
-            max_send_message_length=max_send_message_length,
-            keepalive_interval=keepalive_interval,
-            keepalive_timeout=keepalive_timeout,
-            idle_timeout=idle_timeout,
-            drain_timeout=drain_timeout,
-            read_header_timeout=read_header_timeout,
-            read_timeout=read_timeout,
-            write_timeout=write_timeout,
-            max_header_bytes=max_header_bytes,
-            reuseaddr=reuseaddr,
-            backlog=backlog,
-            tls=tls,
-            enable_health_check=enable_health_check,
-            enable_reflection=enable_reflection,
-            debug_mode=debug_mode,
-            log_requests=log_requests,
-            compression_enabled=compression_enabled,
-            compression_threshold=compression_threshold,
-            supported_codecs=supported_codecs,
+            config_kwargs...,
             http2_settings=HTTP.HTTP2Settings(
-                initial_window_size=h2_initial_window_size,
-                connection_window_size=h2_connection_window_size,
+                initial_window_size=merged.h2_initial_window_size,
+                connection_window_size=merged.h2_connection_window_size,
             ),
         )
+
+        _validate_backend_capabilities!(config, http2_backend, explicit)
 
         server = new(
             host,
             port,
             config,
             ServerStatus.STOPPED,
-            RequestDispatcher(; debug_mode=debug_mode),
+            RequestDispatcher(; debug_mode=merged.debug_mode),
             Dict{String, HealthStatus.T}(),
             nothing,
             [],
@@ -174,7 +162,7 @@ mutable struct GRPCServer
         )
 
         # Add logging interceptor if requested
-        if log_requests
+        if merged.log_requests
             add_interceptor!(server, LoggingInterceptor())
         end
 
@@ -639,6 +627,10 @@ function reload_tls!(server::GRPCServer)
     end
 
     @info "Reloading TLS certificates"
+    if !backend_capabilities(typeof(server.http2_backend)).tls_reload
+        throw(UnsupportedFeatureError(:tls_reload, typeof(server.http2_backend),
+            "reload_tls! is not supported by $(nameof(typeof(server.http2_backend))) — use PureHTTP2Backend"))
+    end
     if server.tls_transport !== nothing
         reload!(server.tls_transport, server.config.tls)
     end
