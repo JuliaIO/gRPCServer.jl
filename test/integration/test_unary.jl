@@ -21,7 +21,7 @@ using Sockets
     end
 
     @testset "Multiple Concurrent Connections" begin
-        with_test_server(max_concurrent_streams=100) do ts
+        with_test_server() do ts
             clients = [MockGRPCClient("127.0.0.1", ts.port) for _ in 1:10]
 
             # Connect all clients

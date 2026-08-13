@@ -22,14 +22,16 @@ using gRPCServer
         server = GRPCServer(
             "0.0.0.0", 50051;
             max_message_size = 8 * 1024 * 1024,
-            max_concurrent_streams = 200,
             enable_health_check = true,
             enable_reflection = true,
             debug_mode = true
         )
 
         @test server.config.max_message_size == 8 * 1024 * 1024
-        @test server.config.max_concurrent_streams == 200
+        # max_concurrent_streams is not configurable on the default HTTPjl
+        # backend (explicitly setting it raises UnsupportedFeatureError); the
+        # resolved value is the documented default.
+        @test server.config.max_concurrent_streams == 100
         @test server.config.enable_health_check == true
         @test server.config.enable_reflection == true
         @test server.config.debug_mode == true

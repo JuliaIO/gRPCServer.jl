@@ -58,6 +58,7 @@ using .TestUtils
     # HTTP/2 backend tests (feature 020)
     include("backends/test_backend_interface.jl")
     include("backends/test_httpjl_backend.jl")
+    include("backends/test_capability_validation.jl")
 
     # Integration tests
     include("integration/test_unary.jl")

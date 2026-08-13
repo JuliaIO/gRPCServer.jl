@@ -46,6 +46,31 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
         @test gRPCServer.uses_serve_grpc(Nghttp2Backend())
     end
 
+    @testset "construction raises for unsupported features" begin
+        # enable_reflection is a bidi-only service, refused on Nghttp2.
+        @test_throws UnsupportedFeatureError GRPCServerNghttp2(
+            "127.0.0.1", 50210; enable_reflection=true)
+        # mTLS is silently ignored by the extension (cert/key only). TLSConfig
+        # stores paths without reading them, so fake paths are fine here.
+        @test_throws UnsupportedFeatureError GRPCServerNghttp2(
+            "127.0.0.1", 50211;
+            tls=TLSConfig(cert_chain="/fake/server.crt", private_key="/fake/server.key",
+                          client_ca="/fake/ca.crt", require_client_cert=true))
+        # HTTP.jl listener timeouts are not applicable to this backend.
+        @test_throws UnsupportedFeatureError GRPCServerNghttp2(
+            "127.0.0.1", 50212; read_timeout=5.0)
+        # Receive cap is not enforced.
+        @test_throws UnsupportedFeatureError GRPCServerNghttp2(
+            "127.0.0.1", 50213; max_receive_message_length=8 * 1024 * 1024)
+        # Default-config construction works; basic TLS (cert/key) works;
+        # enable_health_check is allowed (Check works; Watch refused per-request).
+        @test GRPCServerNghttp2("127.0.0.1", 50214) isa GRPCServer
+        @test GRPCServerNghttp2(
+            "127.0.0.1", 50215;
+            tls=TLSConfig(cert_chain="/fake/server.crt", private_key="/fake/server.key")) isa GRPCServer
+        @test GRPCServerNghttp2("127.0.0.1", 50216; enable_health_check=true) isa GRPCServer
+    end
+
     grpc_init()
     try
         with_remote_server(backend = "nghttp2") do ts
