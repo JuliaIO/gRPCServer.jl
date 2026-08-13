@@ -37,8 +37,6 @@ end
         @test_throws UnsupportedFeatureError GRPCServer(
             "127.0.0.1", 50110; http2_backend=PureHTTP2Backend(), backlog=128)
         @test_throws UnsupportedFeatureError GRPCServer(
-            "127.0.0.1", 50111; max_concurrent_streams=100)
-        @test_throws UnsupportedFeatureError GRPCServer(
             "127.0.0.1", 50112; http2_backend=PureHTTP2Backend(), h2_initial_window_size=65535)
         @test_throws UnsupportedFeatureError GRPCServer(
             "127.0.0.1", 50113; keepalive_timeout=20.0)
@@ -68,6 +66,11 @@ end
             @test GRPCServer("127.0.0.1", 50136; compression_enabled=false) isa GRPCServer
             @test GRPCServer("127.0.0.1", 50137; max_send_message_length=1024 * 1024) isa GRPCServer
             @test GRPCServer("127.0.0.1", 50138; max_message_size=8 * 1024 * 1024) isa GRPCServer
+            # max_concurrent_streams is supported on HTTPjl (HTTP.jl enforces it
+            # per connection via SETTINGS_MAX_CONCURRENT_STREAMS), including
+            # explicitly re-passing the documented default.
+            @test GRPCServer("127.0.0.1", 50139; max_concurrent_streams=100) isa GRPCServer
+            @test GRPCServer("127.0.0.1", 50139; max_concurrent_streams=200) isa GRPCServer
         end
     end
 
