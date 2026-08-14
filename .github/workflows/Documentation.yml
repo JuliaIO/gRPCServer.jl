@@ -15,6 +15,7 @@ name: Documentation
 on:
   push:
     branches:
+      - master
       - main
       - develop
     tags: ['*']
