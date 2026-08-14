@@ -9,6 +9,7 @@ using gRPCServer
 
         # Connection limits
         @test config.max_concurrent_streams == 100
+        @test config.max_concurrent_requests == 1024  # conservative default cap
 
         # Message limits
         @test config.max_message_size == 4 * 1024 * 1024  # 4MB
@@ -16,6 +17,10 @@ using gRPCServer
         # Timeouts
         @test config.keepalive_timeout == 20.0
         @test config.drain_timeout == 30.0
+        @test config.idle_timeout == 300.0  # conservative default (aligns with legacy serve!)
+        @test config.read_header_timeout == 30.0
+        @test config.read_timeout === nothing  # disabled by design (kills long-lived streams)
+        @test config.write_timeout === nothing
 
         # TLS
         @test config.tls === nothing

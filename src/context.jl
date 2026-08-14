@@ -50,7 +50,7 @@ Request-scoped context provided to handler functions.
 - `metadata::Dict{String, Union{String, Vector{UInt8}}}`: Request metadata
 - `response_headers::Dict{String, Union{String, Vector{UInt8}}}`: Response headers to send
 - `trailers::Dict{String, Union{String, Vector{UInt8}}}`: Trailing metadata to send
-- `deadline::Union{DateTime, Nothing}`: Request deadline (nothing = no deadline)
+- `deadline::Union{DateTime, Nothing}`: Request deadline (nothing = no deadline). The server does **not** interrupt a handler when the deadline passes — it is enforced only before dispatch (fail-fast) and after the handler returns (see [`ServerConfig`](@ref) deadline semantics); handlers should check [`remaining_time`](@ref)/[`is_cancelled`](@ref) cooperatively to bound their own runtime.
 - `cancelled::Bool`: Whether the request has been cancelled
 - `peer::PeerInfo`: Client connection information
 - `trace_context::Union{Vector{UInt8}, Nothing}`: Distributed tracing context

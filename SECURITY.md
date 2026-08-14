@@ -80,11 +80,14 @@ When deploying gRPCServer.jl in production:
    server = GRPCServer(host, port; debug_mode = false)
    ```
 
-3. **Set appropriate limits**: Configure message and stream limits
+3. **Set appropriate limits**: Configure message, stream, and concurrency limits.
+   The server ships conservative defaults (`max_concurrent_requests = 1024`,
+   `idle_timeout = 300`), but size them to your host and workload:
    ```julia
    server = GRPCServer(host, port;
        max_message_size = 4 * 1024 * 1024,  # 4MB
-       max_concurrent_streams = 100
+       max_concurrent_streams = 100,
+       max_concurrent_requests = 1024  # sheds excess load with RESOURCE_EXHAUSTED
    )
    ```
 
@@ -110,6 +113,19 @@ When deploying gRPCServer.jl in production:
        return next(ctx, request)
    end
    ```
+
+6. **Bound handler runtime**: The server parses `grpc-timeout` into
+   `ctx.deadline` but does **not** interrupt a handler whose deadline passes —
+   enforcement happens only before dispatch (fail-fast) and after the handler
+   returns. A handler that ignores the deadline runs to completion, so treat
+   long-running handlers as a DoS vector: check `remaining_time(ctx)` /
+   `is_cancelled(ctx)` cooperatively, install a `TimeoutInterceptor`, and keep
+   the `max_concurrent_requests` cap sized to memory.
+
+7. **Reap stalled bodies**: `idle_timeout = 300` (default) closes connections
+   that stop sending bytes, bounding slow-body memory accrual. `read_timeout`
+   is disabled by default because it also kills legitimately idle long-lived
+   streams; enable it only for unary or short-lived workloads.
 
 ## Dependencies
 

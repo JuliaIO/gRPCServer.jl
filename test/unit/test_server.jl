@@ -107,9 +107,9 @@ using gRPCServer
         @test server.shed_total[] == 0
         @test server.config.max_concurrent_requests == 4
 
-        # Default: unlimited (nothing); counters still present and zeroed.
+        # Default: conservative cap of 1024; counters still present and zeroed.
         server2 = GRPCServer("0.0.0.0", 50051)
-        @test server2.config.max_concurrent_requests === nothing
+        @test server2.config.max_concurrent_requests == 1024
         @test server2.inflight[] == 0
         @test server2.shed_total[] == 0
     end

@@ -138,6 +138,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   independent client stacks
 
 ### Changed
+- **`ServerConfig` ships conservative resource defaults.**
+  `max_concurrent_requests` now defaults to `1024` (was `nothing` = unlimited)
+  and `idle_timeout` to `300` seconds (was `nothing` = never, aligning with the
+  legacy `serve!` default). HTTP.jl allows 100 concurrent streams per
+  connection, so with the cap unset N connections imply 100·N concurrent
+  handler tasks; the new defaults bound that and reap connections that stop
+  sending bytes (including stalled partial request bodies). `read_timeout`
+  remains disabled by design — enabling it also terminates legitimately idle
+  long-lived streaming RPCs. Explicit `nothing`/`0` still opts out of the
+  concurrency cap.
+- **Fail-fast deadline enforcement before handler dispatch.** A request whose
+  `grpc-timeout` deadline has already passed when it reaches the handler now
+  fails immediately with a trailers-only `DEADLINE_EXCEEDED` and the handler is
+  never invoked (previously the handler ran and the deadline was mapped only
+  after it returned). Enforcement is still post-return only while a handler
+  executes — a handler that runs past its deadline is not interrupted; that
+  semantic, the cooperative `remaining_time`/`is_cancelled` pattern, and the
+  opt-in `TimeoutInterceptor` (also pre-check-only) are now documented on
+  `ServerConfig`, `dispatch_grpc_call`, and in the security guidance.
+  Watchdog-based cancellation and a server-side default deadline remain future
+  work.
 - **`max_concurrent_streams` is now supported on `HTTPjlBackend`.** HTTP.jl
   (>= 2.5, within the existing `^2.5` compat floor) advertises
   `SETTINGS_MAX_CONCURRENT_STREAMS` and enforces the cap per connection with
@@ -191,6 +212,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ALPN_MISMATCH`.
 
 ### Fixed
+- **A malformed `-bin` metadata header no longer answers a bare HTTP 500 on
+  the HTTPjl backend.** `_grpc_context_from_metadata` base64-decoded `-bin`
+  header values unconditionally; invalid base64 threw `ArgumentError`, which
+  escaped `dispatch_grpc_call`'s `GRPCError`-only catch and reached HTTP.jl as
+  a plain 500 with no gRPC status. The value is now validated and the call
+  fails with a proper trailers-only gRPC `INVALID_ARGUMENT` status (the spec
+  requires binary metadata to be base64-encoded).
 - **Requests larger than ~64 KB no longer fail on the HTTP.jl backend.**
   `read_message!` used `read(io, n)`, which reads *at most* `n` bytes: on an
   HTTP.jl stream it returns whatever is buffered and no more. For a message

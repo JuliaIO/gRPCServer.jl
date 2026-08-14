@@ -106,7 +106,7 @@ Configuration container for gRPC server options.
 ## Connection Limits
 - `max_connections::Union{Int, Nothing}`: Maximum concurrent connections (nothing = unlimited)
 - `max_concurrent_streams::Int`: Maximum streams per connection (default: 100)
-- `max_concurrent_requests::Union{Int, Nothing}`: Maximum concurrent requests (nothing or 0 = unlimited, matching the legacy csvance semantics; default: nothing)
+- `max_concurrent_requests::Union{Int, Nothing}`: Maximum concurrent requests (default: 1024; `nothing` or 0 = unlimited, matching the legacy csvance semantics). The admission gate sheds a call arriving past the cap immediately with a trailers-only `RESOURCE_EXHAUSTED` status — no queue, no waiting (see `max_queued_requests`). Ships enabled because HTTP.jl allows 100 concurrent streams per connection, so with the cap unset N connections yield 100·N concurrent handler tasks; 1024 bounds that by default while staying well above typical concurrency.
 - `max_queued_requests::Int`: **NOT IMPLEMENTED** — accepted for API compatibility only. No request
   queue exists: a call arriving past `max_concurrent_requests` is shed immediately with a trailers-only
   `RESOURCE_EXHAUSTED` status (no queueing, no waiting). The value has no effect, and explicitly setting
@@ -122,11 +122,41 @@ Configuration container for gRPC server options.
 ## Timeouts (in seconds)
 - `keepalive_interval::Union{Float64, Nothing}`: Interval for keepalive pings (nothing = disabled)
 - `keepalive_timeout::Float64`: Timeout for keepalive response (default: 20.0)
-- `idle_timeout::Union{Float64, Nothing}`: Close idle connections after this time (nothing = never)
+- `idle_timeout::Union{Float64, Nothing}`: Close idle connections after this time (default: 300; `nothing` = never). Aligns with the legacy `serve!` default. A connection that stops sending bytes — including one holding a partial request body — is closed after this window, bounding slow-body memory accrual.
 - `drain_timeout::Float64`: Maximum time to wait for graceful shutdown (default: 30.0)
 - `read_header_timeout::Union{Float64, Nothing}`: Max seconds to read request headers before the connection is closed (default: 30.0; nothing disables). Passed through to the HTTP.jl listener.
-- `read_timeout::Union{Float64, Nothing}`: Max seconds to read request data (nothing = disabled, the default). Enabling it also terminates legitimately idle long-lived streaming connections. Passed through to the HTTP.jl listener.
+- `read_timeout::Union{Float64, Nothing}`: Max seconds to read request data (nothing = disabled, the default). Enabling it defends against a peer that trickles or never finishes a request body, but it also terminates legitimately idle long-lived streaming connections, so set it only for unary or short-lived workloads — `idle_timeout` (on by default) already bounds stalled bodies at coarser granularity. Passed through to the HTTP.jl listener.
 - `write_timeout::Union{Float64, Nothing}`: Max seconds to write response data (nothing = disabled, the default). Passed through to the HTTP.jl listener.
+
+## Deadline semantics
+
+`grpc-timeout` is parsed strictly into `ctx.deadline` (`INVALID_ARGUMENT` if
+malformed). The deadline is enforced at two points, never mid-execution: a
+fail-fast pre-check before the handler runs (an already-expired deadline fails
+with trailers-only `DEADLINE_EXCEEDED` and the handler is not invoked), and a
+post-return mapping once the handler has finished. A handler that runs past its
+deadline is **not interrupted** — it runs to completion and its result is then
+mapped to `DEADLINE_EXCEEDED`. Handlers that must bound their own runtime
+should check `remaining_time`/`is_cancelled` cooperatively or install
+[`TimeoutInterceptor`](@ref) (also pre-check-only). Watchdog-based cancellation
+and a server-side default deadline are future work. Unbounded handler runtime
+is the main amplification vector for resource exhaustion: pair cooperative
+deadline checks with a `max_concurrent_requests` cap sized to memory (see the
+DoS posture note below).
+
+## DoS posture
+
+The server trusts a peer only up to the configured limits. The shipped defaults
+are conservative for a reason: HTTP.jl allows 100 concurrent streams per
+connection, so without a cap N connections imply 100·N concurrent handler
+tasks, and a stalled request body holds memory until the peer finishes it or
+the connection is reaped. The defaults bound both — `max_concurrent_requests =
+1024` caps concurrent handler tasks (further requests are shed with
+`RESOURCE_EXHAUSTED`), and `idle_timeout = 300` closes connections that stop
+sending bytes. Still size `max_concurrent_requests` explicitly to the host's
+memory and the configured `max_message_size` in production, and treat any
+handler that can run for a long time as a DoS vector (see [Deadline
+semantics](#deadline-semantics) and SECURITY.md).
 
 ## HTTP.jl listener knobs (legacy serve! pass-throughs)
 - `max_header_bytes::Int`: Maximum request-header size in bytes (default: 1MiB)
@@ -222,14 +252,14 @@ struct ServerConfig
     function ServerConfig(;
         max_connections::Union{Int, Nothing}=nothing,
         max_concurrent_streams::Int=100,
-        max_concurrent_requests::Union{Int, Nothing}=nothing,
+        max_concurrent_requests::Union{Int, Nothing}=1024,
         max_queued_requests::Int=1000,
         max_message_size::Int=4 * 1024 * 1024,  # 4MB, seeds both directions
         max_receive_message_length::Union{Int, Nothing}=nothing,  # nothing => max_message_size
         max_send_message_length::Union{Int, Nothing}=nothing,     # nothing => max_message_size
         keepalive_interval::Union{Float64, Nothing}=nothing,
         keepalive_timeout::Float64=20.0,
-        idle_timeout::Union{Float64, Nothing}=nothing,
+        idle_timeout::Union{Float64, Nothing}=300.0,
         drain_timeout::Float64=30.0,
         read_header_timeout::Union{Float64, Nothing}=30.0,
         read_timeout::Union{Float64, Nothing}=nothing,

@@ -1598,6 +1598,13 @@ end
 # until that serve loop is migrated too.
 # ---------------------------------------------------------------------------
 
+# Build the per-request ServerContext from the wire metadata (HTTPjl path).
+# Binary metadata (`-bin` suffix) must be base64-encoded per the gRPC spec, so a
+# malformed value is a client protocol violation and fails the call with
+# INVALID_ARGUMENT — via the existing GRPCError mapping in dispatch_grpc_call,
+# never a bare HTTP 500. Deliberate divergence from create_context_from_headers
+# (the PureHTTP2 path keeps raw bytes on decode failure): correctness on the
+# HTTP.jl backend is the priority.
 function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String;
                                        payload::Any = nothing)::ServerContext
     md = Dict{String, Union{String, Vector{UInt8}}}()
@@ -1608,7 +1615,17 @@ function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String;
         end
         startswith(name, ":") && continue  # skip HTTP/2 pseudo-headers
         if endswith(name, "-bin")
-            md[name] = Base64.base64decode(value)
+            try
+                md[name] = Base64.base64decode(value)
+            catch e
+                # base64decode throws ArgumentError on invalid input (the
+                # documented failure mode). Map it to a gRPC status instead of
+                # letting it escape the transport as a bare 500; anything else
+                # is not a decode problem and rethrows.
+                e isa ArgumentError || rethrow()
+                throw(GRPCError(StatusCode.INVALID_ARGUMENT,
+                                "malformed base64 in binary metadata header $name: $(_clip(value))"))
+            end
         else
             md[name] = value
         end
@@ -1646,6 +1663,14 @@ end
 # call MUST fail with DEADLINE_EXCEEDED even if the handler returned OK. A
 # status the handler already produced as DEADLINE_EXCEEDED/CANCELLED is left
 # untouched (idempotent — the handler's message wins).
+#
+# Post-return only: this runs after the handler has finished. It is NOT a
+# watchdog and never interrupts a running handler — a handler that ignores
+# remaining_time/is_cancelled runs to completion, and only then is its result
+# mapped here. Handlers that must bound their own runtime should check
+# remaining_time/is_cancelled cooperatively or install TimeoutInterceptor
+# (also pre-check-only). Watchdog-based cancellation is future work; see the
+# ServerConfig docstring on deadline semantics.
 function _apply_deadline(ctx::ServerContext, status::StatusCode.T, message::String)::Tuple{StatusCode.T, String}
     if ctx.deadline !== nothing && now() >= ctx.deadline
         if status in (StatusCode.DEADLINE_EXCEEDED, StatusCode.CANCELLED)
@@ -1712,13 +1737,22 @@ Route and execute one gRPC call (any of the four RPC types) using only the
 [`AbstractGRPCStream`](@ref) contract, so it works for any HTTP/2 backend.
 
 Framing-layer `GRPCError`s — a hostile/oversize/compressed/truncated request, an
-extra frame on a single-message RPC, or a response larger than
-`max_send_message_length` — never escape as transport errors. They are mapped to
+extra frame on a single-message RPC, a response larger than
+`max_send_message_length`, or malformed metadata (e.g. a `-bin` header whose
+value is not base64) — never escape as transport errors. They are mapped to
 a trailers-only gRPC status response (a headers block plus `grpc-status`
 trailers, or just the trailers once response headers have already been sent),
 mirroring the UNIMPLEMENTED path, so a client sees a proper gRPC status instead
 of a bare HTTP/2 500 with no grpc-status. Any other exception propagates to the
 backend.
+
+Deadline semantics: `grpc-timeout` is parsed strictly into `ctx.deadline`
+(INVALID_ARGUMENT if malformed). It is enforced at two points — a fail-fast
+pre-check before the handler runs (an already-expired deadline fails with
+trailers-only DEADLINE_EXCEEDED and the handler is never invoked), and the
+post-return `_apply_deadline` mapping once the handler has finished. There is
+no mid-execution enforcement: a handler that runs past its deadline is not
+interrupted (see the ServerConfig docstring).
 """
 function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::PeerInfo)
     path = grpc_path(gs)
@@ -1811,6 +1845,17 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             ctx.cancelled = true
         end
         max_send = server.config.max_send_message_length
+        # Fail fast if the client deadline already passed before the handler
+        # runs (zero timeout, or queueing delay past the deadline). NOT a
+        # watchdog: a handler that outlives its deadline is still mapped
+        # post-return by _apply_deadline below — see the ServerConfig
+        # docstring on deadline semantics.
+        remaining = remaining_time(ctx)
+        if remaining !== nothing && remaining <= 0
+            send_grpc_response_generic(gs, StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded.",
+                                       UInt8[]; content_type=content_type, max_send_message_length=max_send, ctx=ctx)
+            return nothing
+        end
         mt = method_desc.method_type
         if mt == MethodType.UNARY
             data = read_message!(gs)

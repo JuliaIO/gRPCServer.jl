@@ -240,6 +240,50 @@ using .ConformanceData
     end  # T045
 
     # =========================================================================
+    # T045b: _apply_deadline post-return mapping
+    #
+    # The deadline is enforced only *after* the handler returns (plus the
+    # fail-fast pre-check before dispatch) — never mid-execution. These unit
+    # tests pin the deterministic post-return semantics without sleeping.
+    # =========================================================================
+
+    @testset "T045b: _apply_deadline post-return mapping" begin
+        past = now() - Second(5)
+        ctx_past = gRPCServer.ServerContext(deadline = past)
+        ctx_none = gRPCServer.ServerContext()  # no deadline
+
+        @testset "past deadline + OK -> DEADLINE_EXCEEDED" begin
+            status, message = gRPCServer._apply_deadline(ctx_past, StatusCode.OK, "")
+            @test status == StatusCode.DEADLINE_EXCEEDED
+            @test message == "Deadline exceeded."
+        end
+
+        @testset "past deadline + handler DEADLINE_EXCEEDED -> idempotent" begin
+            status, message = gRPCServer._apply_deadline(
+                ctx_past, StatusCode.DEADLINE_EXCEEDED, "handler msg")
+            @test status == StatusCode.DEADLINE_EXCEEDED
+            @test message == "handler msg"  # the handler's message wins
+        end
+
+        @testset "past deadline + CANCELLED -> idempotent" begin
+            status, message = gRPCServer._apply_deadline(
+                ctx_past, StatusCode.CANCELLED, "cancel msg")
+            @test status == StatusCode.CANCELLED
+            @test message == "cancel msg"
+        end
+
+        @testset "no deadline -> status untouched" begin
+            status, message = gRPCServer._apply_deadline(ctx_none, StatusCode.OK, "")
+            @test status == StatusCode.OK
+            @test message == ""
+
+            status2, message2 = gRPCServer._apply_deadline(ctx_none, StatusCode.INTERNAL, "err")
+            @test status2 == StatusCode.INTERNAL
+            @test message2 == "err"
+        end
+    end
+
+    # =========================================================================
     # T046: Context Cancellation
     # =========================================================================
 

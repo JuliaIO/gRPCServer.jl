@@ -292,16 +292,26 @@ end
         @test length(s.messages) == 1
     end
 
-    @testset "grpc-timeout 0S -> DEADLINE_EXCEEDED even when the handler returns OK" begin
-        server = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+    @testset "grpc-timeout 0S -> fail-fast DEADLINE_EXCEEDED, handler never invoked" begin
+        handler_ran = Ref(false)
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            handler = (ctx, req) -> (handler_ran[] = true; req),
+        )
         s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]);
                               metadata = [("content-type", "application/grpc"),
                                           ("te", "trailers"),
                                           ("grpc-timeout", "0S")])
         gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
 
+        # The deadline pre-check fires before dispatch: the call fails fast and
+        # the handler is never invoked, even though it would return OK.
+        @test !handler_ran[]
         @test grpc_status(s) == Int(StatusCode.DEADLINE_EXCEEDED)
         @test grpc_message(s) == "Deadline exceeded."
+        @test isempty(s.messages) # trailers-only response, no response message
+        @test one_headers_block(s)
+        @test (":status", "200") in s.headers
     end
 
     @testset "cancelled stream: ctx.cancelled observed by handler, call still completes" begin
@@ -319,6 +329,50 @@ end
         @test got_cancel[] == true  # dispatch mapped is_cancelled(gs) onto ctx
         @test grpc_status(s) == Int(StatusCode.OK) # and the call completes normally
         @test length(s.messages) == 1
+    end
+
+    @testset "malformed -bin metadata -> INVALID_ARGUMENT, never a bare 500" begin
+        handler_ran = Ref(false)
+        server = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            handler = (ctx, req) -> (handler_ran[] = true; req),
+        )
+        s = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]);
+                              metadata = [("content-type", "application/grpc"),
+                                          ("te", "trailers"),
+                                          ("x-bomb-bin", "!!!not-base64!!!")])
+        gRPCServer.dispatch_grpc_call(server, s, PeerInfo(IPv4(0), 0))
+
+        # Invalid base64 in a -bin header is a client protocol violation: the
+        # call fails with a proper gRPC INVALID_ARGUMENT status (trailers-only)
+        # instead of the ArgumentError escaping to the transport as a bare
+        # HTTP/2 500 with no grpc-status.
+        @test grpc_status(s) == Int(StatusCode.INVALID_ARGUMENT)
+        @test grpc_message(s) !== nothing
+        @test isempty(s.messages)
+        @test one_headers_block(s)
+        @test (":status", "200") in s.headers
+        @test !handler_ran[]
+
+        # Regression: a well-formed -bin header still base64-decodes and the
+        # call completes OK; the handler observes the decoded bytes.
+        seen = Ref{Any}(nothing)
+        server2 = register_raw_service!(
+            GRPCServer("127.0.0.1", 50051),
+            handler = (ctx, req) -> begin
+                seen[] = get_metadata_binary(ctx, "x-good-bin")
+                req
+            end,
+        )
+        s2 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]);
+                               metadata = [("content-type", "application/grpc"),
+                                           ("te", "trailers"),
+                                           ("x-good-bin", "AQIDBA==")])
+        gRPCServer.dispatch_grpc_call(server2, s2, PeerInfo(IPv4(0), 0))
+
+        @test seen[] == UInt8[0x01, 0x02, 0x03, 0x04]
+        @test grpc_status(s2) == Int(StatusCode.OK)
+        @test length(s2.messages) == 1
     end
 
     @testset "load shedding: max_concurrent_requests cap" begin
@@ -346,8 +400,10 @@ end
         @test server1.shed_total[] == 1
         @test server1.inflight[] == 1 # the simulated in-flight call is untouched
 
-        # nothing (default): no gating, the call succeeds.
+        # Default cap (1024 since the hardening pass): a single call is admitted
+        # with plenty of headroom, so nothing is shed and inflight returns to 0.
         server2 = register_raw_service!(GRPCServer("127.0.0.1", 50051))
+        @test server2.config.max_concurrent_requests == 1024
         s2 = FrameDrivenStream("/test.Hostile/Echo", framed(UInt8[0x01]))
         gRPCServer.dispatch_grpc_call(server2, s2, PeerInfo(IPv4(0), 0))
         @test grpc_status(s2) == Int(StatusCode.OK)

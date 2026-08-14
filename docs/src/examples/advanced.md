@@ -379,10 +379,11 @@ stream. That per-stream task is where your handler runs. Because each
 connection and each stream is independent, many RPCs are served concurrently
 as a matter of course.
 
-The `max_concurrent_requests` keyword on `GRPCServer` (default `nothing` or
-`0`, meaning unlimited) caps how many RPCs run at once. When the cap is
+The `max_concurrent_requests` keyword on `GRPCServer` (default `1024`) caps
+how many RPCs run at once. When the cap is
 reached, additional requests are shed immediately with a trailers-only
 `StatusCode.RESOURCE_EXHAUSTED` status — there is no queue and no waiting.
+Pass `nothing` or `0` for an unlimited cap (the legacy csvance behavior).
 
 ```julia
 server = GRPCServer("127.0.0.1", 50051;
@@ -428,20 +429,61 @@ See [TLS](../tls.md).
 
 ### Concurrency cap
 
-Always set an explicit `max_concurrent_requests` cap in production; the
-unlimited default is intended for development. Size it to the host's memory and
-the configured `max_message_size`.
+`max_concurrent_requests` ships enabled with a conservative default of `1024`
+(HTTP.jl allows 100 concurrent streams per connection, so without a cap N
+connections imply 100·N concurrent handler tasks). Still size it explicitly to
+the host's memory and the configured `max_message_size` in production; a cap
+that is too small sheds legitimate load with `RESOURCE_EXHAUSTED`, while one
+that is too large lets a flood consume all available memory.
 
 ### Connection timeouts
 
 Connection timeouts default to `read_header_timeout = 30` seconds, which reaps
-slow-header connections without disturbing established streams. `idle_timeout`
-defaults to `nothing` (never), so set it explicitly to close idle connections
-in production. `read_timeout` and `write_timeout` are disabled by default;
-enabling them defends against a peer that trickles or never finishes a request
-or response body, but a non-zero `read_timeout` also terminates legitimately
+slow-header connections without disturbing established streams, and
+`idle_timeout = 300` seconds, which closes connections that stop sending bytes
+(including one holding a partial request body, bounding slow-body memory
+accrual). `read_timeout` and `write_timeout` are disabled by default; enabling
+them defends against a peer that trickles or never finishes a request or
+response body, but a non-zero `read_timeout` also terminates legitimately
 idle long-lived streaming RPCs, so set it only for unary or short-lived
 workloads.
+
+### Deadlines and cancellation
+
+The `grpc-timeout` header is parsed strictly into `ctx.deadline` (a malformed
+value fails the call with `INVALID_ARGUMENT`). The deadline is enforced at two
+points, and **never while your handler is running**:
+
+- **Pre-dispatch**: if the deadline has already passed when the request reaches
+the handler (a zero timeout, or queueing delay past the deadline), the call
+fails fast with a trailers-only `DEADLINE_EXCEEDED` and your handler is never
+invoked.
+- **Post-return**: once your handler returns, a deadline that has since passed
+maps the result to `DEADLINE_EXCEEDED` (a status your handler already produced
+as `DEADLINE_EXCEEDED`/`CANCELLED` is left untouched).
+
+A handler that runs past its deadline is **not interrupted** — it runs to
+completion, and only then is its result mapped. There is no watchdog-based
+cancellation yet. Handlers that must bound their own runtime should check
+`remaining_time(ctx)` / `is_cancelled(ctx)` cooperatively (the gRPC
+interceptors work here too — see `TimeoutInterceptor`, which is also
+pre-check-only):
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    remaining = remaining_time(ctx)
+    if remaining !== nothing && remaining <= 0
+        throw(GRPCError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded"))
+    end
+    # ... work, checking is_cancelled(ctx) between long steps
+end
+```
+
+A long-running handler that ignores the deadline is a resource-exhaustion
+vector: it ties up a stream (and memory) for as long as it runs. Pair
+cooperative deadline checks with a `max_concurrent_requests` cap sized to your
+workload, and keep `idle_timeout` enabled, so that a flood of slow or
+never-completing calls cannot pile up unbounded handlers.
 
 ## The Runtime Interface Beneath the Codegen
 
