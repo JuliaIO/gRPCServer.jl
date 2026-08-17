@@ -32,7 +32,7 @@ features:
     link: /performance/
   - icon: ⚙️
     title: IDE-first code generation
-    details: One protojl run emits message types and registration functions designed for IDE code completion and suggestions, plus client stubs when gRPCClient.jl is loaded.
+    details: One protojl run emits message types and registration functions designed for IDE code completion and suggestions.
     link: /code_generation/
   - icon: 🧩
     title: Middleware interceptors
