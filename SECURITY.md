@@ -4,7 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 1.0.x   | :white_check_mark: (unreleased until General registration) |
 
 ## Reporting a Vulnerability
 
@@ -132,7 +132,8 @@ When deploying gRPCServer.jl in production:
 gRPCServer.jl depends on:
 
 - **ProtoBuf.jl**: Message serialization
-- **OpenSSL.jl**: TLS implementation
+- **Reseau.jl**: TLS implementation (incl. mTLS/ALPN)
+- **HTTP.jl**: HTTP/2 transport (default backend)
 - **CodecZlib.jl**: Compression
 
 Security vulnerabilities in these dependencies may affect gRPCServer.jl. We monitor for updates and will release patches as needed.

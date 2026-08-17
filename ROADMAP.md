@@ -55,7 +55,8 @@ If it turns out to have been this, the harness can be simplified.
 A unary request whose body exceeds the HTTP/2 initial flow-control window
 (65535 bytes) never reaches the handler on `PureHTTP2Backend`: the stream is
 reset. `HTTPjlBackend`, the default, is unaffected — its own version of this
-limit was fixed in 0.2.0.
+limit was fixed in 0.2.0. `PureHTTP2Backend` is the opt-in backend, selected
+explicitly via `http2_backend=PureHTTP2Backend()`.
 
 The cause is in PureHTTP2.jl's connection layer, not here. See its ROADMAP for
 the seven hypotheses measured and eliminated. Nothing to do in this repository
@@ -63,47 +64,25 @@ beyond widening the `PureHTTP2` compat bound once a fixed version is released.
 
 ### A third backend via Nghttp2Wrapper.jl
 
-**Status**: Not started — worth scoping.
+**Status**: ✅ Complete — shipped as a weak-dep package extension.
 
-The two current backends have independent protocol-level defects: stream
-teardown on the HTTP.jl side (fixed in 0.2.0, but it took a packet capture to
-find), request-side flow control on the PureHTTP2 side (still open). Both live
-in code this project or its sibling maintains.
+`Nghttp2Backend` is implemented as a package extension
+(`[weakdeps]` + `[extensions]` in `Project.toml`; `ext/gRPCServerNghttp2Ext.jl`),
+CI-tested via the dedicated `nghttp2` job (`.github/workflows/CI.yml`), and
+serves unary and client-streaming calls. Nghttp2Wrapper's fully-buffered
+handler cannot time server- or bidirectional streaming, so those are refused
+with an explicit `UNIMPLEMENTED` reply rather than served with wrong timing.
 
-A backend over `nghttp2`, the C reference implementation, would move that
-surface out of scope. It would implement the raised `AbstractGRPCStream` /
-`serve_grpc` contract rather than the connection factory, so no change to this
-package is required.
+The backend type is declared in the main package with a capability guard that
+fails fast when the extension is not loaded (`_assert_nghttp2_capable`),
+mirroring `HTTPjlBackend`'s `_assert_httpjl_capable`.
 
-**Prerequisite assessment (done, 2026-07-30): premature — two gaps upstream.**
-
-`Nghttp2Wrapper.HTTP2Server` exists, with an accept loop, TLS/ALPN, and the
-nghttp2 data-provider callback wired up. Two things block a gRPC backend on top
-of it, both in Nghttp2Wrapper rather than here:
-
-1. **No trailer support.** `grep -ri trailer src/` returns nothing. Every gRPC
-   response terminates with `grpc-status` in a trailing HEADERS block — this is
-   not optional, and no gRPC call can complete without it. Needs
-   `nghttp2_submit_trailer` exposed.
-
-2. **The handler model is fully buffered.** It is
-   `ServerRequest(method, path, headers, body)` → `ServerResponse(status,
-   headers, body)`: the whole request body arrives before the handler runs, and
-   the whole response body is returned at once. That cannot express
-   server-streaming, client-streaming or bidirectional calls, and it cannot
-   emit trailers after a body. The `_server_data_source_read_cb` data provider
-   is the right foundation for incremental writes, so the gap is in the exposed
-   API rather than in the binding.
-
-Until both land upstream, a `Nghttp2Backend` here would have nothing to adapt.
-The order is: extend Nghttp2Wrapper.jl first, then implement the backend
-against the raised `AbstractGRPCStream` contract.
-
-**When it does land**, it must be a *weak* dependency — a package extension
-(`[weakdeps]` + `[extensions]`, supported by the `julia = "1.10"` bound), not a
-hard one. The backend type would be declared in the main package with a
-capability guard that fails fast when the extension is not loaded, mirroring
-`HTTPjlBackend`'s `_assert_httpjl_capable`.
+**Historical note**: the original prerequisite assessment (2026-07-30) judged
+this "premature — two gaps upstream" (`Nghttp2Wrapper` had no trailer support
+and a fully-buffered handler model). The shipped design resolves the trailer gap
+by accumulating trailers and delivering them with the final `ServerResponse`;
+the buffered-handler timing limitation remains and is documented on the HTTP/2
+Backends page.
 
 ### Residual: `wait_for_message_or_end` discards response frames
 
@@ -182,7 +161,7 @@ The documentation build now runs in strict mode with no `warnonly` exceptions.
 
 ### Externalize HTTP/2 Module
 
-**Status**: Step 1 ✅ Complete (feature 019-http2-backend-abstraction); Step 2 deferred
+**Status**: ✅ Complete — Step 1 (feature 019-http2-backend-abstraction) and Step 2 both done
 
 The in-tree `src/http2/` module duplicated code that had been extracted into [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl). Feature 019 removed that duplication and shipped a lightweight backend abstraction so future alternatives like [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) or [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) ([JuliaWeb/HTTP.jl#1248](https://github.com/JuliaWeb/HTTP.jl/pull/1248)) can plug in without modifying gRPCServer core.
 
@@ -194,15 +173,18 @@ The in-tree `src/http2/` module duplicated code that had been extracted into [Pu
 - [x] Full test suite passes (9336 tests); no benchmark regressions (see `benchmark/BASELINE.md`)
 - [x] New `docs/src/http2-backends.md` documenting the backend interface
 
-**Step 2 (deferred — only if multiple backends are actually wanted)**:
-- [ ] Add weakdep extensions (`Nghttp2WrapperExt`, `HTTPjlExt`) once a second backend is validated end-to-end
-  - Intentionally not designed yet: PureHTTP2.jl is currently the reference shape of the interface, and baking in a second backend's quirks prematurely would cost more than it saves
-  - The `AbstractHTTP2Backend` shim is already in place; extensions only need to implement `create_connection` and adapt their native types to the expected field interface
+**Step 2 (done)**:
+- [x] Add package extensions once a second backend was validated end-to-end:
+  `HTTPjlBackend` (the default, in-tree via the hard `HTTP.jl` dep) and
+  `Nghttp2Backend` (`ext/gRPCServerNghttp2Ext.jl`) both implement the raised
+  `AbstractGRPCStream`/`serve_grpc` contract
+- [x] Three backends ship: `HTTPjlBackend` (default), `PureHTTP2Backend`,
+  `Nghttp2Backend`
 
 **Tradeoffs for Step 2:**
 - Nghttp2Wrapper: most battle-tested protocol correctness (libnghttp2 is the reference C impl), but adds a binary dependency.
 - HTTP.jl #1248: keeps the stack pure-Julia and aligned with JuliaWeb, but blocked on upstream merge.
-- PureHTTP2: now the default — zero migration cost, same bugs gRPCServer would inherit anyway.
+- HTTP.jl: the default backend — pure-Julia, aligned with JuliaWeb, and already shipping as `HTTPjlBackend`. PureHTTP2: opt-in backend.
 
 **References**:
 - [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (extracted from this module)
@@ -307,7 +289,7 @@ A security audit would help identify vulnerabilities in the HTTP/2 and TLS imple
 
 - [x] Core gRPC server implementation
 - [x] All four RPC patterns (unary, server/client/bidi streaming)
-- [x] HTTP/2 protocol support with HPACK compression (via [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl), pluggable via `AbstractHTTP2Backend`)
+- [x] HTTP/2 protocol support with HPACK compression (via pluggable backends: [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (default), [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (opt-in), [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) (opt-in))
 - [x] TLS/mTLS support (via [Reseau.jl](https://github.com/JuliaServices/Reseau.jl), with real server-side ALPN selection and enforced client certificate verification)
 - [x] Atomic TLS certificate reload (`reload_tls!`)
 - [x] Health checking service
@@ -328,4 +310,4 @@ A security audit would help identify vulnerabilities in the HTTP/2 and TLS imple
 
 ---
 
-*Last updated: 2026-04-17*
+*Last updated: 2026-08-17*
