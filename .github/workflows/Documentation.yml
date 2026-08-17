@@ -34,7 +34,7 @@ jobs:
       contents: write   # required for the gh-pages push by Documenter.deploydocs
       statuses: write   # reports the deploy status back to the commit
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
