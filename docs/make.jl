@@ -1,4 +1,5 @@
 using Documenter
+using DocumenterLandingPage
 using gRPCServer
 
 DocMeta.setdocmeta!(gRPCServer, :DocTestSetup, :(using gRPCServer); recursive=true)
@@ -10,7 +11,7 @@ makedocs(
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical = "https://csvance.github.io/gRPCServer.jl",
-        assets = String[],
+        assets = ["assets/custom.css"],
     ),
     pages = [
         "Home" => "index.md",
@@ -32,6 +33,7 @@ makedocs(
     ],
     doctest = false,  # Disable doctests for now
     checkdocs = :exports,
+    plugins = [LandingPage()],
 )
 
 deploydocs(

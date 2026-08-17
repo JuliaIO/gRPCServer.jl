@@ -23,7 +23,9 @@ using gRPCServer
 # Default: uses HTTPjlBackend (HTTP.jl)
 server = GRPCServer("127.0.0.1", 50051)
 
-# Opt in to the PureHTTP2 backend
+# Opt in to the PureHTTP2 backend (optional dependency: load PureHTTP2 first,
+# which also loads the gRPCServerPureHTTP2Ext extension)
+using PureHTTP2
 server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 ```
 
@@ -210,11 +212,15 @@ exactly one message, where the client has already half-closed — never on
 client- or bidirectional-streaming calls, where a peer may legitimately hold its
 send side open.
 
-### The connection-factory contract: `create_connection`
+### The connection-factory contract: `create_connection` (legacy)
 
-The original one, used by `PureHTTP2Backend`. The factory returns a connection
-object compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting
-the following operations:
+The original contract. As of 1.0 it is **legacy**: no built-in backend uses
+it (all three — HTTPjl, PureHTTP2, nghttp2 — drive through `serve_grpc`), and
+the frame-loop driver that consumed factory connections moved into the
+PureHTTP2 package extension. It remains documented for custom backends
+written against the old interface. The factory returns a connection object
+compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting the
+following operations:
 
 | Category         | Methods                                                                 |
 |------------------|-------------------------------------------------------------------------|

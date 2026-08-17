@@ -185,7 +185,7 @@ serve_grpc
 
 ## HTTP/2 Stream State
 
-These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection. They come from [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) and are re-exported by gRPCServer.
+These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection. As of 1.0 they come from [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) directly — gRPCServer no longer re-exports them (PureHTTP2 became an optional weak dependency). Load PureHTTP2 and qualify: `PureHTTP2.can_send(stream)`, `PureHTTP2.StreamError`.
 
 - `can_send(stream)` — check whether a stream is in a state that accepts outbound data
 - `StreamError` — exception type for HTTP/2 stream-level errors

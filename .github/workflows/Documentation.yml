@@ -33,6 +33,15 @@ jobs:
       statuses: write   # reports the deploy status back to the commit
     steps:
       - uses: actions/checkout@v7
+      # STATE A: materialize the DocumenterLandingPage.jl path source pinned to
+      # the registered commit (6654ca6) as a sibling of docs/, matching the
+      # [sources] entry in docs/Project.toml. Remove this step (and the
+      # [sources] entry) once General PR #164538 has merged — STATE B.
+      - uses: actions/checkout@v7
+        with:
+          repository: csvance/DocumenterLandingPage.jl
+          ref: 6654ca6
+          path: DocumenterLandingPage.jl
       - uses: julia-actions/setup-julia@v3
         with:
           version: '1'
