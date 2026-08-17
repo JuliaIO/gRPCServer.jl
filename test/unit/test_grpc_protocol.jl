@@ -101,13 +101,13 @@ using .ConformanceData
             # Valid: TE: trailers present
             request = TestUtils.MockHTTP2Request(te="trailers")
             stream = TestUtils.create_mock_stream(request)
-            te_header = gRPCServer.get_header(stream, "te")
+            te_header = PureHTTP2.get_header(stream, "te")
             @test te_header == "trailers"
 
             # Missing TE header should be handled (warning, not rejection)
             request_no_te = TestUtils.MockHTTP2Request(te=nothing)
             stream_no_te = TestUtils.create_mock_stream(request_no_te)
-            te_header_missing = gRPCServer.get_header(stream_no_te, "te")
+            te_header_missing = PureHTTP2.get_header(stream_no_te, "te")
             @test te_header_missing === nothing
             # Server should still accept request (warning only per research.md)
         end
@@ -285,7 +285,7 @@ using .ConformanceData
                 )
             )
             stream = TestUtils.create_mock_stream(request)
-            metadata = gRPCServer.get_metadata(stream)
+            metadata = PureHTTP2.get_metadata(stream)
 
             # Find custom headers
             has_custom = false
@@ -317,11 +317,11 @@ using .ConformanceData
                 ("x-multi", "value3"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
             stream.headers_complete = true
 
-            values = gRPCServer.get_headers(stream, "x-multi")
+            values = PureHTTP2.get_headers(stream, "x-multi")
             @test length(values) == 3
             @test values[1] == "value1"
             @test values[2] == "value2"
@@ -366,7 +366,7 @@ using .ConformanceData
     @testset "AC6: Connection Management (basic)" begin
 
         @testset "Connection preface constant" begin
-            @test gRPCServer.CONNECTION_PREFACE == b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+            @test CONNECTION_PREFACE == b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
         end
 
     end  # AC6

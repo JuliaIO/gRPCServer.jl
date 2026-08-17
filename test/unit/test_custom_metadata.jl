@@ -4,6 +4,7 @@
 
 using Test
 using Base64
+using Sockets
 using gRPCServer
 
 # Include conformance test data
@@ -31,7 +32,7 @@ using .ConformanceData
                 )
             )
             stream = TestUtils.create_mock_stream(request)
-            metadata = gRPCServer.get_metadata(stream)
+            metadata = PureHTTP2.get_metadata(stream)
 
             found_custom = false
             found_another = false
@@ -53,7 +54,7 @@ using .ConformanceData
                 metadata=Dict("authorization" => "Bearer token123")
             )
             stream = TestUtils.create_mock_stream(request)
-            metadata = gRPCServer.get_metadata(stream)
+            metadata = PureHTTP2.get_metadata(stream)
 
             found = false
             for (name, value) in metadata
@@ -72,8 +73,8 @@ using .ConformanceData
             stream = TestUtils.create_mock_stream(request)
 
             # Should find with any case
-            @test gRPCServer.get_header(stream, "x-custom-header") == "value"
-            @test gRPCServer.get_header(stream, "X-CUSTOM-HEADER") == "value"
+            @test PureHTTP2.get_header(stream, "x-custom-header") == "value"
+            @test PureHTTP2.get_header(stream, "X-CUSTOM-HEADER") == "value"
         end
 
     end  # T027
@@ -148,11 +149,11 @@ using .ConformanceData
                 ("x-multi", "value3"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
             stream.headers_complete = true
 
-            values = gRPCServer.get_headers(stream, "x-multi")
+            values = PureHTTP2.get_headers(stream, "x-multi")
             @test length(values) == 3
         end
 
@@ -168,11 +169,11 @@ using .ConformanceData
                 ("x-ordered", "third"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
             stream.headers_complete = true
 
-            values = gRPCServer.get_headers(stream, "x-ordered")
+            values = PureHTTP2.get_headers(stream, "x-ordered")
             @test values[1] == "first"
             @test values[2] == "second"
             @test values[3] == "third"
@@ -189,12 +190,12 @@ using .ConformanceData
                 ("x-first", "value2"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
             stream.headers_complete = true
 
             # get_header returns first occurrence
-            @test gRPCServer.get_header(stream, "x-first") == "value1"
+            @test PureHTTP2.get_header(stream, "x-first") == "value1"
         end
 
     end  # T029
@@ -210,7 +211,7 @@ using .ConformanceData
                 metadata=Dict("x-custom" => "value")
             )
             stream = TestUtils.create_mock_stream(request)
-            metadata = gRPCServer.get_metadata(stream)
+            metadata = PureHTTP2.get_metadata(stream)
 
             for (name, _) in metadata
                 @test !startswith(name, ":")
@@ -231,11 +232,11 @@ using .ConformanceData
                 ("x-custom", "custom-value"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
             stream.headers_complete = true
 
-            metadata = gRPCServer.get_metadata(stream)
+            metadata = PureHTTP2.get_metadata(stream)
             metadata_names = [name for (name, _) in metadata]
 
             # Reserved headers should not be in metadata
@@ -260,7 +261,7 @@ using .ConformanceData
                 ("authorization", "Bearer token"),
             ]
 
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = headers
 
             peer = gRPCServer.PeerInfo(Sockets.IPv4("127.0.0.1"), 12345)

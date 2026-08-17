@@ -47,13 +47,13 @@ function parse_expected_headers(json_headers)
 end
 
 """
-    run_test_case(decoder::gRPCServer.HPACKDecoder, test_case; impl_name::String="", filename::String="") -> Bool
+    run_test_case(decoder::HPACKDecoder, test_case; impl_name::String="", filename::String="") -> Bool
 
 Decode wire data and compare to expected headers.
 Returns true if decoded headers match expected headers exactly.
 Handles header_table_size updates when specified in test case.
 """
-function run_test_case(decoder::gRPCServer.HPACKDecoder, test_case; impl_name::String="", filename::String="")
+function run_test_case(decoder::HPACKDecoder, test_case; impl_name::String="", filename::String="")
     seqno = test_case.seqno
     wire_hex = String(test_case.wire)
     expected = parse_expected_headers(test_case.headers)
@@ -61,12 +61,12 @@ function run_test_case(decoder::gRPCServer.HPACKDecoder, test_case; impl_name::S
     # Handle header_table_size if specified (T013)
     if hasproperty(test_case, :header_table_size)
         table_size = test_case.header_table_size
-        gRPCServer.set_max_table_size!(decoder, table_size)
+        set_max_table_size!(decoder, table_size)
     end
 
     # Decode wire data
     wire_bytes = hex2bytes(wire_hex)
-    decoded = gRPCServer.decode_headers(decoder, wire_bytes)
+    decoded = decode_headers(decoder, wire_bytes)
 
     # Compare results
     if decoded == expected
@@ -90,7 +90,7 @@ function run_test_file(filepath::String; impl_name::String="")
     data = load_test_file(filepath)
 
     # Create fresh decoder for this file (compression context is per-file)
-    decoder = gRPCServer.HPACKDecoder(4096)
+    decoder = HPACKDecoder(4096)
 
     passed = 0
     total = length(data.cases)
@@ -202,18 +202,18 @@ const FIXTURES_DIR = joinpath(@__DIR__, "..", "fixtures", "hpack-test-case")
                     data = load_test_file(filepath)
 
                     # Create fresh encoder/decoder pair
-                    encoder = gRPCServer.HPACKEncoder(4096; use_huffman=false)
-                    decoder = gRPCServer.HPACKDecoder(4096)
+                    encoder = HPACKEncoder(4096; use_huffman=false)
+                    decoder = HPACKDecoder(4096)
 
                     @testset "$filename" begin
                         for test_case in data.cases
                             headers = parse_expected_headers(test_case.headers)
 
                             # Encode headers
-                            encoded = gRPCServer.encode_headers(encoder, headers)
+                            encoded = encode_headers(encoder, headers)
 
                             # Decode back
-                            decoded = gRPCServer.decode_headers(decoder, encoded)
+                            decoded = decode_headers(decoder, encoded)
 
                             @test decoded == headers
                         end
@@ -227,18 +227,18 @@ const FIXTURES_DIR = joinpath(@__DIR__, "..", "fixtures", "hpack-test-case")
                     data = load_test_file(filepath)
 
                     # Create fresh encoder/decoder pair with Huffman enabled
-                    encoder = gRPCServer.HPACKEncoder(4096; use_huffman=true)
-                    decoder = gRPCServer.HPACKDecoder(4096)
+                    encoder = HPACKEncoder(4096; use_huffman=true)
+                    decoder = HPACKDecoder(4096)
 
                     @testset "$filename" begin
                         for test_case in data.cases
                             headers = parse_expected_headers(test_case.headers)
 
                             # Encode headers with Huffman
-                            encoded = gRPCServer.encode_headers(encoder, headers)
+                            encoded = encode_headers(encoder, headers)
 
                             # Decode back
-                            decoded = gRPCServer.decode_headers(decoder, encoded)
+                            decoded = decode_headers(decoder, encoded)
 
                             @test decoded == headers
                         end
@@ -252,17 +252,17 @@ const FIXTURES_DIR = joinpath(@__DIR__, "..", "fixtures", "hpack-test-case")
                 data = load_test_file(filepath)
 
                 if length(data.cases) >= 2
-                    encoder = gRPCServer.HPACKEncoder(4096; use_huffman=false)
-                    decoder = gRPCServer.HPACKDecoder(4096)
+                    encoder = HPACKEncoder(4096; use_huffman=false)
+                    decoder = HPACKDecoder(4096)
 
                     encoded_sizes = Int[]
                     for test_case in data.cases
                         headers = parse_expected_headers(test_case.headers)
-                        encoded = gRPCServer.encode_headers(encoder, headers)
+                        encoded = encode_headers(encoder, headers)
                         push!(encoded_sizes, length(encoded))
 
                         # Verify decoding still works
-                        decoded = gRPCServer.decode_headers(decoder, encoded)
+                        decoded = decode_headers(decoder, encoded)
                         @test decoded == headers
                     end
 

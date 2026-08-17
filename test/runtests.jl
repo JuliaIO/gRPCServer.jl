@@ -21,6 +21,14 @@ end
 include("TestUtils.jl")
 using .TestUtils
 
+# PureHTTP2-dependent tests are OPT-IN (GRPCSERVER_TEST_PUREHTTP2=true):
+# run via test/purehttp2/run_purehttp2_tests.jl and the `purehttp2` CI job.
+# The default suite targets HTTPjlBackend (the default backend); the
+# PureHTTP2 backend has known streaming-workload issues that are deliberately
+# out of scope for 1.0 (tracked post-release), and its E2E serve path must not
+# be able to hang the default suite.
+const PUREHTTP2_TESTS = get(ENV, "GRPCSERVER_TEST_PUREHTTP2", "false") in ("true", "1")
+
 @testset "gRPCServer.jl" begin
     # Aqua.jl quality checks
     include("aqua.jl")
@@ -38,25 +46,25 @@ using .TestUtils
     include("unit/test_tls.jl")
     include("unit/test_tls_docs.jl")
     include("unit/test_reflection.jl")
-    include("unit/test_hpack.jl")
-    include("unit/test_http2_stream.jl")
-    include("unit/test_stream_state_validation.jl")
-    include("unit/test_content_type.jl")
-    include("unit/test_grpc_protocol.jl")
-    include("unit/test_http2_conformance.jl")
-    include("unit/test_request_validation.jl")
+    PUREHTTP2_TESTS && include("unit/test_hpack.jl")
+    PUREHTTP2_TESTS && include("unit/test_http2_stream.jl")
+    PUREHTTP2_TESTS && include("unit/test_stream_state_validation.jl")
+    PUREHTTP2_TESTS && include("unit/test_content_type.jl")
+    PUREHTTP2_TESTS && include("unit/test_grpc_protocol.jl")
+    PUREHTTP2_TESTS && include("unit/test_http2_conformance.jl")
+    PUREHTTP2_TESTS && include("unit/test_request_validation.jl")
     include("unit/test_response_format.jl")
-    include("unit/test_message_encoding.jl")
-    include("unit/test_custom_metadata.jl")
+    PUREHTTP2_TESTS && include("unit/test_message_encoding.jl")
+    PUREHTTP2_TESTS && include("unit/test_custom_metadata.jl")
     include("unit/test_error_mapping.jl")
     include("unit/test_dispatch_grpc_error_mapping.jl")
     include("unit/test_strict.jl")
-    include("unit/test_connection_management.jl")
+    PUREHTTP2_TESTS && include("unit/test_connection_management.jl")
     include("unit/test_timeout_handling.jl")
-    include("unit/test_http2_backend.jl")
+    PUREHTTP2_TESTS && include("unit/test_http2_backend.jl")
 
     # HTTP/2 backend tests (feature 020)
-    include("backends/test_backend_interface.jl")
+    PUREHTTP2_TESTS && include("backends/test_backend_interface.jl")
     include("backends/test_httpjl_backend.jl")
     include("backends/test_capability_validation.jl")
 
@@ -104,7 +112,7 @@ using .TestUtils
     include("contract/test_grpcurl.jl")
 
     # Interoperability tests
-    include("interop/test_hpack_interop.jl")
+    PUREHTTP2_TESTS && include("interop/test_hpack_interop.jl")
 
     # Basic module tests
     @testset "Module loads correctly" begin

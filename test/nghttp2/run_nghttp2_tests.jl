@@ -221,3 +221,21 @@ end
         try; close(sock); catch; end
     end
 end
+
+# The opposite case for the OTHER optional backend: this environment has no
+# PureHTTP2, so it proves the extension is absent and the guard is actionable.
+@testset "PureHTTP2 extension absent" begin
+    @test Base.get_extension(gRPCServer, :gRPCServerPureHTTP2Ext) === nothing
+    err = try
+        PureHTTP2Backend()
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("using PureHTTP2", sprint(showerror, err))
+
+    # The default backend still serves in a PureHTTP2-free environment.
+    @test gRPCServer.uses_serve_grpc(HTTPjlBackend())
+    @test GRPCServer("127.0.0.1", 50123).http2_backend isa HTTPjlBackend
+end

@@ -27,7 +27,11 @@ const BACKEND = get(ENV, "GRPCSERVER_TEST_BACKEND", "httpjl")
 const SERVICE = get(ENV, "GRPCSERVER_TEST_SERVICE", "interop")
 
 backend = if BACKEND == "purehttp2"
-    PureHTTP2Backend()
+    # Loaded here and not at the top of the file, mirroring the nghttp2 branch:
+    # PureHTTP2 is an optional weakdep extension since 1.0, and the harness
+    # must construct the backend only in an environment that has it.
+    @eval using PureHTTP2
+    Base.invokelatest(PureHTTP2Backend)
 elseif BACKEND == "httpjl"
     HTTPjlBackend()
 elseif BACKEND == "nghttp2"

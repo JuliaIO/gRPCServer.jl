@@ -123,3 +123,28 @@ jobs:
         env:
           JULIA_LOAD_PATH: "@:@stdlib"
         run: julia --project=@nghttp2 test/nghttp2/run_nghttp2_tests.jl
+
+  purehttp2:
+    # The optional PureHTTP2 backend (weakdep extension), on the latest stable
+    # Julia only. Unit-level surface (framing/HPACK/stream state/adapter
+    # contract) — the E2E serve/streaming path is deferred pending upstream
+    # fixes and must not be able to hang CI. Mirrors the nghttp2 job shape.
+    name: purehttp2 backend (optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v3
+      - name: Build the purehttp2 environment
+        run: |
+          julia --project=@purehttp2 -e '
+            using Pkg
+            Pkg.develop(PackageSpec(path = pwd()))
+            Pkg.add(["PureHTTP2", "gRPCClient", "ProtoBuf", "JSON", "Test"])'
+      - name: Run the PureHTTP2 unit tests
+        env:
+          JULIA_LOAD_PATH: "@:@stdlib"
+        run: julia --project=@purehttp2 test/purehttp2/run_purehttp2_tests.jl

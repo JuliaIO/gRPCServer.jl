@@ -270,7 +270,7 @@ using .ConformanceData
 
         @testset "Decompress gzip message" begin
             # Create stream with grpc-encoding header
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -293,13 +293,13 @@ using .ConformanceData
             write(stream.data_buffer, msg)
 
             # Read and verify decompression
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == original
         end
 
         @testset "Decompress deflate message" begin
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -317,13 +317,13 @@ using .ConformanceData
             )
             write(stream.data_buffer, msg)
 
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == original
         end
 
         @testset "Identity encoding with compressed flag" begin
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -340,13 +340,13 @@ using .ConformanceData
             write(stream.data_buffer, msg)
 
             # With identity encoding, data should pass through unchanged
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == original
         end
 
         @testset "Compressed flag set but no grpc-encoding header" begin
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -363,13 +363,13 @@ using .ConformanceData
             write(stream.data_buffer, msg)
 
             # Should warn but still return data
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == data  # Returns as-is since no encoding specified
         end
 
         @testset "Unknown encoding codec" begin
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -386,13 +386,13 @@ using .ConformanceData
             write(stream.data_buffer, msg)
 
             # Unknown codec should return data unchanged
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == data
         end
 
         @testset "Uncompressed message (flag = 0)" begin
-            stream = gRPCServer.HTTP2Stream(UInt32(1))
+            stream = PureHTTP2.HTTP2Stream(UInt32(1))
             stream.request_headers = [
                 (":method", "POST"),
                 (":path", "/test/Method"),
@@ -409,7 +409,7 @@ using .ConformanceData
             write(stream.data_buffer, msg)
 
             # Should not attempt decompression
-            result = gRPCServer.read_grpc_message!(stream)
+            result = P2Ext.read_grpc_message!(PureHTTP2.HTTP2Connection(), stream)
             @test result !== nothing
             @test result == data
         end

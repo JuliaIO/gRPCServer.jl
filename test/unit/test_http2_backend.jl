@@ -70,15 +70,12 @@ using PureHTTP2
         @test isdefined(PureHTTP2, :can_send)
     end
 
-    @testset "Re-exported symbols from gRPCServer" begin
-        # StreamError should be accessible via gRPCServer
-        @test isdefined(gRPCServer, :StreamError)
-        err = gRPCServer.StreamError(UInt32(1), UInt32(0), "test error")
-        @test err isa Exception
-        @test err.stream_id == UInt32(1)
-
-        # can_send should be accessible via gRPCServer
-        @test isdefined(gRPCServer, :can_send)
+    @testset "Removed re-exports (1.0)" begin
+        # PureHTTP2 became a weakdep extension in 1.0: its StreamError/can_send
+        # names are no longer imported/re-exported by gRPCServer. Access them
+        # via `using PureHTTP2` (PureHTTP2.StreamError) when the backend is in use.
+        @test !isdefined(gRPCServer, :StreamError)
+        @test !isdefined(gRPCServer, :can_send)
 
         # http2_to_grpc_status should work
         @test isdefined(gRPCServer, :http2_to_grpc_status)

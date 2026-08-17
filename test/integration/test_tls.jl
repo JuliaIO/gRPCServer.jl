@@ -310,9 +310,9 @@ end
             @test occursin("ALPN_MISMATCH", captured)
         end
 
-        @testset "US1: full GRPCServer TLS startup and accept loop" begin
+        PUREHTTP2_TESTS && @testset "US1: full GRPCServer TLS startup and accept loop" begin
             # Actually start a GRPCServer with TLS and verify the accept loop
-            # is the _tls_accept_loop path.
+            # is the _tls_accept_loop path. (PureHTTP2-specific: opt-in only.)
             tls_config = TLSConfig(
                 cert_chain = _SERVER_CERT,
                 private_key = _SERVER_KEY,

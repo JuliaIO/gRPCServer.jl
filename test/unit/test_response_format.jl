@@ -4,6 +4,7 @@
 
 using Test
 using gRPCServer
+using Base64
 
 # Include conformance test data
 # Guarded: nine test files load this module and runtests.jl includes them all

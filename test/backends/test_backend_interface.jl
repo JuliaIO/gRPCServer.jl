@@ -5,6 +5,7 @@
 
 using Test
 using gRPCServer
+using Sockets: IPv4
 
 @testset "Raised backend contract surface" begin
     @testset "abstraction is defined and exported" begin
@@ -17,7 +18,7 @@ using gRPCServer
     end
 
     @testset "PureHTTP2 adapter implements the stream contract" begin
-        @test gRPCServer.PureHTTP2GRPCStream <: gRPCServer.AbstractGRPCStream
+        @test P2Ext.PureHTTP2GRPCStream <: gRPCServer.AbstractGRPCStream
         # Every stream operation has a method specialized on the adapter type.
         for op in (:grpc_path, :request_metadata, :is_cancelled,
                    :send_response_headers!, :send_message!, :send_trailers!,
@@ -28,9 +29,9 @@ using gRPCServer
     end
 
     @testset "read_message! drains buffered length-prefixed messages" begin
-        conn = gRPCServer.HTTP2Connection()
-        stream = gRPCServer.HTTP2Stream(1)
-        s = gRPCServer.PureHTTP2GRPCStream(conn, IOBuffer(), stream)
+        conn = HTTP2Connection()
+        stream = HTTP2Stream(1)
+        s = P2Ext.PureHTTP2GRPCStream(conn, IOBuffer(), stream)
         @test s isa gRPCServer.AbstractGRPCStream
 
         # Empty buffer → no complete message yet.

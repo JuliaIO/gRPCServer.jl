@@ -247,9 +247,10 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
 
         # =============================================
         # PureHTTP2 backend parity: the same interop surface must behave
-        # identically on the opt-in backend.
+        # identically on the opt-in backend. Opt-in only — the default suite
+        # excludes PureHTTP2 E2E entirely.
         # =============================================
-        @testset "PureHTTP2 backend interoperability" begin
+        PUREHTTP2_TESTS && @testset "PureHTTP2 backend interoperability" begin
             with_remote_server(backend = "purehttp2") do ts
                 @test ts.backend == "purehttp2"
 
@@ -279,7 +280,11 @@ include(joinpath(@__DIR__, "grpcclient", "remote_harness.jl"))
         # Feature 020 — US2: both backends serving concurrently and
         # independently, each in its own process.
         # =============================================
-        @testset "Two backends serve independently (US2)" begin
+        # =============================================
+        # Feature 020 — US2: both backends serving concurrently and
+        # independently, each in its own process. PureHTTP2 E2E is opt-in.
+        # =============================================
+        PUREHTTP2_TESTS && @testset "Two backends serve independently (US2)" begin
             with_remote_server(backend = "purehttp2") do pure_ts
                 with_remote_server(backend = "httpjl") do http_ts
                     @test pure_ts.backend == "purehttp2"

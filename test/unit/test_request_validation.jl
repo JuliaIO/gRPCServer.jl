@@ -3,6 +3,7 @@
 # Reference: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
 
 using Test
+using Dates
 using gRPCServer
 
 # Include conformance test data
@@ -225,7 +226,7 @@ using .ConformanceData
         @testset "Valid: TE trailers present" begin
             request = TestUtils.MockHTTP2Request(te="trailers")
             stream = TestUtils.create_mock_stream(request)
-            te = gRPCServer.get_header(stream, "te")
+            te = PureHTTP2.get_header(stream, "te")
             @test te == "trailers"
         end
 
@@ -248,7 +249,7 @@ using .ConformanceData
             for te_value in ["trailers", "chunked", "gzip"]
                 request = TestUtils.MockHTTP2Request(te=te_value)
                 stream = TestUtils.create_mock_stream(request)
-                te = gRPCServer.get_header(stream, "te")
+                te = PureHTTP2.get_header(stream, "te")
                 @test te == te_value
             end
         end
@@ -319,7 +320,7 @@ using .ConformanceData
         @testset "Authority header accessible" begin
             request = TestUtils.MockHTTP2Request(authority="localhost:50051")
             stream = TestUtils.create_mock_stream(request)
-            authority = gRPCServer.get_authority(stream)
+            authority = get_authority(stream)
             @test authority == "localhost:50051"
         end
 
@@ -327,7 +328,7 @@ using .ConformanceData
             for auth in ["localhost:50051", "127.0.0.1:8080", "example.com:443", "api.service.local"]
                 request = TestUtils.MockHTTP2Request(authority=auth)
                 stream = TestUtils.create_mock_stream(request)
-                @test gRPCServer.get_authority(stream) == auth
+                @test get_authority(stream) == auth
             end
         end
 
@@ -355,9 +356,9 @@ using .ConformanceData
             request = TestUtils.MockHTTP2Request()
             stream = TestUtils.create_mock_stream(request)
 
-            @test gRPCServer.get_method(stream) == "POST"
-            @test gRPCServer.get_path(stream) == "/pkg.Service/Method"
-            @test gRPCServer.get_authority(stream) == "localhost:50051"
+            @test get_method(stream) == "POST"
+            @test get_path(stream) == "/pkg.Service/Method"
+            @test get_authority(stream) == "localhost:50051"
         end
 
         @testset "Missing :path header fails validation" begin
