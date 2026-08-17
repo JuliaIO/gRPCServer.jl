@@ -8,7 +8,7 @@ description: "Build gRPC servers in Julia with gRPCServer.jl. Covers the codegen
 A Julia gRPC server built on HTTP.jl for HTTP/2 transport. The recommended way to
 build a server is the **codegen interface**: one `protojl` run over your `.proto`
 file emits message types, gRPCClient client stubs, and per-service gRPCServer
-registration functions in a single file. Version 0.3.0. Requires Julia 1.10.
+registration functions in a single file. Version 1.0.0. Requires Julia 1.10.
 
 The runtime interface (`GRPCServer`, `register_method!`, `MethodDescriptor`,
 `ServerContext`, streams) is the layer the codegen sits on — see

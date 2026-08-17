@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-17
+
+### Changed
+
+- **PureHTTP2 is now an optional weak dependency.** `PureHTTP2Backend` moved
+  into the `gRPCServerPureHTTP2Ext` package extension (mirroring the nghttp2
+  pattern): load it with `using PureHTTP2` before constructing
+  `PureHTTP2Backend()` — without it, construction throws an `ArgumentError`
+  naming the fix. The default install (HTTPjlBackend on HTTP.jl) no longer
+  depends on PureHTTP2, and `PureHTTP2Backend` now serves through the same
+  `serve_grpc` contract as the other backends.
+- **Removed re-exports: `can_send` and `StreamError`.** With the PureHTTP2
+  method-table merge gone, these names are no longer re-exported by
+  gRPCServer; qualify them as `PureHTTP2.can_send` / `PureHTTP2.StreamError`.
+- **The `create_connection` factory contract is legacy.** The built-in
+  frame-loop driver moved into the PureHTTP2 extension; custom backends should
+  implement `serve_grpc`. `start!` on a backend that implements neither
+  contract now throws a descriptive `ArgumentError`.
+- PureHTTP2-dependent tests (framing/HPACK/stream-state/adapter contract) are
+  opt-in via `GRPCSERVER_TEST_PUREHTTP2=true` / the `purehttp2` CI job; the
+  default test suite targets HTTPjlBackend and cannot hang on PureHTTP2.
+
 ### Added
 
 - **Asymmetric message caps: `max_receive_message_length` and
@@ -406,5 +428,7 @@ Never tagged; content folded into [1.0.0].
 - Integration tests for all RPC patterns
 - Contract tests with grpcurl
 
-[Unreleased]: https://github.com/csvance/gRPCServer.jl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/csvance/gRPCServer.jl/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/csvance/gRPCServer.jl/compare/v0.2.0...v1.0.0
+[0.2.0]: https://github.com/csvance/gRPCServer.jl/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/csvance/gRPCServer.jl/releases/tag/v0.1.0
