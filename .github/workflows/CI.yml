@@ -1,9 +1,9 @@
 name: CI
 
 # Path-gated: the full suite runs for anything that touches code, and is
-# skipped for docs/prose-only changes (docs/**, *.md). Path rules are ignored
-# for tag pushes, so release tags always run the full suite. A manual run is
-# always available via workflow_dispatch, regardless of paths.
+# skipped for docs/prose/asset-only changes (docs/**, *.md, *.svg). Path rules
+# are ignored for tag pushes, so release tags always run the full suite. A
+# manual run is always available via workflow_dispatch, regardless of paths.
 on:
   push:
     branches:
@@ -12,10 +12,12 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
+      - '*.svg'
   pull_request:
     paths-ignore:
       - 'docs/**'
       - '*.md'
+      - '*.svg'
   workflow_dispatch:
 
 concurrency:

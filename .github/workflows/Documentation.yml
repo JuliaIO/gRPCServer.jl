@@ -7,9 +7,10 @@
 # when the push touched no documentation.
 #
 # Path-gated: the manual is rebuilt when its inputs change (docs/, src/ for
-# docstrings, root Project.toml for the version/compat, and the workflows
-# themselves). Path rules are ignored for tag pushes, so release tags always
-# rebuild and republish. A manual run is always available via workflow_dispatch.
+# docstrings, root Project.toml for the version/compat, *.svg icons anywhere,
+# and the workflows themselves). Path rules are ignored for tag pushes, so
+# release tags always rebuild and republish. A manual run is always available
+# via workflow_dispatch.
 #
 # deploydocs only publishes from `main` (devbranch in docs/make.jl) and from
 # tags; other runs build and discard, which is what makes this a useful
@@ -25,12 +26,14 @@ on:
       - 'docs/**'
       - 'src/**'
       - 'Project.toml'
+      - '*.svg'
       - '.github/workflows/**'
   pull_request:
     paths:
       - 'docs/**'
       - 'src/**'
       - 'Project.toml'
+      - '*.svg'
       - '.github/workflows/**'
   workflow_dispatch:
 
