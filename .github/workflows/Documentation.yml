@@ -6,10 +6,14 @@
 # request cancelled the in-flight docs build along with the test matrix, even
 # when the push touched no documentation.
 #
-# Triggers are deliberately identical to CI.yml's, so the split changes nothing
-# about *when* the manual is built. deploydocs only publishes from `main`
-# (devbranch in docs/make.jl) and from tags; other runs build and discard, which
-# is what makes this a useful pull-request check.
+# Path-gated: the manual is rebuilt when its inputs change (docs/, src/ for
+# docstrings, root Project.toml for the version/compat, and the workflows
+# themselves). Path rules are ignored for tag pushes, so release tags always
+# rebuild and republish. A manual run is always available via workflow_dispatch.
+#
+# deploydocs only publishes from `main` (devbranch in docs/make.jl) and from
+# tags; other runs build and discard, which is what makes this a useful
+# pull-request check.
 name: Documentation
 
 on:
@@ -17,7 +21,18 @@ on:
     branches:
       - main
     tags: ['*']
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'Project.toml'
+      - '.github/workflows/**'
   pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'Project.toml'
+      - '.github/workflows/**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
