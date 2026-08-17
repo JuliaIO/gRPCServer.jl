@@ -134,13 +134,12 @@ backend_capabilities(::Type{HTTPjlBackend}) = BackendCapabilities(
 # SETTINGS_MAX_CONCURRENT_STREAMS and enforces it per connection
 # (src/backends/httpjl.jl serve_grpc forwards cfg.max_concurrent_streams).
 
-# PureHTTP2Backend (pure-Julia frame loop).
+# PureHTTP2Backend (weakdep extension; requires PureHTTP2).
 backend_capabilities(::Type{PureHTTP2Backend}) = BackendCapabilities(
     # max_connections is declared but never read (src/config.jl).
     max_connections=false,
-    # max_concurrent_streams is never passed to the connection:
-    # create_connection(::PureHTTP2Backend) = PureHTTP2.HTTP2Connection()
-    # (src/http2_backend.jl:48).
+    # max_concurrent_streams is never passed to the connection: the extension
+    # does not forward it (ext/gRPCServerPureHTTP2Ext.jl).
     max_concurrent_streams=false,
     # max_queued_requests is documented NOT IMPLEMENTED (src/config.jl).
     queued_requests=false,
@@ -153,10 +152,10 @@ backend_capabilities(::Type{PureHTTP2Backend}) = BackendCapabilities(
     # PureHTTP2 TLS path hardcodes 128/true (src/tls/transport.jl:130).
     listener_knobs=false,
     # h2_initial_window_size / h2_connection_window_size are never passed to
-    # the connection (src/http2_backend.jl:48).
+    # the connection (ext/gRPCServerPureHTTP2Ext.jl).
     http2_settings=false,
-    # max_receive_message_length is not enforced: PureHTTP2 read_grpc_message!
-    # has no cap (src/server.jl:967-1015).
+    # max_receive_message_length is not enforced: the PureHTTP2 extension's
+    # read_grpc_message! has no cap (ext/gRPCServerPureHTTP2Ext.jl).
     receive_cap=false,
     # Send-side compression is inert (never read outside config plumbing).
     send_compression=false,

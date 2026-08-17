@@ -3,15 +3,21 @@
 
 Abstract type representing an HTTP/2 backend for gRPCServer.jl.
 
-Any HTTP/2 backend must subtype `AbstractHTTP2Backend` and implement
-[`create_connection`](@ref) to return an HTTP/2 connection object.
+Backends drive the server through one of two contracts:
 
-The connection object returned by `create_connection` must be compatible with
-PureHTTP2.jl's `HTTP2Connection` interface, supporting:
-- Connection lifecycle: `process_preface`, `process_frame`, `is_open`
-- Stream management: `get_stream`, `remove_stream`, `can_send_on_stream`
-- Sending: `send_headers`, `send_data`, `send_trailers`, `send_rst_stream`, `send_goaway`
-- Frame I/O: `Frame`, `encode_frame`, `decode_frame_header`
+1. **`serve_grpc`** (primary): the backend owns its listener/serve loop and
+   presents each incoming call as an [`AbstractGRPCStream`](@ref) to
+   `dispatch_grpc_call`. See [`serve_grpc`](@ref), `uses_serve_grpc`,
+   and `stop_serving!`. All three built-in backends use this contract.
+2. **`create_connection`** (legacy): the backend implements
+   [`create_connection`](@ref) to return an HTTP/2 connection object driven by
+   gRPCServer's own frame loop. Kept for custom backends written against the
+   old interface; the connection object must be compatible with PureHTTP2.jl's
+   `HTTP2Connection` interface (connection lifecycle: `process_preface`,
+   `process_frame`, `is_open`; stream management: `get_stream`, `remove_stream`,
+   `can_send_on_stream`; sending: `send_headers`, `send_data`, `send_trailers`,
+   `send_rst_stream`, `send_goaway`; frame I/O: `Frame`, `encode_frame`,
+   `decode_frame_header`).
 
 See the HTTP/2 Backends documentation page for details on implementing a custom backend.
 """
@@ -24,11 +30,41 @@ Opt-in pure-Julia HTTP/2 backend using PureHTTP2.jl (the default backend is
 [`HTTPjlBackend`](@ref); pass `http2_backend=PureHTTP2Backend()` to the
 [`GRPCServer`](@ref) constructor to select it).
 
-This backend delegates all HTTP/2 operations to the PureHTTP2 package,
-which provides a pure-Julia implementation of the HTTP/2 protocol (RFC 7540)
-including HPACK header compression (RFC 7541), stream management, and flow control.
+PureHTTP2 is an optional dependency. Load it before constructing the backend:
+
+```julia
+using gRPCServer, PureHTTP2
+server = GRPCServer("127.0.0.1", 50051; http2_backend = PureHTTP2Backend())
+```
+
+This backend delegates all HTTP/2 operations to the PureHTTP2 package, which
+provides a pure-Julia implementation of the HTTP/2 protocol (RFC 7540) including
+HPACK header compression (RFC 7541), stream management, and flow control.
 """
-struct PureHTTP2Backend <: AbstractHTTP2Backend end
+struct PureHTTP2Backend <: AbstractHTTP2Backend
+    function PureHTTP2Backend()
+        _assert_purehttp2_capable()
+        return new()
+    end
+end
+
+"""
+    _assert_purehttp2_capable()
+
+Fail with an actionable message when the PureHTTP2 extension is not loaded,
+rather than letting a later call fail on a missing method.
+"""
+function _assert_purehttp2_capable()
+    ext = Base.get_extension(@__MODULE__, :gRPCServerPureHTTP2Ext)
+    if ext === nothing
+        throw(ArgumentError(
+            "PureHTTP2Backend requires the optional PureHTTP2.jl dependency. " *
+            "Run `using PureHTTP2` before constructing it (adding it to your " *
+            "project if needed), or select HTTPjlBackend()."))
+    end
+    return nothing
+end
+uses_serve_grpc(::PureHTTP2Backend) = true
 
 """
     create_connection(backend::AbstractHTTP2Backend)
@@ -39,6 +75,10 @@ Returns an HTTP/2 connection object that will be used to manage a single client
 connection. The returned object must support the full HTTP/2 connection interface
 (see `AbstractHTTP2Backend` for requirements).
 
+This is the **legacy** custom-backend contract. New backends should implement
+[`serve_grpc`](@ref) instead; the built-in backends all do. `PureHTTP2Backend`
+implements `create_connection` inside the PureHTTP2 extension.
+
 # Examples
 ```julia
 backend = PureHTTP2Backend()
@@ -46,8 +86,6 @@ conn = create_connection(backend)  # Returns a PureHTTP2.HTTP2Connection
 ```
 """
 function create_connection end
-
-create_connection(::PureHTTP2Backend) = PureHTTP2.HTTP2Connection()
 
 # ---------------------------------------------------------------------------
 # Raised backend abstraction (feature 020): serve-loop + per-call gRPC stream
@@ -81,7 +119,7 @@ abstract type AbstractGRPCStream end
     grpc_method(s::AbstractGRPCStream) -> String
 
 The HTTP method of the request (the `":method"` pseudo-header), used by
-[`dispatch_grpc_call`](@ref) for the strict method check (gRPC requires
+`dispatch_grpc_call` for the strict method check (gRPC requires
 `POST`; anything else is answered with HTTP 405 + an `INTERNAL` gRPC status).
 
 Backends that cannot report the request method default to `"POST"` (the only
@@ -132,8 +170,9 @@ end of stream. An empty `IOBuffer` is a zero-length message (distinct from
 RPCs.
 
 The returned buffer is only valid until the next `read_message!` call — decode
-it immediately. (The legacy PureHTTP2 adapter still returns a fresh
-`Vector{UInt8}` until its serve loop is migrated; that is explicitly scoped.)
+it immediately. The PureHTTP2 adapter implements lazy reads (waiting for a
+complete message when none is buffered yet) so streaming RPCs can be dispatched
+before END_STREAM, like the HTTPjl adapter.
 """
 function read_message! end
 

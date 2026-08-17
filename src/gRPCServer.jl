@@ -41,16 +41,12 @@ using CodecZlib
 using TranscodingStreams
 using PrecompileTools
 using Reseau
-using PureHTTP2
 
 # HTTP.jl (>= 2.0) provides the server-side HTTP/2 implementation used by the
-# HTTPjlBackend. Imported (not `using`-ed) to avoid clashing with PureHTTP2's
-# exported names (Request, Response, Stream, ...); referenced as `HTTP.*`.
+# HTTPjlBackend. Imported (not `using`-ed) so it cannot clash with other
+# backends' exported names (Request, Response, Stream, ...); referenced as
+# `HTTP.*`.
 import HTTP
-
-# Import functions from PureHTTP2 that gRPCServer also defines methods for,
-# so the method tables merge (allows dispatch on both PureHTTP2 and gRPCServer types).
-import PureHTTP2: get_metadata, set_header!, is_closed
 
 # Include source files in dependency order
 
@@ -67,11 +63,8 @@ include("config.jl")
 #     expect_half_close!) — used by the backends and the dispatch layer
 include("framing.jl")
 
-# 4. HTTP/2 backend abstraction (delegates to PureHTTP2.jl)
+# 4. HTTP/2 backend abstraction
 include("http2_backend.jl")
-
-# 4a. PureHTTP2 adapter for the raised AbstractGRPCStream contract (feature 020)
-include("backends/purehttp2.jl")
 
 # 4b. HTTP.jl HTTP/2 backend adapter (feature 020)
 include("backends/httpjl.jl")
@@ -186,9 +179,6 @@ export HTTPjlBackend, Nghttp2Backend, AbstractGRPCStream, serve_grpc
 # Backend capability validation + per-backend convenience constructors
 export BackendCapabilities, backend_capabilities, backend_defaults
 export GRPCServerHTTPJl, GRPCServerPureHTTP2, GRPCServerNghttp2
-
-# HTTP/2 Stream State (for advanced use cases)
-export can_send, StreamError
 
 # ProtoBuf code generation (re-exported so `using gRPCServer` exposes protojl
 # to code-generation workflows; gRPCClient.jl does not export it)

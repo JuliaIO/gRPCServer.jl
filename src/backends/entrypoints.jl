@@ -52,6 +52,11 @@ GRPCServerHTTPJl(host, port; kwargs...) =
 Create a gRPC server on the pure-Julia HTTP/2 backend
 ([`PureHTTP2Backend`](@ref)).
 
+PureHTTP2 is an **optional dependency**: load it before constructing the server
+(via `using PureHTTP2`, which also loads the `gRPCServerPureHTTP2Ext`
+extension), or constructing this entry point throws an actionable
+`ArgumentError`.
+
 Accepts the same configuration keywords as [`GRPCServer`](@ref); the backend is
 fixed to `PureHTTP2Backend`. Explicitly setting a keyword this backend cannot
 honor raises [`UnsupportedFeatureError`](@ref) at construction. On this backend
@@ -65,6 +70,7 @@ the following keywords raise (explicitly set): `max_connections`,
 
 # Example
 ```julia
+using PureHTTP2
 server = GRPCServerPureHTTP2("0.0.0.0", 50051; drain_timeout=60.0)
 ```
 """

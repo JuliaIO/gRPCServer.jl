@@ -270,36 +270,6 @@ end
 
 # --- Logging ---
 
-# --- Sockets.getpeername bridge ---
-#
-# The rest of gRPCServer hands connection objects to `handle_connection`, which
-# calls `Sockets.getpeername(io)` to build a `PeerInfo`. Reseau.TLS.Conn is a
-# `Base.IO` subtype but not a `Sockets.TCPSocket`, so we add a method that
-# translates Reseau's `SocketAddr` into the `(IPAddr, UInt16)` tuple the caller
-# expects.
-
-function Sockets.getpeername(conn::Reseau.TLS.Conn)
-    addr = Reseau.TLS.remote_addr(conn)
-    return _socketaddr_to_tuple(addr)
-end
-
-function _socketaddr_to_tuple(addr::Reseau.TCP.SocketAddrV4)
-    ip_bytes = addr.ip
-    ip = Sockets.IPv4(ip_bytes[1], ip_bytes[2], ip_bytes[3], ip_bytes[4])
-    return (ip, UInt16(addr.port))
-end
-
-function _socketaddr_to_tuple(addr::Reseau.TCP.SocketAddrV6)
-    # Reseau stores the 16 bytes of the v6 address in `.ip`; the Sockets.IPv6
-    # constructor takes a UInt128.
-    bytes = addr.ip
-    val = UInt128(0)
-    for b in bytes
-        val = (val << 8) | UInt128(b)
-    end
-    return (Sockets.IPv6(val), UInt16(addr.port))
-end
-
 function _log_tls_handshake_error(e::TLSHandshakeError)
     if e.kind === TLSHandshakeFailureKind.CONFIG_ERROR
         @error "TLS configuration error" kind=e.kind message=e.message cause=e.cause
