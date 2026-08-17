@@ -40,7 +40,7 @@ features:
     link: /examples/advanced/
   - icon: 🔐
     title: TLS and mTLS
-    details: TLSConfig covers certificates, client-CA mTLS, and ALPN, with live certificate reload (reload_tls!) on the PureHTTP2 backend.
+    details: TLSConfig covers certificates, client-CA mTLS, and ALPN.
     link: /tls/
   - icon: 🩺
     title: Health + reflection built in
