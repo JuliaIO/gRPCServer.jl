@@ -82,26 +82,38 @@ and document in their docstrings which keywords raise on that backend.
 
 ### Per-backend capability matrix
 
+✅ = supported · ❌ = not supported: the keyword raises `UnsupportedFeatureError`
+on that backend (RPC-type rows refuse per request with `UNIMPLEMENTED` instead —
+see the note below). Footnote markers qualify partial or nuanced support.
+
 | Keyword | HTTPjl | PureHTTP2 | Nghttp2 |
 |---|---|---|---|
 | TLS cert/key | ✅ | ✅ | ✅ |
-| mTLS (`client_ca`, `require_client_cert`) | ✅ | ✅ | ❌ raises |
-| `min_version`, `alpn_protocols`, `handshake_timeout_ns` | ✅ | ✅ | ❌ raises |
-| `reload_tls!` | ❌ raises | ✅ | ❌ raises |
-| `max_receive_message_length` | ✅ enforced | ❌ raises | ❌ raises |
+| mTLS (`client_ca`, `require_client_cert`) | ✅ | ✅ | ❌ |
+| `min_version`, `alpn_protocols`, `handshake_timeout_ns` | ✅ | ✅ | ❌ |
+| `reload_tls!` | ❌ | ✅ | ❌ |
+| `max_receive_message_length` | ✅ | ❌ | ❌ |
 | `max_send_message_length`, `max_concurrent_requests` | ✅ | ✅ | ✅ |
-| `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ raises | ❌ raises | ❌ raises |
-| `max_concurrent_streams` | ✅ enforced per connection (default 100) | ❌ raises | ❌ raises |
-| `idle_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout` | ✅ | ❌ raises | ❌ raises |
-| `max_header_bytes`, `reuseaddr`, `backlog` | ✅ | ❌ raises | ❌ raises |
-| `h2_initial_window_size`, `h2_connection_window_size` | ✅ | ❌ raises | ❌ raises |
-| `drain_timeout` (config) | ❌ raises (use `stop!(; timeout=)`) | ✅ | ❌ raises |
-| send-side compression (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) | ❌ raises | ❌ raises | ❌ raises |
-| receive-side decompression | ✅ strict | ✅ lenient | ⚠️ raw bytes |
-| server-streaming / bidi RPCs | ✅ | ✅ | ❌ refused `UNIMPLEMENTED` per-request |
+| `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ | ❌ | ❌ |
+| `max_concurrent_streams` | ✅¹ | ❌ | ❌ |
+| `idle_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout` | ✅ | ❌ | ❌ |
+| `max_header_bytes`, `reuseaddr`, `backlog` | ✅ | ❌ | ❌ |
+| `h2_initial_window_size`, `h2_connection_window_size` | ✅ | ❌ | ❌ |
+| `drain_timeout` (config) | ❌² | ✅ | ❌ |
+| send-side compression (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) | ❌ | ❌ | ❌ |
+| receive-side decompression | ✅³ | ✅³ | ❌³ |
+| server-streaming / bidi RPCs | ✅ | ✅ | ❌ |
 | client-streaming RPCs | ✅ | ✅ | ✅ |
-| `enable_reflection` | ✅ | ✅ | ❌ raises (`ServerReflectionInfo` is bidi) |
-| `enable_health_check` | ✅ | ✅ | ⚠️ `Check` works, `Watch` refused per-request |
+| `enable_reflection` | ✅ | ✅ | ❌⁴ |
+| `enable_health_check` | ✅ | ✅ | ❌⁵ |
+
+¹ Enforced per connection on HTTPjl (default 100).
+² Pass `stop!(; timeout=)` on HTTPjl instead; the config keyword raises.
+³ Strict on HTTPjl, lenient on PureHTTP2; nghttp2 performs no decompression
+   (raw bytes, `decompression=false`).
+⁴ `ServerReflectionInfo` is a bidi stream, which nghttp2 refuses, so the
+   keyword raises.
+⁵ `Check` works on nghttp2; `Watch` is refused per request.
 
 RPC-type rows (server-/bidi-streaming on `Nghttp2Backend`) are method-level
 refusals (`UNIMPLEMENTED`), not construction errors, so they do not raise.
