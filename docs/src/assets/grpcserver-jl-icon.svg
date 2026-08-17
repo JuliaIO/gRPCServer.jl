@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none" role="img" aria-label="gRPCServer.jl">
+  <defs></defs>
+  <rect width="128" height="128" rx="28" fill="#14171B"></rect>
+  <g transform="translate(11 24) scale(0.62)">
+  <text x="0" y="87" font-family="JetBrains Mono, JetBrainsMono-Bold, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="86" textLength="51.6" lengthAdjust="spacingAndGlyphs" fill="#FFFFFF">g</text>
+  <rect x="62" y="4" width="110" height="32" rx="16" fill="#FFFFFF"></rect>
+  <rect x="62" y="48" width="110" height="32" rx="16" fill="#FFFFFF"></rect>
+  <rect x="62" y="92" width="110" height="32" rx="16" fill="#FFFFFF"></rect>
+  <text x="79" y="26" text-anchor="middle" font-family="JetBrains Mono, JetBrainsMono-Bold, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="22" textLength="13.2" lengthAdjust="spacingAndGlyphs" fill="#CB3C33">r</text>
+  <text x="79" y="70" text-anchor="middle" font-family="JetBrains Mono, JetBrainsMono-Bold, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="22" textLength="13.2" lengthAdjust="spacingAndGlyphs" fill="#389826">p</text>
+  <text x="79" y="114" text-anchor="middle" font-family="JetBrains Mono, JetBrainsMono-Bold, ui-monospace, SFMono-Regular, Menlo, monospace" font-weight="700" font-size="22" textLength="13.2" lengthAdjust="spacingAndGlyphs" fill="#9558B2">c</text>
+  <path d="M96 20H152" stroke="#CB3C33" stroke-width="7" stroke-linecap="round"></path>
+  <path d="M96 64H152" stroke="#389826" stroke-width="7" stroke-linecap="round"></path>
+  <path d="M96 108H152" stroke="#9558B2" stroke-width="7" stroke-linecap="round"></path>
+  </g>
+</svg>

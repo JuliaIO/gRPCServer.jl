@@ -11,7 +11,6 @@ makedocs(
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
         canonical = "https://csvance.github.io/gRPCServer.jl",
-        assets = ["assets/custom.css"],
     ),
     pages = [
         "Home" => "index.md",

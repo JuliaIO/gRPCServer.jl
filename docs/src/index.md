@@ -6,6 +6,9 @@ hero:
   name: gRPCServer.jl
   text: A production-ready gRPC server in Julia
   tagline: Four RPC patterns. Three backends. One API.
+  image:
+    src: /assets/grpcserver-jl-icon.svg
+    alt: gRPCServer.jl
   actions:
     - theme: brand
       text: Quick Start
