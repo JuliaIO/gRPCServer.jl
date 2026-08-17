@@ -20,36 +20,36 @@ hero:
 features:
   - icon: 🧬
     title: All four RPC patterns
-    details: Unary, server-, client-, and bidirectional streaming over one consistent API.
+    details: Unary, server-streaming, client-streaming, and bidirectional streaming over one consistent API.
     link: /quickstart/
-  - icon: ⚙️
-    title: One-shot code generation
-    details: A single protojl run emits message types and server registration functions — client stubs too when gRPCClient.jl is loaded.
-    link: /code_generation/
-  - icon: 🚀
-    title: HTTP.jl by default
-    details: Serves out of the box on the widely-used Julia HTTP stack, with pluggable HTTP/2 backends beneath.
+  - icon: 🔌
+    title: Pluggable HTTP/2 backends
+    details: Three pluggable HTTP/2 backends behind one server API — HTTP.jl by default, plus a pure-Julia PureHTTP2 and an optional nghttp2 C binding.
     link: /http2-backends/
+  - icon: 🛡️
+    title: Hardened for production
+    details: Over a million test assertions across six CI platform combos, nanosecond dispatch benchmarks, and v1.0 deadline, shutdown, and mTLS hardening.
+    link: /performance/
+  - icon: ⚙️
+    title: IDE-first code generation
+    details: One protojl run emits message types and registration functions designed for IDE code completion and suggestions, plus client stubs when gRPCClient.jl is loaded.
+    link: /code_generation/
   - icon: 🧩
     title: Middleware interceptors
-    details: Logging, metrics, timeout, and recovery interceptors out of the box — plus a clean hook to write your own.
+    details: Logging, metrics, timeout, and recovery interceptors out of the box, plus a clean hook to write your own.
     link: /examples/advanced/
   - icon: 🔐
     title: TLS and mTLS
-    details: TLSConfig covers certificates, client-CA mTLS, and ALPN; live cert reload (reload_tls!) on the PureHTTP2 backend.
+    details: TLSConfig covers certificates, client-CA mTLS, and ALPN, with live certificate reload (reload_tls!) on the PureHTTP2 backend.
     link: /tls/
   - icon: 🩺
     title: Health + reflection built in
-    details: Standard grpc.health.v1 checking and server reflection, so grpcurl and standard tooling discover your services.
+    details: Standard grpc.health.v1 checking and server reflection let grpcurl and standard tooling discover your services.
     link: /api/
   - icon: 🗜️
-    title: Wire-efficient
+    title: Wire efficiency
     details: Strict gzip and deflate request decompression plus zero-copy framing for large payloads.
     link: /performance/
-  - icon: 🧊
-    title: Pure Julia core
-    details: A native Julia implementation with no C runtime in the default install; a pure-Julia HTTP/2 path stays available when you want it.
-    link: /http2-backends/
 ---
 ```
 
