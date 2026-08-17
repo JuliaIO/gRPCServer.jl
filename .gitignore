@@ -165,6 +165,15 @@ benchmark/*.json
 *.heapsnapshot
 .cache
 
+# ==============================
+# === Pipeline Scratch Dirs ===
+# ==============================
+# Agent/workspace scratch (explicit entries; previously covered only by the
+# leading `*` whitelist above)
+.scratch/
+.pi/
+.pi-subagents/
+
 # ==================================
 # === Buildkite-Specific Ignores ===
 # ==================================

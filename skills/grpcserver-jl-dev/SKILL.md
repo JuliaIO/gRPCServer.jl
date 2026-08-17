@@ -26,10 +26,6 @@ description: Work on the gRPCServer.jl package itself. Covers the repository map
 | `examples/01..05_*/` | Five runnable codegen examples (unary, server streaming, client streaming, bidi, multi-method) |
 | `docs/` | Documenter build (`docs/make.jl`, `docs/Project.toml`) |
 
-Note: `src/` also contains dead legacy files (`gRPC.jl`, `Server.jl`, `Unary.jl`,
-`Streaming.jl`, `ProtoBuf.jl`, `Utils.jl`) that are NOT included by the module —
-do not edit them; they reference the removed csvance-era API.
-
 ## The codegen contract (do not break)
 
 The generated output is the package's user-facing interface. Invariants:
