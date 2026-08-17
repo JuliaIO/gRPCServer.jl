@@ -334,6 +334,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `src/http2/` directory (~3,100 lines: frames.jl, hpack.jl, stream.jl,
   flow_control.jl, connection.jl) — now provided by PureHTTP2.jl
 
+## [0.2.0] - 2026-07-30
+
+Tagged on the pre-merge csvance line; the merged history lives under [1.0.0].
+
+## [0.3.0]
+
+Never tagged; content folded into [1.0.0].
+
 ## [0.1.0] - 2026-01-11
 
 ### Added
@@ -398,5 +406,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integration tests for all RPC patterns
 - Contract tests with grpcurl
 
-[Unreleased]: https://github.com/s-celles/gRPCServer.jl/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/s-celles/gRPCServer.jl/releases/tag/v0.1.0
+[Unreleased]: https://github.com/csvance/gRPCServer.jl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/csvance/gRPCServer.jl/releases/tag/v0.1.0

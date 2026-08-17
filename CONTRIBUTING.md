@@ -18,7 +18,7 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 1. Fork and clone the repository:
 
    ```bash
-   git clone https://github.com/s-celles/gRPCServer.jl.git
+   git clone https://github.com/csvance/gRPCServer.jl.git
    cd gRPCServer.jl
    ```
 
@@ -44,7 +44,7 @@ Code coverage is automatically collected and uploaded to Codecov during CI runs.
 
 1. Open a Pull Request - coverage status will appear in PR checks
 2. Click "Details" on the Codecov status check to see the full report
-3. Visit the [Codecov Dashboard](https://codecov.io/gh/s-celles/gRPCServer.jl) to see:
+3. Visit the [Codecov Dashboard](https://codecov.io/gh/csvance/gRPCServer.jl) to see:
    - Project-wide coverage percentage
    - Per-file coverage breakdown
    - Line-by-line coverage highlighting

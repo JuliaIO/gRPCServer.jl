@@ -7,7 +7,7 @@
 # when the push touched no documentation.
 #
 # Triggers are deliberately identical to CI.yml's, so the split changes nothing
-# about *when* the manual is built. deploydocs only publishes from `develop`
+# about *when* the manual is built. deploydocs only publishes from `main`
 # (devbranch in docs/make.jl) and from tags; other runs build and discard, which
 # is what makes this a useful pull-request check.
 name: Documentation
@@ -15,9 +15,7 @@ name: Documentation
 on:
   push:
     branches:
-      - master
       - main
-      - develop
     tags: ['*']
   pull_request:
 

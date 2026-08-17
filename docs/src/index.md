@@ -23,9 +23,7 @@ gRPCServer.jl provides a complete gRPC server implementation in Julia, enabling 
 ```julia
 using Pkg
 
-Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
-
-# Pkg.add("gRPCServer")  # when registered
+Pkg.add("gRPCServer")
 ```
 
 ## Getting Started

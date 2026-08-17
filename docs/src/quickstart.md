@@ -12,8 +12,7 @@ This guide demonstrates how to create a gRPC server in Julia using gRPCServer.jl
 
 ```julia
 using Pkg
-Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
-# Pkg.add("gRPCServer")  # when registered
+Pkg.add("gRPCServer")
 ```
 
 ## Step 1: Define Your Service

@@ -1,8 +1,8 @@
 {
   "name": "grpcserver-jl",
   "owner": {
-    "name": "s-celles",
-    "url": "https://github.com/s-celles/gRPCServer.jl"
+    "name": "csvance",
+    "url": "https://github.com/csvance/gRPCServer.jl"
   },
   "metadata": {
     "description": "Agent skills for gRPCServer.jl, the Julia gRPC server.",

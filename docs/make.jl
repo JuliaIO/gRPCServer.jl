@@ -6,10 +6,10 @@ DocMeta.setdocmeta!(gRPCServer, :DocTestSetup, :(using gRPCServer); recursive=tr
 makedocs(
     sitename = "gRPCServer.jl",
     modules = [gRPCServer],
-    repo = Documenter.Remotes.GitHub("s-celles", "gRPCServer.jl"),
+    repo = Documenter.Remotes.GitHub("csvance", "gRPCServer.jl"),
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
-        canonical = "https://s-celles.github.io/gRPCServer.jl",
+        canonical = "https://csvance.github.io/gRPCServer.jl",
         assets = String[],
     ),
     pages = [
@@ -35,6 +35,6 @@ makedocs(
 )
 
 deploydocs(
-    repo = "github.com/s-celles/gRPCServer.jl.git",
-    devbranch = "develop",
+    repo = "github.com/csvance/gRPCServer.jl.git",
+    devbranch = "main",
 )

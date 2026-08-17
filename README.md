@@ -1,10 +1,9 @@
 # gRPCServer.jl
 
-[![DOI](https://zenodo.org/badge/1131647982.svg)](https://doi.org/10.5281/zenodo.18642866)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/s-celles/gRPCServer.jl)
-[![Build Status](https://github.com/s-celles/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/s-celles/gRPCServer.jl/actions/workflows/CI.yml)
-[![Coverage](https://codecov.io/gh/s-celles/gRPCServer.jl/branch/develop/graph/badge.svg)](https://codecov.io/gh/s-celles/gRPCServer.jl)
-[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://s-celles.github.io/gRPCServer.jl/dev)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/csvance/gRPCServer.jl)
+[![Build Status](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml)
+[![Coverage](https://codecov.io/gh/csvance/gRPCServer.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/csvance/gRPCServer.jl)
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://csvance.github.io/gRPCServer.jl/dev)
 
 A native Julia implementation of a [gRPC](https://grpc.io/) server library.
 
@@ -12,14 +11,12 @@ A native Julia implementation of a [gRPC](https://grpc.io/) server library.
 
 ```julia
 using Pkg
-Pkg.dev("https://github.com/s-celles/gRPCServer.jl")
-
-# Pkg.add("gRPCServer")  # when registered
+Pkg.add("gRPCServer")
 ```
 
 ## Documentation
 
-Full documentation is available at [s-celles.github.io/gRPCServer.jl](https://s-celles.github.io/gRPCServer.jl/dev).
+Full documentation is available at [csvance.github.io/gRPCServer.jl](https://csvance.github.io/gRPCServer.jl/dev).
 
 ## Requirements
 
