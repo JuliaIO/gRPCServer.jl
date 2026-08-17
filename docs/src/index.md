@@ -28,7 +28,7 @@ features:
     link: /quickstart/
   - icon: 🔌
     title: Pluggable HTTP/2 backends
-    details: Three pluggable HTTP/2 backends behind one server API — HTTP.jl by default, plus a pure-Julia PureHTTP2 and an optional nghttp2 C binding.
+    details: HTTP.jl is the production-ready default, with two experimental backends behind a pluggable interface.
     link: /http2-backends/
   - icon: 🛡️
     title: Hardened for production
