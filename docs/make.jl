@@ -1,4 +1,5 @@
 using Documenter
+using DocumenterCodeBlocks
 using DocumenterLandingPage
 using gRPCServer
 
@@ -32,7 +33,7 @@ makedocs(
     ],
     doctest = false,  # Disable doctests for now
     checkdocs = :exports,
-    plugins = [LandingPage()],
+    plugins = [LandingPage(), CodeBlocks()],
 )
 
 deploydocs(
