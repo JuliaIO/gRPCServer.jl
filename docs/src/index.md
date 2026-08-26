@@ -32,7 +32,7 @@ features:
     link: /http2-backends/
   - icon: 🛡️
     title: Hardened for production
-    details: Over a million test assertions across six CI platform combos, nanosecond dispatch benchmarks, and v1.0 deadline, shutdown, and mTLS hardening.
+    details: Over a million test assertions across six CI platform combos, nanosecond dispatch benchmarks, and deadline, shutdown, and mTLS hardening.
     link: /performance/
   - icon: ⚙️
     title: IDE-first code generation

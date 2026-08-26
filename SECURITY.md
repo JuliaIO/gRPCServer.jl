@@ -4,7 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: (unreleased until General registration) |
+| 0.1.x   | :white_check_mark: (first public release, pending General registration) |
 
 ## Reporting a Vulnerability
 

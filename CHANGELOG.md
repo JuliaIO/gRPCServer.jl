@@ -7,12 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - Unreleased
+
+First public release, registered in General under the `JuliaIO` organization.
+The package was developed as 1.0.0 before registration; the number was reset to
+0.1.0 for the first General release so the compat window can widen as the API
+settles. Nothing below was ever published under another version.
+
 ### Fixed
 
 - **Server-streaming handlers with a typed `stream::ServerStream{T}` parameter no longer fail with `INTERNAL "Internal server error"`.** `dispatch_server_streaming` constructed the stream as `ServerStream{Any}`, so the documented (and registration-time-validated) typed handler signature was uncallable at runtime. The stream is now typed from the method's response Julia type, matching the client-streaming and bidirectional dispatch paths; raw methods get `ServerStream{Vector{UInt8}}`. The same fix aligns the client-streaming and bidirectional stream types with the `raw_request`/`raw_response` flags. Also fixes the built-in `grpc.health.v1.Health/Watch` handler.
 - **`run(server; block = true)` + `stop!(server)` no longer hangs.** `stop!` returned before notifying `shutdown_event` on the `serve_grpc` backend path, so a task blocked in `run` never woke; `wait(server_task)` after `stop!` now returns. The shutdown signal also moved from `Condition` to `Base.Event`: since Julia 1.12 a plain `Condition` is single-threaded and `wait`/`notify` from any other thread throw `ConcurrencyViolationError("lock must be held")`, so `stop!` from a spawned task and `run(block=true)` off the creating thread were broken even when the notify landed. `Base.wait(server)` still works (it polls status).
-
-## [1.0.0] - 2026-08-17
 
 ### Changed
 
@@ -361,79 +366,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `src/http2/` directory (~3,100 lines: frames.jl, hpack.jl, stream.jl,
   flow_control.jl, connection.jl) — now provided by PureHTTP2.jl
 
-## [0.2.0] - 2026-07-30
+## Pre-release history
 
-Tagged on the pre-merge csvance line; the merged history lives under [1.0.0].
+Before the first General release the package had an internal history across
+two lines that were merged in mid-2026: the original gRPCServer.jl (HTTP/2,
+HPACK, TLS via OpenSSL.jl, health and reflection services, interceptors,
+compression, all four RPC shapes; internal tag 0.1.0, 2026-01-11) and the
+csvance line (HTTP.jl backend, zero-copy framing, security hardening; internal
+tag 0.2.0, 2026-07-30). Those tags were never pushed and do not exist on the
+public repository. Every change from both lines that is still present is
+described under [0.1.0] above.
 
-## [0.3.0]
-
-Never tagged; content folded into [1.0.0].
-
-## [0.1.0] - 2026-01-11
-
-### Added
-- Initial release of gRPCServer.jl
-- Core gRPC server implementation with `GRPCServer` type
-- All four RPC patterns:
-  - Unary RPCs
-  - Server streaming RPCs
-  - Client streaming RPCs
-  - Bidirectional streaming RPCs
-- HTTP/2 protocol implementation:
-  - Frame parsing and serialization
-  - HPACK header compression with Huffman encoding
-  - Stream multiplexing
-  - Flow control
-- TLS/mTLS support via OpenSSL.jl:
-  - ALPN negotiation for `h2` protocol
-  - Certificate reload without restart
-  - Client certificate authentication
-- Built-in services:
-  - Health checking service (`grpc.health.v1.Health`)
-  - Server reflection service (`grpc.reflection.v1alpha.ServerReflection`)
-  - File descriptor support for reflection
-- Interceptor framework:
-  - `LoggingInterceptor` for request/response logging
-  - `MetricsInterceptor` for timing metrics
-  - `TimeoutInterceptor` for deadline enforcement
-  - `RecoveryInterceptor` for panic recovery
-- Compression support:
-  - gzip compression
-  - deflate compression
-  - Compression negotiation
-- Server configuration options:
-  - Max message size
-  - Max concurrent streams
-  - Debug mode
-- `ServerContext` with:
-  - Request metadata access
-  - Response header/trailer setting
-  - Cancellation support
-  - Deadline/timeout support
-- Comprehensive error handling with gRPC status codes
-- Type-safe service registration
-- Precompilation workload for faster startup
-- Documentation with Documenter.jl
-- CI/CD with GitHub Actions:
-  - Tests on Julia 1.10 LTS and latest stable
-  - Tests on Linux, macOS (aarch64), and Windows
-  - Automatic documentation deployment
-
-### Documentation
-- Quick start guide
-- API reference
-- Examples for all RPC patterns
-- CODE_OF_CONDUCT.md
-- CONTRIBUTING.md
-- CONTRIBUTORS.md
-
-### Testing
-- Aqua.jl quality checks
-- Unit tests for all components
-- Integration tests for all RPC patterns
-- Contract tests with grpcurl
-
-[Unreleased]: https://github.com/JuliaIO/gRPCServer.jl/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.2.0...v1.0.0
-[0.2.0]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/JuliaIO/gRPCServer.jl/releases/tag/v0.1.0

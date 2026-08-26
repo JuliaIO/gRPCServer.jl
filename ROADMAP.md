@@ -1,6 +1,6 @@
 # Roadmap
 
-gRPCServer.jl 1.0 ships with `HTTPjlBackend` (HTTP.jl 2.x over Reseau) as the
+gRPCServer.jl 0.1 ships with `HTTPjlBackend` (HTTP.jl 2.x over Reseau) as the
 one production backend. Everything on this roadmap is organized around making
 that backend harder to knock over, more predictable under streaming load, and
 faster. The two other backends are experimental and are tracked at the end.
@@ -109,7 +109,7 @@ gate, fail-fast deadlines) exist, but several streaming-specific ones do not.
 
 ## 2. Performance of the HTTP.jl backend
 
-**Status**: Open. Receive-path copies were removed in the 1.0 cycle; the
+**Status**: Open. Receive-path copies were removed before the first release; the
 remaining cost is dominated by the transport and by the send path.
 
 - [ ] **Refresh the baseline.** `benchmark/BASELINE.md` dates from January 2026
@@ -149,7 +149,7 @@ remaining cost is dominated by the transport and by the send path.
       Documenter, and plugin metadata
 - [ ] Verify the transferred secrets (`DOCUMENTER_KEY`, `CODECOV_TOKEN`) and
       re-claim the Codecov slug so coverage uploads and the badge resolve
-- [ ] Install the Registrator app for the organization and register 1.0.0 in
+- [ ] Install the Registrator app for the organization and register 0.1.0 in
       General
 - [ ] Update `SECURITY.md` supported-versions table once registered
 - [ ] Re-issue the Zenodo DOI against the final home
@@ -197,7 +197,7 @@ Requires Julia 1.12 (the LTS ships an older `nghttp2_jll`).
   unreleased; marked `@test_broken` so CI reports the moment the bound can be
   raised
 
-## Shipped in 1.0
+## Shipped in 0.1.0
 
 Core server with all four RPC shapes; pluggable HTTP/2 backends with
 `HTTPjlBackend` as the default; TLS and mTLS via Reseau with real ALPN
