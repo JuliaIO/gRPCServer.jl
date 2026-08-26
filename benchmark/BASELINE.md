@@ -59,5 +59,5 @@ Use these as a reference when evaluating performance changes.
 
 ```bash
 cd benchmark
-julia --project benchmarks.jl --save baseline.json
+julia --project=benchmark benchmark/benchmarks.jl --save baseline.json
 ```

@@ -1,8 +1,10 @@
 # gRPCServer.jl
 
+[![License][license-img]][license-url]
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaio.github.io/gRPCServer.jl/dev)
 [![Build Status](https://github.com/JuliaIO/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/JuliaIO/gRPCServer.jl/actions/workflows/CI.yml)
 [![Coverage](https://codecov.io/gh/JuliaIO/gRPCServer.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/JuliaIO/gRPCServer.jl)
-[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaio.github.io/gRPCServer.jl/dev)
+
 
 A native Julia implementation of a [gRPC](https://grpc.io/) server library.
 

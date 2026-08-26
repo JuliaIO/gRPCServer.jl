@@ -108,7 +108,10 @@ end
 - Receives `BidiStream{TIn, TOut}` for bidirectional communication
 - Iterates over incoming messages with `for message in stream`
 - Sends responses with `send!(stream, response)`
-- **Must** close the stream with `close!(stream)`
+- Close the output side with `close!(stream)` when you are done sending. The
+  runtime sends the terminating trailers when the handler returns, so the call
+  also completes if you simply return; `close!` lets you end the output early
+  (while still reading input) and makes any later `send!` throw.
 - Returns `nothing` (responses sent via stream)
 - Check `is_cancelled(ctx)` to stop early if the client disconnects
 

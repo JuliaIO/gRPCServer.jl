@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Server-streaming handlers with a typed `stream::ServerStream{T}` parameter no longer fail with `INTERNAL "Internal server error"`.** `dispatch_server_streaming` constructed the stream as `ServerStream{Any}`, so the documented (and registration-time-validated) typed handler signature was uncallable at runtime. The stream is now typed from the method's response Julia type, matching the client-streaming and bidirectional dispatch paths; raw methods get `ServerStream{Vector{UInt8}}`. The same fix aligns the client-streaming and bidirectional stream types with the `raw_request`/`raw_response` flags. Also fixes the built-in `grpc.health.v1.Health/Watch` handler.
+- **`run(server; block = true)` + `stop!(server)` no longer hangs.** `stop!` returned before notifying `shutdown_event` on the `serve_grpc` backend path, so a task blocked in `run` never woke; `wait(server_task)` after `stop!` now returns. The shutdown signal also moved from `Condition` to `Base.Event`: since Julia 1.12 a plain `Condition` is single-threaded and `wait`/`notify` from any other thread throw `ConcurrencyViolationError("lock must be held")`, so `stop!` from a spawned task and `run(block=true)` off the creating thread were broken even when the notify landed. `Base.wait(server)` still works (it polls status).
+
 ## [1.0.0] - 2026-08-17
 
 ### Changed

@@ -1,10 +1,19 @@
 # TLS
 
 gRPCServer.jl supports TLS-secured gRPC with real server-side ALPN negotiation.
-The TLS path performs genuine `h2` selection during the handshake via OpenSSL's
-`SSL_CTX_set_alpn_select_cb`, reads the negotiated protocol back via
-`SSL_get0_alpn_selected`, and rejects any client that does not offer `h2`
-before any HTTP/2 bytes are exchanged.
+The TLS layer is the pure-Julia Reseau transport: the `alpn_protocols`
+preference list is passed into `Reseau.TLS.Config`, the negotiated protocol is
+read back from the live connection state after the handshake, and a client
+that offers none of the advertised protocols is refused.
+
+> **Backend note.** Genuine per-handshake rejection — and its log lines —
+> (steps 4–5 below) are `PureHTTP2Backend` behaviors. On the default
+> `HTTPjlBackend`, TLS/ALPN/mTLS are enforced inside the HTTP.jl/Reseau layer:
+> a client that offers no `h2` completes the handshake with *no* ALPN
+> negotiated and is dropped at the HTTP layer without a gRPCServer log line,
+> and `reload_tls!` (step 6) raises `UnsupportedFeatureError`. See
+> [HTTP/2 Backends](http2-backends.md) for the full capability matrix.
+> Steps 1–3 work identically on every backend.
 
 This page walks you through setting up a TLS gRPC server in about fifteen
 minutes. The server can serve any codegen-registered service (see
@@ -82,8 +91,10 @@ grpcurl -insecure \
     grpc.health.v1.Health/Check
 ```
 
-The server log line for the accepted connection shows `alpn=h2` as a value
-read back directly from the live TLS state.
+The connection is accepted and serves RPCs over the negotiated `h2` protocol.
+(There is no per-connection log line; the negotiated protocol is read back
+from the live TLS connection state, which is what makes the `ALPN_MISMATCH`
+rejection in step 4 possible on `PureHTTP2Backend`.)
 
 ## Step 4 — Reject a client that does not offer `h2`
 
@@ -91,14 +102,21 @@ read back directly from the live TLS state.
 openssl s_client -connect localhost:50443 -alpn http/1.1 </dev/null
 ```
 
-The server logs exactly one line of the form:
+On `PureHTTP2Backend`, the handshake is rejected and the server logs:
 
 ```
-TLS handshake rejected  kind=ALPN_MISMATCH peer=127.0.0.1:XXXXX
+┌ Warn: TLS handshake rejected
+│   kind = ALPN_MISMATCH
+│   peer = 127.0.0.1:XXXXX
+└   message = ...
 ```
 
 No HTTP/2 bytes are exchanged, and the accept loop continues serving other
 clients.
+
+On the default `HTTPjlBackend` there is no server-side rejection: the TLS
+handshake completes with no ALPN protocol negotiated, and the connection is
+dropped at the HTTP layer without a gRPCServer log line.
 
 ## Step 5 — Enable mutual TLS (optional)
 
@@ -112,10 +130,18 @@ tls_mtls = TLSConfig(
 ```
 
 With `require_client_cert = true`, the server rejects any client that does not
-present a certificate signed by a CA in the `client_ca` bundle. The rejection is
-logged with `kind=PEER_CERT_REJECTED`.
+present a certificate signed by a CA in the `client_ca` bundle. On the default
+`HTTPjlBackend` the rejection surfaces as a post-handshake TLS alert
+(`certificate required`) with no gRPCServer log line; on `PureHTTP2Backend`
+it is logged with `kind=PEER_CERT_REJECTED` (or `kind=HANDSHAKE_IO_ERROR` if
+Reseau's error text does not match the classifier).
 
 ## Step 6 — Reload certificates without restarting
+
+Supported only by `PureHTTP2Backend`; on the default `HTTPjlBackend` (and
+`Nghttp2Backend`) `reload_tls!` raises `UnsupportedFeatureError` (on the
+watcher, the reload attempt is caught and logged as `Certificate reload
+failed` each interval).
 
 ```julia
 # ... later, after writing new cert/key files to the same paths ...
@@ -140,25 +166,30 @@ gRPCServer.start_watching!(watcher; interval = 60.0)
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ArgumentError: alpn_protocols must not be empty` | You explicitly passed `alpn_protocols = String[]`. | Pass `["h2"]` or omit the keyword. |
+| `ArgumentError: alpn_protocols must not be empty — set ["h2"] for gRPC` | You explicitly passed `alpn_protocols = String[]`. | Pass `["h2"]` or omit the keyword. |
 | `TLSHandshakeError(kind = CONFIG_ERROR, ...)` at `start!` | Cert or key path is wrong, file is unreadable, or the key does not match the cert. | Check the paths in the error. `openssl x509 -in server.crt -text` and `openssl rsa -in server.key -check` validate them independently. |
-| `kind = ALPN_MISMATCH` log lines from a client you trust | Client advertises only `http/1.1`, only `h2c`, or omits ALPN entirely. | Enable ALPN on the client and advertise `h2`. |
-| `kind = PEER_CERT_REJECTED` log lines | `require_client_cert = true` but the client presented no cert, or one not signed by `client_ca`. | Verify the client cert chain and the `client_ca` path. |
+| `kind = ALPN_MISMATCH` log lines from a client you trust (`PureHTTP2Backend` only) | Client advertises only `http/1.1`, only `h2c`, or omits ALPN entirely. | Enable ALPN on the client and advertise `h2`. On the default backend a no-`h2` client is dropped silently at the HTTP layer (step 4). |
+| `kind = PEER_CERT_REJECTED` log lines (`PureHTTP2Backend` only) | `require_client_cert = true` but the client presented no cert, or one not signed by `client_ca`. | Verify the client cert chain and the `client_ca` path. |
 | `kind = HANDSHAKE_IO_ERROR` under load | Handshake timed out or the connection reset mid-handshake. | If persistent, raise `handshake_timeout_ns` or investigate network middleboxes. |
 
 ## Error classification
 
-Every TLS-layer failure throws a `TLSHandshakeError` whose `kind` field is one
-of:
+On the `PureHTTP2Backend` accept path, every TLS-layer failure surfaces as a
+`TLSHandshakeError` whose `kind` field is one of (as do `start!`-time
+configuration errors on any backend):
 
 - `CONFIG_ERROR` — raised synchronously by `start!` when the TLS configuration
-  cannot be loaded at all (missing files, malformed cert, bind failure).
+  cannot be loaded at all (missing files, malformed cert; on the
+  `PureHTTP2` path also bind failure — the HTTP.jl path surfaces a bind
+  failure as `BindError`).
 - `ALPN_MISMATCH` — the client did not offer any protocol from the server's
   `alpn_protocols` list. Raised per-handshake during the accept loop.
 - `PEER_CERT_REJECTED` — mTLS verification failed. Raised per-handshake.
 - `HANDSHAKE_IO_ERROR` — handshake timed out, reset, or failed for any other
   reason. Raised per-handshake.
 
-The three per-handshake kinds produce distinct `@warn` log lines, so operators
-can tell configuration errors from client errors from load-induced timeouts at
-a glance.
+`ALPN_MISMATCH` and `PEER_CERT_REJECTED` log as `@warn "TLS handshake
+rejected"` (distinguished by the `kind=` field) and `HANDSHAKE_IO_ERROR` as
+`@warn "TLS handshake failed"`, so operators can tell configuration errors
+from client errors from load-induced timeouts at a glance; `CONFIG_ERROR`
+logs as `@error`.

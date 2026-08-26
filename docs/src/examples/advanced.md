@@ -383,7 +383,7 @@ The `max_concurrent_requests` keyword on `GRPCServer` (default `1024`) caps
 how many RPCs run at once. When the cap is
 reached, additional requests are shed immediately with a trailers-only
 `StatusCode.RESOURCE_EXHAUSTED` status — there is no queue and no waiting.
-Pass `nothing` or `0` for an unlimited cap (the legacy csvance behavior).
+Pass `nothing` or `0` for an unlimited cap (the pre-1.0 default).
 
 ```julia
 server = GRPCServer("127.0.0.1", 50051;
@@ -502,6 +502,12 @@ method = MyService_GetThing_Method((ctx, req) -> Thing(req.id))
 # raw variants: receive/return undecoded Vector{UInt8} payloads
 method = MyService_GetThing_Method((ctx, raw) -> raw; raw_request = true, raw_response = true)
 ```
+
+A raw response is the protobuf message body only — the framing layer still
+applies — so whatever bytes a raw handler returns must decode as a well-formed
+protobuf of the *response* type on the client. An echo handler like the one
+above only works when the client expects exactly those bytes (for example a
+raw client); a typed client decoding a different message type will fail.
 
 ### Manual service registration
 

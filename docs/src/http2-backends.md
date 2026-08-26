@@ -6,7 +6,7 @@ management) is delegated to an external backend package, which is selected
 at server construction time via the `http2_backend` keyword argument.
 
 The **default backend is `HTTPjlBackend`**, which serves gRPC over
-[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.1) — cleartext h2c and TLS
+[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.5) — cleartext h2c and TLS
 (ALPN `h2`), across all four RPC types plus server reflection. The previous
 backend, `PureHTTP2Backend` (the pure-Julia
 [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) implementation of
@@ -54,10 +54,9 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 
 !!! note "HTTP.jl backend limitations"
     Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
-    not support live TLS certificate reload (`reload_tls!`). mTLS over TLS 1.2
-    is also currently broken upstream in Reseau (it works over TLS 1.3). Select
-    `PureHTTP2Backend()` if you need certificate reload. Setting these keywords
-    explicitly now raises [`UnsupportedFeatureError`](@ref) at construction
+    not support live TLS certificate reload (`reload_tls!`). Select
+    `PureHTTP2Backend()` if you need certificate reload. Attempting an
+    unsupported operation raises [`UnsupportedFeatureError`](@ref)
     rather than being silently ignored — see
     [Capability validation](#capability-validation).
 
@@ -105,7 +104,7 @@ see the note below). Footnote markers qualify partial or nuanced support.
 | server-streaming / bidi RPCs | ✅ | ✅ | ❌ |
 | client-streaming RPCs | ✅ | ✅ | ✅ |
 | `enable_reflection` | ✅ | ✅ | ❌⁴ |
-| `enable_health_check` | ✅ | ✅ | ❌⁵ |
+| `enable_health_check` | ✅ | ✅ | ✅⁵ |
 
 ¹ Enforced per connection on HTTPjl (default 100).
 ² Pass `stop!(; timeout=)` on HTTPjl instead; the config keyword raises.
@@ -190,13 +189,15 @@ in tests, for instance, where it removes the drain wait entirely.
 
 ## The Backend Interface
 
-There are two contracts. A backend implements whichever suits the library it
-wraps.
+There are two contracts, but only one of them can start a server in 1.0: the
+raised `serve_grpc` contract, which all three built-in backends use. The
+connection-factory contract is legacy and documented below for reference only.
 
 ### The raised contract: `AbstractGRPCStream` and `serve_grpc`
 
-The preferred one, and what `HTTPjlBackend` uses. The backend owns its listener
-and serve loop, and adapts each in-flight call to a per-call stream handle:
+The contract all built-in backends (HTTPjl, PureHTTP2, nghttp2) serve through.
+The backend owns its listener and serve loop, and adapts each in-flight call to
+a per-call stream handle:
 
 ```julia
 serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, peer)
@@ -208,7 +209,7 @@ serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, pee
 |-----------|---------|
 | Request   | `grpc_path`, `request_metadata`, `read_message!`, `is_cancelled` |
 | Response  | `send_response_headers!`, `send_message!`, `send_trailers!`, `reset!` |
-| Teardown  | `drain_request!` (optional; defaults to a no-op) |
+| Teardown  | `expect_half_close!`, `abort_request!` (both optional; no-op defaults) |
 
 This contract carries no assumption about the underlying HTTP/2 types, so a
 backend wrapping a foreign library — a C binding, or another Julia HTTP stack —
@@ -218,19 +219,26 @@ does not have to imitate PureHTTP2.jl's object model.
 message will arrive. Returning `nothing` for a unary or server-streaming call
 fails it with `INTERNAL`; it is not a silent empty request.
 
-`drain_request!` exists because a backend may treat an unread request body at
-handler return as an abandoned request. It is called only after RPCs that read
-exactly one message, where the client has already half-closed — never on
-client- or bidirectional-streaming calls, where a peer may legitimately hold its
-send side open.
+`expect_half_close!` covers the unary and server-streaming case, where the
+client has already half-closed: it requires that the request stream ends after
+exactly one message — reading one more frame and throwing `INVALID_ARGUMENT` on
+extra frames — so the body is drained to end-of-stream and the transport never
+sees an abandoned request, while a misbehaving peer streaming endless frames
+cannot pin the handler.
+
+`abort_request!` covers the opposite case — client-streaming and
+bidirectional calls where the handler returns early with the peer's send side
+still open: it closes the read side without waiting for end-of-stream.
 
 ### The connection-factory contract: `create_connection` (legacy)
 
-The original contract. As of 1.0 it is **legacy**: no built-in backend uses
-it (all three — HTTPjl, PureHTTP2, nghttp2 — drive through `serve_grpc`), and
-the frame-loop driver that consumed factory connections moved into the
-PureHTTP2 package extension. It remains documented for custom backends
-written against the old interface. The factory returns a connection object
+The original contract. As of 1.0 it is **legacy and reference-only**: no
+built-in backend uses it (all three — HTTPjl, PureHTTP2, nghttp2 — drive
+through `serve_grpc`), the frame-loop driver that consumed factory connections
+moved into the PureHTTP2 package extension, and a `create_connection`-only
+backend cannot serve — `start!` raises an `ArgumentError` pointing at
+`serve_grpc`. It is kept documented for reference against the old interface.
+The factory returns a connection object
 compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting the
 following operations:
 
@@ -250,32 +258,8 @@ the full interface.
 
 ## Implementing a Custom Backend
 
-Define a new subtype of `AbstractHTTP2Backend` and implement
-`create_connection`:
-
-```julia
-using gRPCServer, PureHTTP2
-
-struct MyBackend <: AbstractHTTP2Backend
-    # backend-specific configuration
-end
-
-gRPCServer.create_connection(backend::MyBackend) = begin
-    # Return an HTTP2Connection-compatible object
-    PureHTTP2.HTTP2Connection()
-end
-
-server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
-```
-
-The connection-factory pattern means gRPCServer.jl calls `create_connection`
-once per client; the returned object is then used directly through
-PureHTTP2.jl's API, so no per-request indirection is added. The cost is that the
-backend must adapt its underlying types to the `HTTP2Connection` field
-interface.
-
-For a backend wrapping a different HTTP/2 library — a C binding such as
-`nghttp2`, or another Julia HTTP stack — prefer the raised contract instead:
+Define a new subtype of `AbstractHTTP2Backend` and implement `serve_grpc` —
+the only contract a 1.0 server can start with:
 
 ```julia
 struct MyBackend <: AbstractHTTP2Backend end
@@ -287,10 +271,21 @@ function gRPCServer.serve_grpc(::MyBackend, server, on_call)
 end
 
 # plus the AbstractGRPCStream methods for that stream type
+
+server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
 ```
 
 That is how `HTTPjlBackend` is built, and it avoids having to imitate
 PureHTTP2.jl's object model in a library that has its own.
+
+A backend wrapping a different HTTP/2 library — a C binding such as `nghttp2`,
+or another Julia HTTP stack — fits this naturally: it implements the
+`AbstractGRPCStream` methods against its own types.
+
+(For reference, the legacy factory path was a one-line
+`gRPCServer.create_connection(backend)` returning a
+`PureHTTP2.HTTP2Connection`-compatible object, called once per client. It no
+longer serves; see the note above.)
 
 ## Future Backends
 

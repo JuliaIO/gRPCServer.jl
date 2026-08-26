@@ -21,6 +21,8 @@ using ProtoBuf
 using gRPCServer
 import gRPCClient
 
+mkdir("generated")   # protojl requires the output directory to pre-exist
+
 protojl("myservice.proto", ".", "generated";
     always_use_modules = true,
     add_kwarg_constructors = true
@@ -58,8 +60,9 @@ Regenerate whenever you change the `.proto` file; the output is deterministic
 
 ## Emitted symbols
 
-For each `service` in the `.proto`, gRPCServer emits the following (exact
-signatures from the generated output):
+For each `service` in the `.proto`, gRPCServer emits the following (signatures
+as emitted in the generated output; the emitted keyword definitions annotate
+the raw flags as `::Bool`):
 
 1. **Typed descriptor builder** — one per RPC:
 

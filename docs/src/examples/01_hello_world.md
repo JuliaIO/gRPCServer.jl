@@ -43,6 +43,8 @@ using ProtoBuf
 using gRPCServer
 import gRPCClient
 
+mkdir("generated")   # protojl requires the output directory to pre-exist
+
 protojl("greeter.proto", ".", "generated";
     always_use_modules = true,
     add_kwarg_constructors = true

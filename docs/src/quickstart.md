@@ -50,6 +50,8 @@ using ProtoBuf
 using gRPCServer
 import gRPCClient
 
+mkdir("generated")   # protojl requires the output directory to pre-exist
+
 # Generate Julia structs from proto file
 # Arguments: proto_file, search_path, output_directory
 protojl("greeter.proto", ".", "generated";
@@ -167,12 +169,18 @@ register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_strea
 run(server)
 ```
 
-When the server starts successfully, you'll see:
+When the server starts successfully, you'll see your `@info` line followed by
+the library's own startup line:
 
 ```
-[ Info: gRPC server starting
+┌ Info: Starting gRPC server
+│   host = "127.0.0.1"
+└   port = 50051
+┌ Info: gRPC server started
 │   host = "127.0.0.1"
 │   port = 50051
+│   tls = false
+└   backend = :HTTPjlBackend
 ```
 
 The server is now listening for connections. Keep this terminal running.
@@ -320,11 +328,13 @@ resp = gRPCClient.grpc_sync_request(client, helloworld.HelloRequest(name = "Juli
 println(resp.message)  # "Hello, Julia!"
 ```
 
-For server streaming, pass a response `Channel` and iterate it:
+For server streaming, use that RPC's own client constructor and pass a
+response `Channel` to iterate it:
 
 ```julia
+stream_client = helloworld.Greeter_SayHelloStream_Client("127.0.0.1", 50051)
 response_c = Channel{helloworld.HelloReply}(16)
-req = gRPCClient.grpc_async_request(client, helloworld.HelloRequest(name = "Julia"), response_c)
+req = gRPCClient.grpc_async_request(stream_client, helloworld.HelloRequest(name = "Julia"), response_c)
 for reply in response_c
     println(reply.message)
 end

@@ -171,12 +171,13 @@ GRPCServerPureHTTP2
 GRPCServerNghttp2
 ```
 
-### Raised stream-handler contract (HTTP.jl backend)
+### Raised stream-handler contract (all built-in backends)
 
-The HTTP.jl backend requires a higher-level contract than the connection
-factory: the backend owns the serve loop and presents each gRPC call as an
-[`AbstractGRPCStream`](@ref). This contract is introduced for the HTTP.jl
-backend; the request-path integration is in progress.
+The preferred contract, higher-level than the connection factory: the backend
+owns its listener and serve loop, and presents each gRPC call as an
+[`AbstractGRPCStream`](@ref). It was introduced for the HTTP.jl backend; as of
+1.0 all three built-in backends (HTTPjl, PureHTTP2, nghttp2) serve through it,
+with the HTTP.jl request path driving dispatch via `serve_grpc`.
 
 ```@docs
 AbstractGRPCStream

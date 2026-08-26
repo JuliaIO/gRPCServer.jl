@@ -14,7 +14,9 @@ benchmark the gRPCServer.jl stack with it is to serve the same
 
 `test/testservice.jl` builds the standard `test.TestService` — all four RPC
 shapes, with echo semantics matching the Go reference server in gRPCClient.jl's
-`test/go` — registered through the generated codegen interface:
+`test/go` for unary and server-streaming RPCs (and for the client-streaming/
+bidi traffic the workloads send, where each request carries
+`test_response_sz = 1`) — registered through the generated codegen interface:
 
 ```julia
 # From the gRPCServer.jl repo root
@@ -93,8 +95,12 @@ individual layers; use gRPCClientUtils for end-to-end numbers.
 
 ```
 julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
-julia --project=benchmark --threads=auto benchmark/run.jl
+julia --project=benchmark benchmark/benchmarks.jl [category] [--save baseline.json]
 ```
+
+where `category` is `dispatch`, `streaming`, or `serialization` (no argument
+runs all). `benchmark/run.jl` is a separate in-repo end-to-end large-protobuf
+throughput script (in-process server, driven by gRPCClient).
 
 ## HTTP/2 flow-control window and large uploads
 
@@ -133,6 +139,6 @@ window, since an endpoint's send throughput is governed by the peer's advertised
 window.
 
 Transport tuning that is sometimes expected but does not apply here: there is no
-TCP send/receive buffer size knob in HTTP.jl 2.0 or its Reseau transport (the
+TCP send/receive buffer size knob in HTTP.jl 2.x or its Reseau transport (the
 kernel autotunes), and `TCP_NODELAY` is already enabled by default, so small
 messages are not delayed by Nagle.
