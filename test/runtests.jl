@@ -73,6 +73,7 @@ const PUREHTTP2_TESTS = get(ENV, "GRPCSERVER_TEST_PUREHTTP2", "false") in ("true
     include("integration/test_server_streaming.jl")
     include("integration/test_client_streaming.jl")
     include("integration/test_bidi_streaming.jl")
+    include("integration/test_typed_streaming.jl")
     include("integration/test_errors.jl")
     include("integration/test_metadata.jl")
     include("integration/test_interceptors.jl")

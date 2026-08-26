@@ -79,7 +79,12 @@ mutable struct GRPCServer
     socket::Union{Sockets.TCPServer, Nothing}
     connections::Vector{Any}  # Active connections
     lock::ReentrantLock
-    shutdown_event::Condition
+    # Base.Event, not Condition: since Julia 1.12 a plain `Condition` is
+    # single-thread (GenericCondition{AlwaysLockedST}) and `wait`/`notify`
+    # from any other thread throw ConcurrencyViolationError("lock must be
+    # held"). stop! can run on any task, and run(block=true) can be spawned
+    # off the creating thread, so the signal must be thread-safe.
+    shutdown_event::Base.Event
     last_error::Union{Exception, Nothing}
 
     # TLS state
@@ -151,7 +156,7 @@ mutable struct GRPCServer
             nothing,
             [],
             ReentrantLock(),
-            Condition(),
+            Base.Event(),
             nothing,
             nothing,  # tls_transport - initialized in start!() when TLS configured
             http2_backend,
@@ -275,6 +280,9 @@ function start!(server::GRPCServer)
 
     server.status = ServerStatus.STARTING
     server.last_error = nothing
+    # Base.Event is level-triggered; clear any signal from a previous stop so
+    # run(block=true) blocks until the NEXT stop instead of waking instantly.
+    Base.reset(server.shutdown_event)
 
     try
         # Auto-register built-in services if enabled
@@ -421,6 +429,8 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
                       force = force, timeout = timeout)
         server.backend_handle = nothing
         server.status = ServerStatus.STOPPED
+        @info "gRPC server stopped"
+        notify(server.shutdown_event)
         return
     end
 
@@ -466,18 +476,16 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
     end
 
     @info "gRPC server stopped"
-    lock(server.lock) do
-        notify(server.shutdown_event)
-    end
+    notify(server.shutdown_event)
 end
 
 """
     wait(server::GRPCServer)
 
-Block until the server stops. The HTTP.jl backend path never notifies
-`shutdown_event` itself (the listener is closed by `stop!` through
-`stop_serving!`), so this polls `server.status` instead of waiting on the
-[`Condition`](@ref).
+Block until the server stops. `stop!` notifies `shutdown_event` on every
+backend, but this polls `server.status` anyway so it also works if the server
+was stopped by means other than `stop!` (for example a forced backend
+close).
 """
 function Base.wait(server::GRPCServer)
     while server.status != ServerStatus.STOPPED
@@ -559,8 +567,9 @@ function Base.run(server::GRPCServer; block::Bool=true)
     start!(server)
 
     if block
-        # Wait for shutdown without holding the lock
-        # The shutdown_event is a simple Condition that doesn't require a lock
+        # Wait for shutdown. shutdown_event is a Base.Event (level-triggered,
+        # thread-safe): it wakes whether or not the notify has already landed,
+        # so a stop! that finishes before this wait starts is not lost.
         try
             while server.status == ServerStatus.RUNNING
                 wait(server.shutdown_event)
