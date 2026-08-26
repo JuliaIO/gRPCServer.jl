@@ -428,7 +428,7 @@ Never tagged; content folded into [1.0.0].
 - Integration tests for all RPC patterns
 - Contract tests with grpcurl
 
-[Unreleased]: https://github.com/csvance/gRPCServer.jl/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/csvance/gRPCServer.jl/compare/v0.2.0...v1.0.0
-[0.2.0]: https://github.com/csvance/gRPCServer.jl/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/csvance/gRPCServer.jl/releases/tag/v0.1.0
+[Unreleased]: https://github.com/JuliaIO/gRPCServer.jl/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.2.0...v1.0.0
+[0.2.0]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/JuliaIO/gRPCServer.jl/releases/tag/v0.1.0

@@ -1,8 +1,8 @@
 # gRPCServer.jl
 
-[![Build Status](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml)
-[![Coverage](https://codecov.io/gh/csvance/gRPCServer.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/csvance/gRPCServer.jl)
-[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://csvance.github.io/gRPCServer.jl/dev)
+[![Build Status](https://github.com/JuliaIO/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/JuliaIO/gRPCServer.jl/actions/workflows/CI.yml)
+[![Coverage](https://codecov.io/gh/JuliaIO/gRPCServer.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/JuliaIO/gRPCServer.jl)
+[![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliaio.github.io/gRPCServer.jl/dev)
 
 A native Julia implementation of a [gRPC](https://grpc.io/) server library.
 
@@ -15,7 +15,7 @@ Pkg.add("gRPCServer")
 
 ## Documentation
 
-Full documentation is available at [csvance.github.io/gRPCServer.jl](https://csvance.github.io/gRPCServer.jl/dev).
+Full documentation is available at [juliaio.github.io/gRPCServer.jl](https://juliaio.github.io/gRPCServer.jl/dev).
 
 ## Requirements
 

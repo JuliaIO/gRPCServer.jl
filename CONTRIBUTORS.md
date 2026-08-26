@@ -1,6 +1,6 @@
 # Contributors
 
-Thank you to everyone who has [contributed](https://github.com/csvance/gRPCServer.jl/graphs/contributors) to gRPCServer.jl!
+Thank you to everyone who has [contributed](https://github.com/JuliaIO/gRPCServer.jl/graphs/contributors) to gRPCServer.jl!
 
 ## Maintainers
 

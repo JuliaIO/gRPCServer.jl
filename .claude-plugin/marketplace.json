@@ -1,8 +1,8 @@
 {
   "name": "grpcserver-jl",
   "owner": {
-    "name": "csvance",
-    "url": "https://github.com/csvance/gRPCServer.jl"
+    "name": "JuliaIO",
+    "url": "https://github.com/JuliaIO/gRPCServer.jl"
   },
   "metadata": {
     "description": "Agent skills for gRPCServer.jl, the Julia gRPC server.",

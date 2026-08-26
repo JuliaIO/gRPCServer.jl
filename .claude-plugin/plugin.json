@@ -5,8 +5,8 @@
   "author": {
     "name": "Carroll Vance, Sébastien Celles"
   },
-  "homepage": "https://csvance.github.io/gRPCServer.jl",
-  "repository": "https://github.com/csvance/gRPCServer.jl",
+  "homepage": "https://juliaio.github.io/gRPCServer.jl",
+  "repository": "https://github.com/JuliaIO/gRPCServer.jl",
   "license": "MIT",
   "keywords": [
     "julia",

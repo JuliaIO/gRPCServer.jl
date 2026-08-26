@@ -29,10 +29,10 @@ const PAGES = [
 makedocs(
     sitename = "gRPCServer.jl",
     modules = [gRPCServer],
-    repo = Documenter.Remotes.GitHub("csvance", "gRPCServer.jl"),
+    repo = Documenter.Remotes.GitHub("JuliaIO", "gRPCServer.jl"),
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", "false") == "true",
-        canonical = "https://csvance.github.io/gRPCServer.jl",
+        canonical = "https://juliaio.github.io/gRPCServer.jl",
     ),
     pages = PAGES,
     doctest = false,  # Disable doctests for now
@@ -44,10 +44,10 @@ generate_llms_files(
     pages = PAGES,
     sitename = "gRPCServer.jl",
     description = "A production-ready gRPC server in Julia: four RPC patterns, three HTTP/2 backends, one API.",
-    baseurl = "https://csvance.github.io/gRPCServer.jl/dev",
+    baseurl = "https://juliaio.github.io/gRPCServer.jl/dev",
 )
 
 deploydocs(
-    repo = "github.com/csvance/gRPCServer.jl.git",
+    repo = "github.com/JuliaIO/gRPCServer.jl.git",
     devbranch = "main",
 )

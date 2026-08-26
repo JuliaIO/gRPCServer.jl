@@ -19,7 +19,7 @@ hero:
       link: /code_generation/
     - theme: alt
       text: View on GitHub
-      link: https://github.com/csvance/gRPCServer.jl
+      link: https://github.com/JuliaIO/gRPCServer.jl
 
 features:
   - icon: 🧬
@@ -86,4 +86,4 @@ Pkg.add("gRPCServer")
 
 ## License
 
-gRPCServer.jl is licensed under the MIT License — see [LICENSE.md](https://github.com/csvance/gRPCServer.jl/blob/main/LICENSE.md).
+gRPCServer.jl is licensed under the MIT License — see [LICENSE.md](https://github.com/JuliaIO/gRPCServer.jl/blob/main/LICENSE.md).
