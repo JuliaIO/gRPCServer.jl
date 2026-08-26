@@ -742,8 +742,11 @@ function dispatch_server_streaming(
         # Deserialize request (per-method raw passthrough honored)
         request = deserialize_message(request_data, method.input_type; raw=method.raw_request)
 
-        # Create server stream
-        stream = ServerStream{Any}(send_callback, close_callback)
+        # Create server stream with the correct output type (matches
+        # _expected_handler_tuple, so typed handlers are callable)
+        output_type = method.raw_response ? Vector{UInt8} :
+            (method.output_julia_type !== nothing ? method.output_julia_type : Any)
+        stream = ServerStream{output_type}(send_callback, close_callback)
 
         # Build interceptor chain for streaming
         info = MethodInfo(service.name, method.name, method.method_type)
@@ -799,8 +802,9 @@ function dispatch_client_streaming(
 
     try
         # Create client stream with the correct input type
-        # Use the Julia type if available, otherwise fall back to Any
-        input_type = method.input_julia_type !== nothing ? method.input_julia_type : Any
+        # Use the Julia type if available (Vector{UInt8} for raw), otherwise Any
+        input_type = method.raw_request ? Vector{UInt8} :
+            (method.input_julia_type !== nothing ? method.input_julia_type : Any)
         stream = ClientStream{input_type}(receive_callback, is_cancelled_callback)
 
         # Build interceptor chain
@@ -861,9 +865,11 @@ function dispatch_bidi_streaming(
 
     try
         # Create bidi stream with the correct input/output types
-        # Use the Julia types if available, otherwise fall back to Any
-        input_type = method.input_julia_type !== nothing ? method.input_julia_type : Any
-        output_type = method.output_julia_type !== nothing ? method.output_julia_type : Any
+        # Use the Julia types if available (Vector{UInt8} for raw), otherwise Any
+        input_type = method.raw_request ? Vector{UInt8} :
+            (method.input_julia_type !== nothing ? method.input_julia_type : Any)
+        output_type = method.raw_response ? Vector{UInt8} :
+            (method.output_julia_type !== nothing ? method.output_julia_type : Any)
         stream = BidiStream{input_type, output_type}(receive_callback, send_callback, close_callback, is_cancelled_callback)
 
         # Build interceptor chain
