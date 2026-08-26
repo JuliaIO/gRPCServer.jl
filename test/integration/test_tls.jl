@@ -420,12 +420,10 @@ end
                 t = gRPCServer.TLSTransport(config, "127.0.0.1", 0)
                 port = Reseau.TCP.addr(t.listener.listener).port
 
-                # Good client over TLS 1.2 (default negotiation).
-                # KNOWN BROKEN under Reseau >= 1.1: a valid client certificate is
-                # not presented when the connection negotiates TLS 1.2 (it works
-                # under TLS 1.3 — see the TLS 1.3 case below). This is an upstream
-                # Reseau regression surfaced by requiring Reseau >= 1.1.1 for
-                # HTTP.jl 2.x. Tracked upstream; remove @test_broken once fixed.
+                # Good client over TLS 1.2 (default negotiation). Was broken under
+                # Reseau 1.1 through 1.4.0 (client certificate not presented on a
+                # TLS 1.2 negotiation); fixed upstream in Reseau 1.4.1
+                # (JuliaServices/Reseau.jl#150), so this is a hard @test again.
                 good = Threads.@spawn begin
                     try
                         c = Reseau.TLS.connect("tcp", "127.0.0.1:$port";
@@ -448,7 +446,7 @@ end
                 catch e
                     e
                 end
-                @test_broken good_server_result === :ok
+                @test good_server_result === :ok
                 gr = fetch(good)
                 if gr.ok
                     close(gr.conn)
