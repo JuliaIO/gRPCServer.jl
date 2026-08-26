@@ -28,3 +28,7 @@ Full documentation is available at [juliaio.github.io/gRPCServer.jl](https://jul
 
 - [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) - gRPC client for Julia
 - [ProtoBuf.jl](https://github.com/JuliaIO/ProtoBuf.jl) - Protocol buffer support for Julia
+
+
+[license-url]: ./LICENSE.md
+[license-img]: http://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat
