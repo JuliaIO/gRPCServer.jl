@@ -11,7 +11,7 @@ The full documentation is also available as a single Markdown file: https://juli
 - [Code Generation](https://juliaio.github.io/gRPCServer.jl/dev/code_generation/): gRPCServer integrates with ProtoBuf.jl through an external code generation handler.
 - [TLS](https://juliaio.github.io/gRPCServer.jl/dev/tls/): gRPCServer.jl supports TLS-secured gRPC with real server-side ALPN negotiation.
 - [HTTP/2 Backends](https://juliaio.github.io/gRPCServer.jl/dev/http2-backends/): gRPCServer.jl uses a pluggable HTTP/2 backend architecture.
-- [Performance](https://juliaio.github.io/gRPCServer.jl/dev/performance/): The framing layer reads request bytes directly into a single reusable buffer and hands the decoder a view into it, so a received message is not copied between the socket and ProtoBuf decoding.
+- [Performance](https://juliaio.github.io/gRPCServer.jl/dev/performance/): The robust end-to-end benchmark suite for this server lives in the sibling gRPCClient.jl package under utils/gRPCClientUtils.jl.
 - [API Reference](https://juliaio.github.io/gRPCServer.jl/dev/api/): The generated register_<Service>_<Rpc>! functions build a MethodDescriptor for each RPC and call register_method! on the server's dispatcher; use the generated functions for normal services.
 - [Examples / Overview](https://juliaio.github.io/gRPCServer.jl/dev/examples//): This guide walks you through gRPCServer.jl examples in progressive order, from basic concepts to advanced patterns.
 - [Examples / Hello World](https://juliaio.github.io/gRPCServer.jl/dev/examples/01_hello_world/): This is the simplest gRPCServer.jl example, demonstrating a basic unary RPC (single request, single response).

@@ -95,6 +95,8 @@ using ProtoBuf
 using gRPCServer
 import gRPCClient
 
+mkdir("generated")   # protojl requires the output directory to pre-exist
+
 # Generate Julia structs from proto file
 # Arguments: proto_file, search_path, output_directory
 protojl("greeter.proto", ".", "generated";
@@ -212,12 +214,18 @@ register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_strea
 run(server)
 ```
 
-When the server starts successfully, you'll see:
+When the server starts successfully, you'll see your `@info` line followed by
+the library's own startup line:
 
 ```
-[ Info: gRPC server starting
+┌ Info: Starting gRPC server
+│   host = "127.0.0.1"
+└   port = 50051
+┌ Info: gRPC server started
 │   host = "127.0.0.1"
 │   port = 50051
+│   tls = false
+└   backend = :HTTPjlBackend
 ```
 
 The server is now listening for connections. Keep this terminal running.
@@ -365,11 +373,13 @@ resp = gRPCClient.grpc_sync_request(client, helloworld.HelloRequest(name = "Juli
 println(resp.message)  # "Hello, Julia!"
 ```
 
-For server streaming, pass a response `Channel` and iterate it:
+For server streaming, use that RPC's own client constructor and pass a
+response `Channel` to iterate it:
 
 ```julia
+stream_client = helloworld.Greeter_SayHelloStream_Client("127.0.0.1", 50051)
 response_c = Channel{helloworld.HelloReply}(16)
-req = gRPCClient.grpc_async_request(client, helloworld.HelloRequest(name = "Julia"), response_c)
+req = gRPCClient.grpc_async_request(stream_client, helloworld.HelloRequest(name = "Julia"), response_c)
 for reply in response_c
     println(reply.message)
 end
@@ -481,6 +491,8 @@ using ProtoBuf
 using gRPCServer
 import gRPCClient
 
+mkdir("generated")   # protojl requires the output directory to pre-exist
+
 protojl("myservice.proto", ".", "generated";
     always_use_modules = true,
     add_kwarg_constructors = true
@@ -518,8 +530,9 @@ Regenerate whenever you change the `.proto` file; the output is deterministic
 
 ## Emitted symbols
 
-For each `service` in the `.proto`, gRPCServer emits the following (exact
-signatures from the generated output):
+For each `service` in the `.proto`, gRPCServer emits the following (signatures
+as emitted in the generated output; the emitted keyword definitions annotate
+the raw flags as `::Bool`):
 
 1. **Typed descriptor builder** — one per RPC:
 
@@ -602,10 +615,19 @@ in the [Advanced Examples](examples/advanced.md#The-runtime-interface-beneath-th
 # TLS
 
 gRPCServer.jl supports TLS-secured gRPC with real server-side ALPN negotiation.
-The TLS path performs genuine `h2` selection during the handshake via OpenSSL's
-`SSL_CTX_set_alpn_select_cb`, reads the negotiated protocol back via
-`SSL_get0_alpn_selected`, and rejects any client that does not offer `h2`
-before any HTTP/2 bytes are exchanged.
+The TLS layer is the pure-Julia Reseau transport: the `alpn_protocols`
+preference list is passed into `Reseau.TLS.Config`, the negotiated protocol is
+read back from the live connection state after the handshake, and a client
+that offers none of the advertised protocols is refused.
+
+> **Backend note.** Genuine per-handshake rejection — and its log lines —
+> (steps 4–5 below) are `PureHTTP2Backend` behaviors. On the default
+> `HTTPjlBackend`, TLS/ALPN/mTLS are enforced inside the HTTP.jl/Reseau layer:
+> a client that offers no `h2` completes the handshake with *no* ALPN
+> negotiated and is dropped at the HTTP layer without a gRPCServer log line,
+> and `reload_tls!` (step 6) raises `UnsupportedFeatureError`. See
+> [HTTP/2 Backends](http2-backends.md) for the full capability matrix.
+> Steps 1–3 work identically on every backend.
 
 This page walks you through setting up a TLS gRPC server in about fifteen
 minutes. The server can serve any codegen-registered service (see
@@ -683,8 +705,10 @@ grpcurl -insecure \
     grpc.health.v1.Health/Check
 ```
 
-The server log line for the accepted connection shows `alpn=h2` as a value
-read back directly from the live TLS state.
+The connection is accepted and serves RPCs over the negotiated `h2` protocol.
+(There is no per-connection log line; the negotiated protocol is read back
+from the live TLS connection state, which is what makes the `ALPN_MISMATCH`
+rejection in step 4 possible on `PureHTTP2Backend`.)
 
 ## Step 4 — Reject a client that does not offer `h2`
 
@@ -692,14 +716,21 @@ read back directly from the live TLS state.
 openssl s_client -connect localhost:50443 -alpn http/1.1 </dev/null
 ```
 
-The server logs exactly one line of the form:
+On `PureHTTP2Backend`, the handshake is rejected and the server logs:
 
 ```
-TLS handshake rejected  kind=ALPN_MISMATCH peer=127.0.0.1:XXXXX
+┌ Warn: TLS handshake rejected
+│   kind = ALPN_MISMATCH
+│   peer = 127.0.0.1:XXXXX
+└   message = ...
 ```
 
 No HTTP/2 bytes are exchanged, and the accept loop continues serving other
 clients.
+
+On the default `HTTPjlBackend` there is no server-side rejection: the TLS
+handshake completes with no ALPN protocol negotiated, and the connection is
+dropped at the HTTP layer without a gRPCServer log line.
 
 ## Step 5 — Enable mutual TLS (optional)
 
@@ -713,10 +744,18 @@ tls_mtls = TLSConfig(
 ```
 
 With `require_client_cert = true`, the server rejects any client that does not
-present a certificate signed by a CA in the `client_ca` bundle. The rejection is
-logged with `kind=PEER_CERT_REJECTED`.
+present a certificate signed by a CA in the `client_ca` bundle. On the default
+`HTTPjlBackend` the rejection surfaces as a post-handshake TLS alert
+(`certificate required`) with no gRPCServer log line; on `PureHTTP2Backend`
+it is logged with `kind=PEER_CERT_REJECTED` (or `kind=HANDSHAKE_IO_ERROR` if
+Reseau's error text does not match the classifier).
 
 ## Step 6 — Reload certificates without restarting
+
+Supported only by `PureHTTP2Backend`; on the default `HTTPjlBackend` (and
+`Nghttp2Backend`) `reload_tls!` raises `UnsupportedFeatureError` (on the
+watcher, the reload attempt is caught and logged as `Certificate reload
+failed` each interval).
 
 ```julia
 # ... later, after writing new cert/key files to the same paths ...
@@ -741,28 +780,33 @@ gRPCServer.start_watching!(watcher; interval = 60.0)
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ArgumentError: alpn_protocols must not be empty` | You explicitly passed `alpn_protocols = String[]`. | Pass `["h2"]` or omit the keyword. |
+| `ArgumentError: alpn_protocols must not be empty — set ["h2"] for gRPC` | You explicitly passed `alpn_protocols = String[]`. | Pass `["h2"]` or omit the keyword. |
 | `TLSHandshakeError(kind = CONFIG_ERROR, ...)` at `start!` | Cert or key path is wrong, file is unreadable, or the key does not match the cert. | Check the paths in the error. `openssl x509 -in server.crt -text` and `openssl rsa -in server.key -check` validate them independently. |
-| `kind = ALPN_MISMATCH` log lines from a client you trust | Client advertises only `http/1.1`, only `h2c`, or omits ALPN entirely. | Enable ALPN on the client and advertise `h2`. |
-| `kind = PEER_CERT_REJECTED` log lines | `require_client_cert = true` but the client presented no cert, or one not signed by `client_ca`. | Verify the client cert chain and the `client_ca` path. |
+| `kind = ALPN_MISMATCH` log lines from a client you trust (`PureHTTP2Backend` only) | Client advertises only `http/1.1`, only `h2c`, or omits ALPN entirely. | Enable ALPN on the client and advertise `h2`. On the default backend a no-`h2` client is dropped silently at the HTTP layer (step 4). |
+| `kind = PEER_CERT_REJECTED` log lines (`PureHTTP2Backend` only) | `require_client_cert = true` but the client presented no cert, or one not signed by `client_ca`. | Verify the client cert chain and the `client_ca` path. |
 | `kind = HANDSHAKE_IO_ERROR` under load | Handshake timed out or the connection reset mid-handshake. | If persistent, raise `handshake_timeout_ns` or investigate network middleboxes. |
 
 ## Error classification
 
-Every TLS-layer failure throws a `TLSHandshakeError` whose `kind` field is one
-of:
+On the `PureHTTP2Backend` accept path, every TLS-layer failure surfaces as a
+`TLSHandshakeError` whose `kind` field is one of (as do `start!`-time
+configuration errors on any backend):
 
 - `CONFIG_ERROR` — raised synchronously by `start!` when the TLS configuration
-  cannot be loaded at all (missing files, malformed cert, bind failure).
+  cannot be loaded at all (missing files, malformed cert; on the
+  `PureHTTP2` path also bind failure — the HTTP.jl path surfaces a bind
+  failure as `BindError`).
 - `ALPN_MISMATCH` — the client did not offer any protocol from the server's
   `alpn_protocols` list. Raised per-handshake during the accept loop.
 - `PEER_CERT_REJECTED` — mTLS verification failed. Raised per-handshake.
 - `HANDSHAKE_IO_ERROR` — handshake timed out, reset, or failed for any other
   reason. Raised per-handshake.
 
-The three per-handshake kinds produce distinct `@warn` log lines, so operators
-can tell configuration errors from client errors from load-induced timeouts at
-a glance.
+`ALPN_MISMATCH` and `PEER_CERT_REJECTED` log as `@warn "TLS handshake
+rejected"` (distinguished by the `kind=` field) and `HANDSHAKE_IO_ERROR` as
+`@warn "TLS handshake failed"`, so operators can tell configuration errors
+from client errors from load-induced timeouts at a glance; `CONFIG_ERROR`
+logs as `@error`.
 
 ---
 
@@ -776,7 +820,7 @@ management) is delegated to an external backend package, which is selected
 at server construction time via the `http2_backend` keyword argument.
 
 The **default backend is `HTTPjlBackend`**, which serves gRPC over
-[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.1) — cleartext h2c and TLS
+[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.5) — cleartext h2c and TLS
 (ALPN `h2`), across all four RPC types plus server reflection. The previous
 backend, `PureHTTP2Backend` (the pure-Julia
 [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) implementation of
@@ -824,10 +868,9 @@ server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
 
 !!! note "HTTP.jl backend limitations"
     Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
-    not support live TLS certificate reload (`reload_tls!`). mTLS over TLS 1.2
-    is also currently broken upstream in Reseau (it works over TLS 1.3). Select
-    `PureHTTP2Backend()` if you need certificate reload. Setting these keywords
-    explicitly now raises [`UnsupportedFeatureError`](@ref) at construction
+    not support live TLS certificate reload (`reload_tls!`). Select
+    `PureHTTP2Backend()` if you need certificate reload. Attempting an
+    unsupported operation raises [`UnsupportedFeatureError`](@ref)
     rather than being silently ignored — see
     [Capability validation](#capability-validation).
 
@@ -875,7 +918,7 @@ see the note below). Footnote markers qualify partial or nuanced support.
 | server-streaming / bidi RPCs | ✅ | ✅ | ❌ |
 | client-streaming RPCs | ✅ | ✅ | ✅ |
 | `enable_reflection` | ✅ | ✅ | ❌⁴ |
-| `enable_health_check` | ✅ | ✅ | ❌⁵ |
+| `enable_health_check` | ✅ | ✅ | ✅⁵ |
 
 ¹ Enforced per connection on HTTPjl (default 100).
 ² Pass `stop!(; timeout=)` on HTTPjl instead; the config keyword raises.
@@ -960,13 +1003,15 @@ in tests, for instance, where it removes the drain wait entirely.
 
 ## The Backend Interface
 
-There are two contracts. A backend implements whichever suits the library it
-wraps.
+There are two contracts, but only one of them can start a server in 1.0: the
+raised `serve_grpc` contract, which all three built-in backends use. The
+connection-factory contract is legacy and documented below for reference only.
 
 ### The raised contract: `AbstractGRPCStream` and `serve_grpc`
 
-The preferred one, and what `HTTPjlBackend` uses. The backend owns its listener
-and serve loop, and adapts each in-flight call to a per-call stream handle:
+The contract all built-in backends (HTTPjl, PureHTTP2, nghttp2) serve through.
+The backend owns its listener and serve loop, and adapts each in-flight call to
+a per-call stream handle:
 
 ```julia
 serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, peer)
@@ -978,7 +1023,7 @@ serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, pee
 |-----------|---------|
 | Request   | `grpc_path`, `request_metadata`, `read_message!`, `is_cancelled` |
 | Response  | `send_response_headers!`, `send_message!`, `send_trailers!`, `reset!` |
-| Teardown  | `drain_request!` (optional; defaults to a no-op) |
+| Teardown  | `expect_half_close!`, `abort_request!` (both optional; no-op defaults) |
 
 This contract carries no assumption about the underlying HTTP/2 types, so a
 backend wrapping a foreign library — a C binding, or another Julia HTTP stack —
@@ -988,19 +1033,26 @@ does not have to imitate PureHTTP2.jl's object model.
 message will arrive. Returning `nothing` for a unary or server-streaming call
 fails it with `INTERNAL`; it is not a silent empty request.
 
-`drain_request!` exists because a backend may treat an unread request body at
-handler return as an abandoned request. It is called only after RPCs that read
-exactly one message, where the client has already half-closed — never on
-client- or bidirectional-streaming calls, where a peer may legitimately hold its
-send side open.
+`expect_half_close!` covers the unary and server-streaming case, where the
+client has already half-closed: it requires that the request stream ends after
+exactly one message — reading one more frame and throwing `INVALID_ARGUMENT` on
+extra frames — so the body is drained to end-of-stream and the transport never
+sees an abandoned request, while a misbehaving peer streaming endless frames
+cannot pin the handler.
+
+`abort_request!` covers the opposite case — client-streaming and
+bidirectional calls where the handler returns early with the peer's send side
+still open: it closes the read side without waiting for end-of-stream.
 
 ### The connection-factory contract: `create_connection` (legacy)
 
-The original contract. As of 1.0 it is **legacy**: no built-in backend uses
-it (all three — HTTPjl, PureHTTP2, nghttp2 — drive through `serve_grpc`), and
-the frame-loop driver that consumed factory connections moved into the
-PureHTTP2 package extension. It remains documented for custom backends
-written against the old interface. The factory returns a connection object
+The original contract. As of 1.0 it is **legacy and reference-only**: no
+built-in backend uses it (all three — HTTPjl, PureHTTP2, nghttp2 — drive
+through `serve_grpc`), the frame-loop driver that consumed factory connections
+moved into the PureHTTP2 package extension, and a `create_connection`-only
+backend cannot serve — `start!` raises an `ArgumentError` pointing at
+`serve_grpc`. It is kept documented for reference against the old interface.
+The factory returns a connection object
 compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting the
 following operations:
 
@@ -1020,32 +1072,8 @@ the full interface.
 
 ## Implementing a Custom Backend
 
-Define a new subtype of `AbstractHTTP2Backend` and implement
-`create_connection`:
-
-```julia
-using gRPCServer, PureHTTP2
-
-struct MyBackend <: AbstractHTTP2Backend
-    # backend-specific configuration
-end
-
-gRPCServer.create_connection(backend::MyBackend) = begin
-    # Return an HTTP2Connection-compatible object
-    PureHTTP2.HTTP2Connection()
-end
-
-server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
-```
-
-The connection-factory pattern means gRPCServer.jl calls `create_connection`
-once per client; the returned object is then used directly through
-PureHTTP2.jl's API, so no per-request indirection is added. The cost is that the
-backend must adapt its underlying types to the `HTTP2Connection` field
-interface.
-
-For a backend wrapping a different HTTP/2 library — a C binding such as
-`nghttp2`, or another Julia HTTP stack — prefer the raised contract instead:
+Define a new subtype of `AbstractHTTP2Backend` and implement `serve_grpc` —
+the only contract a 1.0 server can start with:
 
 ```julia
 struct MyBackend <: AbstractHTTP2Backend end
@@ -1057,10 +1085,21 @@ function gRPCServer.serve_grpc(::MyBackend, server, on_call)
 end
 
 # plus the AbstractGRPCStream methods for that stream type
+
+server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
 ```
 
 That is how `HTTPjlBackend` is built, and it avoids having to imitate
 PureHTTP2.jl's object model in a library that has its own.
+
+A backend wrapping a different HTTP/2 library — a C binding such as `nghttp2`,
+or another Julia HTTP stack — fits this naturally: it implements the
+`AbstractGRPCStream` methods against its own types.
+
+(For reference, the legacy factory path was a one-line
+`gRPCServer.create_connection(backend)` returning a
+`PureHTTP2.HTTP2Connection`-compatible object, called once per client. It no
+longer serves; see the note above.)
 
 ## Future Backends
 
@@ -1086,21 +1125,107 @@ for docstrings on `AbstractHTTP2Backend`, `PureHTTP2Backend`, and `create_connec
 
 # Performance
 
+## End-to-end benchmarks with gRPCClientUtils
+
+The robust end-to-end benchmark suite for this server lives in the sibling
+[gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) package under
+`utils/gRPCClientUtils.jl`. It is a separate measurement package — deliberately
+not a dependency of gRPCClient — whose workloads drive the standard
+`test.TestService` over the wire and report per-message cost. The way to
+benchmark the gRPCServer.jl stack with it is to serve the same
+`test.TestService` from this repo's test tree and point the workloads at it.
+
+### 1. Start the TestService server
+
+`test/testservice.jl` builds the standard `test.TestService` — all four RPC
+shapes, with echo semantics matching the Go reference server in gRPCClient.jl's
+`test/go` for unary and server-streaming RPCs (and for the client-streaming/
+bidi traffic the workloads send, where each request carries
+`test_response_sz = 1`) — registered through the generated codegen interface:
+
+```julia
+# From the gRPCServer.jl repo root
+using gRPCServer
+include("test/gen/test/test_pb.jl")   # generated messages + codegen symbols
+include("test/testservice.jl")         # build_test_server / start_test_server
+
+server = start_test_server("127.0.0.1", 8001)
+wait()
+```
+
+The gRPCClientUtils workloads target port `8001` by default. To use a
+different port, bind the server there and set `GRPC_BENCH_PORT` for the
+benchmark process.
+
+### 2. Add and run gRPCClientUtils
+
+In a checkout of gRPCClient.jl, from its project root:
+
+```julia
+using Pkg
+Pkg.add(path = "utils/gRPCClientUtils.jl")
+using gRPCClientUtils
+
+benchmark_table()
+```
+
+The package `include`s the generated `test/gen/test/test_pb.jl` by relative
+path, so it only resolves from inside a gRPCClient.jl checkout.
+
+`benchmark_table()` runs all five workloads through BenchmarkTools and prints
+a table normalized per message:
+
+| Workload | Shape |
+|---|---|
+| `workload_smol` | unary, one-element request/response |
+| `workload_32_224_224_uint8` | unary, ~1.6 MB payload (buffer preallocated so caller allocations are excluded) |
+| `workload_streaming_request` | client streaming |
+| `workload_streaming_response` | server streaming |
+| `workload_streaming_bidirectional` | bidirectional streaming |
+
+with columns for average memory (KiB/message), average allocations,
+throughput (messages/s), and average / std-dev / min / max duration (μs).
+
+Companion entry points:
+
+- `stress_workload_<name>()` — loops the workload forever; watch resident
+  memory, file descriptors, and task count for leaks.
+- `profile_memory_workload_<name>()` — runs the workload under
+  `Profile.Allocs` and opens a PProf allocation profile, for attributing an
+  allocation regression to a call site.
+
+Results are only comparable within one machine and one Julia thread count —
+record both alongside any number. Allocation counts are the more stable signal
+when comparing two commits, since throughput moves with machine noise.
+
+As a cross-implementation reference point, gRPCClient.jl's `test/go` ships the
+Go reference server the same workloads can run against
+(`cd test/go && go build -o grpc_test_server`).
+
 ## Zero-copy framing
 
 The framing layer reads request bytes directly into a single reusable buffer and
 hands the decoder a view into it, so a received message is not copied between the
 socket and ProtoBuf decoding.
 
-A throughput and allocation benchmark lives under `benchmark/`:
+See [Advanced Topics — Concurrency model](examples/advanced.md#Concurrency-model)
+for how per-stream tasks and the thread count affect handler parallelism.
+
+## Component microbenchmarks (in-repo)
+
+`benchmark/` holds standalone component-level microbenchmarks — dispatch
+lookup, ProtoBuf serialization, gzip compression, and frame creation — with a
+reference run recorded in `benchmark/BASELINE.md`. Use them to instrument
+individual layers; use gRPCClientUtils for end-to-end numbers.
 
 ```
 julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
-julia --project=benchmark --threads=auto benchmark/run.jl
+julia --project=benchmark benchmark/benchmarks.jl [category] [--save baseline.json]
 ```
 
-See [Advanced Topics — Concurrency model](examples/advanced.md#Concurrency-model)
-for how per-stream tasks and the thread count affect handler parallelism.
+where `category` is `dispatch`, `streaming`, or `serialization` (no argument
+runs all). `benchmark/run.jl` is a separate in-repo end-to-end large-protobuf
+throughput script (in-process server, driven by gRPCClient).
 
 ## HTTP/2 flow-control window and large uploads
 
@@ -1139,7 +1264,7 @@ window, since an endpoint's send throughput is governed by the peer's advertised
 window.
 
 Transport tuning that is sometimes expected but does not apply here: there is no
-TCP send/receive buffer size knob in HTTP.jl 2.0 or its Reseau transport (the
+TCP send/receive buffer size knob in HTTP.jl 2.x or its Reseau transport (the
 kernel autotunes), and `TCP_NODELAY` is already enabled by default, so small
 messages are not delayed by Nagle.
 
@@ -1320,12 +1445,13 @@ GRPCServerPureHTTP2
 GRPCServerNghttp2
 ```
 
-### Raised stream-handler contract (HTTP.jl backend)
+### Raised stream-handler contract (all built-in backends)
 
-The HTTP.jl backend requires a higher-level contract than the connection
-factory: the backend owns the serve loop and presents each gRPC call as an
-[`AbstractGRPCStream`](@ref). This contract is introduced for the HTTP.jl
-backend; the request-path integration is in progress.
+The preferred contract, higher-level than the connection factory: the backend
+owns its listener and serve loop, and presents each gRPC call as an
+[`AbstractGRPCStream`](@ref). It was introduced for the HTTP.jl backend; as of
+1.0 all three built-in backends (HTTPjl, PureHTTP2, nghttp2) serve through it,
+with the HTTP.jl request path driving dispatch via `serve_grpc`.
 
 ```@docs
 AbstractGRPCStream
@@ -1543,6 +1669,8 @@ the client stub, and the registration functions together:
 using ProtoBuf
 using gRPCServer
 import gRPCClient
+
+mkdir("generated")   # protojl requires the output directory to pre-exist
 
 protojl("greeter.proto", ".", "generated";
     always_use_modules = true,
@@ -2170,7 +2298,10 @@ end
 - Receives `BidiStream{TIn, TOut}` for bidirectional communication
 - Iterates over incoming messages with `for message in stream`
 - Sends responses with `send!(stream, response)`
-- **Must** close the stream with `close!(stream)`
+- Close the output side with `close!(stream)` when you are done sending. The
+  runtime sends the terminating trailers when the handler returns, so the call
+  also completes if you simply return; `close!` lets you end the output early
+  (while still reading input) and makes any later `send!` throw.
 - Returns `nothing` (responses sent via stream)
 - Check `is_cancelled(ctx)` to stop early if the client disconnects
 
@@ -2900,7 +3031,7 @@ The `max_concurrent_requests` keyword on `GRPCServer` (default `1024`) caps
 how many RPCs run at once. When the cap is
 reached, additional requests are shed immediately with a trailers-only
 `StatusCode.RESOURCE_EXHAUSTED` status — there is no queue and no waiting.
-Pass `nothing` or `0` for an unlimited cap (the legacy csvance behavior).
+Pass `nothing` or `0` for an unlimited cap (the pre-1.0 default).
 
 ```julia
 server = GRPCServer("127.0.0.1", 50051;
@@ -3019,6 +3150,12 @@ method = MyService_GetThing_Method((ctx, req) -> Thing(req.id))
 # raw variants: receive/return undecoded Vector{UInt8} payloads
 method = MyService_GetThing_Method((ctx, raw) -> raw; raw_request = true, raw_response = true)
 ```
+
+A raw response is the protobuf message body only — the framing layer still
+applies — so whatever bytes a raw handler returns must decode as a well-formed
+protobuf of the *response* type on the client. An echo handler like the one
+above only works when the client expects exactly those bytes (for example a
+raw client); a typed client decoding a different message type will fail.
 
 ### Manual service registration
 
