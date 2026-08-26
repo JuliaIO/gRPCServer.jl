@@ -77,11 +77,12 @@ gate, fail-fast deadlines) exist, but several streaming-specific ones do not.
       and server-streaming intake; confirm client- and bidi-streaming have an
       equivalent cap on buffered-but-unconsumed request messages when the
       handler is slower than the peer
-- [ ] **Per-connection stream limits.** HTTP.jl allows 100 concurrent streams
-      per connection and exposes no knob. `max_concurrent_requests` bounds the
-      total, but a single connection can still hold 100 slots. Either expose
-      `SETTINGS_MAX_CONCURRENT_STREAMS` upstream or add a per-peer admission
-      cap here
+- [ ] **Per-connection stream limits.** `max_concurrent_streams` (default 100)
+      is advertised and enforced per connection by HTTP.jl 2.5+, and
+      `max_concurrent_requests` bounds the total. Neither bounds one peer
+      across many connections; add a test that the per-connection limit is
+      actually enforced on the wire, and decide whether a per-peer admission
+      cap is worth adding
 - [ ] **Drop the Julia 1.12 gates on streaming tests.** `test/test_lifecycle.jl`
       and `test/test_load.jl` still guard streaming testsets behind
       `VERSION >= v"1.12"`. That gate existed for libcurl bugs in gRPCClient

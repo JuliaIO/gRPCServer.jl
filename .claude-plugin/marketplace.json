@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Agent skills for gRPCServer.jl, the Julia gRPC server.",
-    "version": "1.0.0"
+    "version": "0.1.0"
   },
   "plugins": [
     {
       "name": "grpcserver-jl",
       "source": "./",
       "description": "Skills for building gRPC servers in Julia with gRPCServer.jl's codegen interface, and for developing the package itself.",
-      "version": "1.0.0",
+      "version": "0.1.0",
       "category": "development",
       "keywords": [
         "julia",
