@@ -1,313 +1,214 @@
 # Roadmap
 
-This document outlines planned improvements and missing features for gRPCServer.jl based on the project constitution requirements.
-
-## Open Questions
-
-### Streaming interop coverage on the LTS
-
-**Status**: Blocked upstream, waiting on a release
-
-Our interop suite gates every streaming test behind `VERSION >= v"1.12"`, in
-`test/integration/test_grpcclient.jl` and
-`test/integration/grpcclient/client_stubs.jl`. The consequence is easy to
-overlook and worth stating plainly: **on the Julia 1.10 job, the server-streaming,
-client-streaming and bidirectional paths are exercised against no real client at
-all.** Only unary, error propagation, compression and the sustained-call
-regression run there.
-
-The gate is not ours by choice. gRPCClient 1.0.4 compiles `Streaming.jl` out
-below 1.12 (`@static if VERSION >= v"1.12"`, warning citing
-[gRPCClient#68](https://github.com/JuliaIO/gRPCClient.jl/issues/68)).
-
-[gRPCClient#129](https://github.com/JuliaIO/gRPCClient.jl/pull/129) traces that
-to **two libcurl bugs rather than a Julia one**: `select_bits_paused` ORs the two
-directions in libcurl 8.4.0–8.5.0, so a paused upload also stops the download —
-which is what Julia 1.10 bundles; and 8.6.0 clobbers a transfer's pending read
-interest, which is what hits 1.11. Demonstrated by swapping only libcurl under an
-unchanged Julia 1.10: the suite goes from 5m12s with errors on 8.4.0 to passing
-in 12s on 8.15.0. Server streaming is unaffected either way, since it never
-pauses the upload.
-
-**Nothing here is a defect in this package.** The two client-visible faults we
-found and fixed were ours and were proven server-side — the undrained request
-body causing spurious `RST_STREAM(CANCEL)`, and the >64 KB truncation from
-`Base.read` returning short.
-
-**When gRPCClient 1.1.0 is released** (General currently has 1.0.4; 1.1.0-rc1
-exists but a prerelease is not selected by our `gRPCClient = "1"` bound):
-
-- [ ] Drop both `@static if VERSION >= v"1.12"` guards
-- [ ] Raise the `gRPCClient` compat bound to the release that carries the fix
-- [ ] Confirm the streaming interop tests pass on the 1.10 job
-
-**Worth re-measuring at the same time**, without over-reading it: `remote_harness.jl`
-runs the test server out-of-process because a colocated client measured 0/24.
-Those failures were unary and the libcurl wedge is described for
-request-streaming, so the two are probably unrelated — but "the caller blocks
-until its deadline" is exactly the symptom our 120s `_warmup` was built around.
-If it turns out to have been this, the harness can be simplified.
-
-### Large request bodies on `PureHTTP2Backend`
-
-**Status**: Open — upstream, tracked in PureHTTP2.jl.
-
-A unary request whose body exceeds the HTTP/2 initial flow-control window
-(65535 bytes) never reaches the handler on `PureHTTP2Backend`: the stream is
-reset. `HTTPjlBackend`, the default, is unaffected — its own version of this
-limit was fixed in 0.2.0. `PureHTTP2Backend` is the opt-in backend, selected
-explicitly via `http2_backend=PureHTTP2Backend()`.
-
-The cause is in PureHTTP2.jl's connection layer, not here. See its ROADMAP for
-the seven hypotheses measured and eliminated. Nothing to do in this repository
-beyond widening the `PureHTTP2` compat bound once a fixed version is released.
-
-### A third backend via Nghttp2Wrapper.jl
-
-**Status**: ✅ Complete — shipped as a weak-dep package extension.
-
-`Nghttp2Backend` is implemented as a package extension
-(`[weakdeps]` + `[extensions]` in `Project.toml`; `ext/gRPCServerNghttp2Ext.jl`),
-CI-tested via the dedicated `nghttp2` job (`.github/workflows/CI.yml`), and
-serves unary and client-streaming calls. Nghttp2Wrapper's fully-buffered
-handler cannot time server- or bidirectional streaming, so those are refused
-with an explicit `UNIMPLEMENTED` reply rather than served with wrong timing.
-
-The backend type is declared in the main package with a capability guard that
-fails fast when the extension is not loaded (`_assert_nghttp2_capable`),
-mirroring `HTTPjlBackend`'s `_assert_httpjl_capable`.
-
-**Historical note**: the original prerequisite assessment (2026-07-30) judged
-this "premature — two gaps upstream" (`Nghttp2Wrapper` had no trailer support
-and a fully-buffered handler model). The shipped design resolves the trailer gap
-by accumulating trailers and delivering them with the final `ServerResponse`;
-the buffered-handler timing limitation remains and is documented on the HTTP/2
-Backends page.
-
-### Residual: `wait_for_message_or_end` discards response frames
-
-**Status**: Open — small, isolated.
-
-`wait_for_message_or_end` calls `process_frame` and drops the frames it
-returns, where the main connection loop writes them back. That is wrong on its
-own terms — those frames include flow-control updates. Measured *not* to be the
-cause of the large-request failure above, which is why it was never committed.
-
-## High Priority
-
-### Server Streaming RPC Support with grpcurl
-
-**Status**: Complete
-
-Server streaming RPC methods now work correctly via grpcurl.
-
-**Completed**:
-- [x] Implement server streaming support in HTTP/2 response handling
-- [x] Test with 02_hello_stream SayHelloStream example
-- [x] Update examples/02_hello_stream/README.md with streaming grpcurl commands
-
-### gRPCClient.jl Integration Tests
-
-**Status**: Complete
-
-Integration tests against [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) validate client-server interoperability within the Julia gRPC ecosystem.
-
-**Completed**:
-- [x] Add gRPCClient.jl as a test dependency
-- [x] Create `test/integration/test_grpcclient.jl`
-- [x] Test all RPC patterns (unary, server streaming, client streaming, bidirectional)
-- [x] Test error handling and status code propagation
-- [x] Test compression negotiation
-
-**Notes**:
-- Streaming tests (server, client, bidi) are gated on Julia >= 1.12 — not because
-  of Julia, but because of libcurl; see *Streaming interop coverage on the LTS*
-  under Open Questions
-- Unary and error tests run on all Julia versions (1.10+)
-- Fixed HTTP/2 ENABLE_PUSH compliance (RFC 9113) discovered during testing
-- Metadata/header passing tests deferred to a follow-up
-
-### Full mTLS Client Verification
-
-**Status**: ✅ Complete (via Reseau.jl)
-
-Delivered in feature 018-reseau-tls-alpn by switching the TLS backend from OpenSSL.jl to [Reseau.jl](https://github.com/JuliaServices/Reseau.jl). The OpenSSL.jl upstream work originally planned (contributing `SSL_CTX_set_verify` bindings) is no longer needed — Reseau.jl exposes the required verification primitives via its `ClientAuthMode` path.
-
-**Completed**:
-- [x] Real server-side ALPN selection during the TLS handshake (`SSL_CTX_set_alpn_select_cb`), with the negotiated protocol read back via `SSL_get0_alpn_selected` instead of inferred
-- [x] mTLS client certificate verification actually enforced when `require_client_cert = true`, via Reseau's `ClientAuthMode`
-- [x] Atomic `reload_tls!` that swaps the active TLS configuration without rebinding the listening socket or dropping in-flight handshakes
-- [x] Handshake failures classified per `TLSHandshakeFailureKind` (CONFIG_ERROR, ALPN_MISMATCH, PEER_CERT_REJECTED, HANDSHAKE_IO_ERROR) with distinguishable log lines
-- [x] New `docs/src/tls.md` operator walkthrough
-- [x] New `test/integration/test_tls_interop.jl` exercising the listener against Reseau.TLS, `openssl s_client`, and `grpcurl`
-
-**References**:
-- [Reseau.jl](https://github.com/JuliaServices/Reseau.jl)
-- [gRPC Authentication Guide](https://grpc.io/docs/guides/auth/)
-
-### Documentation Build Strictness
-
-**Status**: ✅ Complete
-
-The documentation build now runs in strict mode with no `warnonly` exceptions.
-
-**Completed**:
-- [x] Verified all exported symbols have docstrings (66 exports, all documented)
-- [x] Verified no broken cross-references
-- [x] Removed `warnonly` from `docs/make.jl`
-- [x] Updated `devbranch` to `develop` for Git flow compatibility
-
-## Medium Priority
-
-### Externalize HTTP/2 Module
-
-**Status**: ✅ Complete — Step 1 (feature 019-http2-backend-abstraction) and Step 2 both done
-
-The in-tree `src/http2/` module duplicated code that had been extracted into [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl). Feature 019 removed that duplication and shipped a lightweight backend abstraction so future alternatives like [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) or [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) ([JuliaWeb/HTTP.jl#1248](https://github.com/JuliaWeb/HTTP.jl/pull/1248)) can plug in without modifying gRPCServer core.
-
-**Completed (Step 1)**:
-- [x] Added PureHTTP2.jl as a runtime dependency (URL-based until registration)
-- [x] Defined `AbstractHTTP2Backend` / `PureHTTP2Backend` / `create_connection` in `src/http2_backend.jl` — connection-factory pattern, zero per-request overhead
-- [x] Added `http2_backend` keyword/field on `GRPCServer`; `handle_connection` dispatches through it
-- [x] Deleted `src/http2/` (~3,100 lines: frames.jl, hpack.jl, stream.jl, flow_control.jl, connection.jl)
-- [x] Full test suite passes (9336 tests); no benchmark regressions (see `benchmark/BASELINE.md`)
-- [x] New `docs/src/http2-backends.md` documenting the backend interface
-
-**Step 2 (done)**:
-- [x] Add package extensions once a second backend was validated end-to-end:
-  `HTTPjlBackend` (the default, in-tree via the hard `HTTP.jl` dep) and
-  `Nghttp2Backend` (`ext/gRPCServerNghttp2Ext.jl`) both implement the raised
-  `AbstractGRPCStream`/`serve_grpc` contract
-- [x] Three backends ship: `HTTPjlBackend` (default), `PureHTTP2Backend`,
-  `Nghttp2Backend`
-
-**Tradeoffs for Step 2:**
-- Nghttp2Wrapper: most battle-tested protocol correctness (libnghttp2 is the reference C impl), but adds a binary dependency.
-- HTTP.jl #1248: keeps the stack pure-Julia and aligned with JuliaWeb, but blocked on upstream merge.
-- HTTP.jl: the default backend — pure-Julia, aligned with JuliaWeb, and already shipping as `HTTPjlBackend`. PureHTTP2: opt-in backend.
-
-**References**:
-- [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (extracted from this module)
-- [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl)
-- [JuliaWeb/HTTP.jl#1248 — HTTP/2 support](https://github.com/JuliaWeb/HTTP.jl/pull/1248)
-
-### Code Coverage Improvements
-
-**Status**: Ongoing
-
-The constitution recommends >80% code coverage for non-generated code.
-
-**Tasks**:
-- [ ] Review current coverage reports
-- [ ] Add tests for uncovered error paths
-- [ ] Add tests for edge cases in HTTP/2 frame handling
-
-### Performance Benchmarks
-
-**Status**: ✅ Complete
-
-The constitution requires benchmark comparisons for performance-critical changes.
-
-**Completed**:
-- [x] Create benchmark suite using BenchmarkTools.jl
-- [x] Benchmark request dispatch latency
-- [x] Benchmark streaming throughput
-- [x] Benchmark message serialization overhead
-- [x] Comparison functionality with color-coded output
-- [x] Document baseline performance metrics
-
-**Usage**:
-```bash
-cd benchmark
-julia --project -e 'using Pkg; Pkg.instantiate()'
-julia --project benchmarks.jl
-julia --project benchmarks.jl --save baseline.json
-julia --project benchmarks.jl --compare baseline.json
-```
-
-## Low Priority
-
-### Additional Contract Tests
-
-**Status**: Partially Complete (grpcurl done)
-
-Expand contract testing beyond grpcurl to other reference gRPC implementations.
-
-**Tasks**:
-- [ ] Test against official Go gRPC client
-- [ ] Test against official Python gRPC client
-- [ ] Document interoperability matrix
-
-### TTFX (Time-to-First-Execution) Optimization
-
-**Status**: Partially Complete
-
-The constitution recommends TTFX for basic server startup under 5 seconds.
-
-**Tasks**:
-- [ ] Measure current TTFX
-- [ ] Optimize precompilation workload if needed
-- [ ] Document TTFX metrics
-
-## To Be Considered
-
-### Publishing Internal Project Artifacts
-
-**Status**: Under Consideration
-
-Consider making internal development artifacts publicly available for transparency and community contribution.
-
-**Options**:
-- [ ] Publish project constitution (`.specify/memory/constitution.md`)
-- [ ] Publish specs/ directory with design documents
-- [ ] Include `.proto` files in repository (currently in `specs/*/contracts/`)
-- [ ] Alternative: Download `.proto` files from upstream [grpc/grpc](https://github.com/grpc/grpc) repository at build time
-
-**References**:
-- [gRPC Health Checking Protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)
-- [gRPC Server Reflection](https://github.com/grpc/grpc/blob/master/doc/server-reflection.md)
-
-### Security Audit
-
-**Status**: Under Consideration
-
-A security audit would help identify vulnerabilities in the HTTP/2 and TLS implementations.
-
-**Options**:
-- [ ] Apply for free security audit programs (e.g., OSTIF, Linux Foundation)
-- [ ] Community security review
-- [ ] Document threat model and security considerations
-- [x] Add security policy (SECURITY.md)
-
-**Areas of concern**:
-- HTTP/2 frame parsing and validation
-- HPACK decompression (potential for compression bombs)
-- TLS configuration defaults
-- Input validation on gRPC messages
-
-## Completed
-
-- [x] Core gRPC server implementation
-- [x] All four RPC patterns (unary, server/client/bidi streaming)
-- [x] HTTP/2 protocol support with HPACK compression (via pluggable backends: [HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (default), [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) (opt-in), [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl) (opt-in))
-- [x] TLS/mTLS support (via [Reseau.jl](https://github.com/JuliaServices/Reseau.jl), with real server-side ALPN selection and enforced client certificate verification)
-- [x] Atomic TLS certificate reload (`reload_tls!`)
-- [x] Health checking service
-- [x] Reflection service with file descriptors
-- [x] Interceptor framework
-- [x] Compression support (gzip, deflate)
-- [x] Aqua.jl quality tests
-- [x] Unit tests
-- [x] Integration tests
-- [x] TLS interoperability tests (Reseau.TLS, `openssl s_client`, `grpcurl`)
-- [x] Contract tests (grpcurl)
-- [x] Documentation with Documenter.jl (strict mode, no `warnonly`)
-- [x] CI/CD pipeline
-- [x] CODE_OF_CONDUCT.md
-- [x] CONTRIBUTING.md
-- [x] CONTRIBUTORS.md
-- [x] Performance benchmarks (BenchmarkTools.jl)
+gRPCServer.jl 1.0 ships with `HTTPjlBackend` (HTTP.jl 2.x over Reseau) as the
+one production backend. Everything on this roadmap is organized around making
+that backend harder to knock over, more predictable under streaming load, and
+faster. The two other backends are experimental and are tracked at the end.
+
+Items are ordered by priority within each section. Checked items are done and
+kept only where the context matters for what follows.
+
+## 1. Hardening the HTTP.jl backend
+
+### 1.1 Exception safety on the request path
+
+**Status**: In progress. One instance fixed; the class is not yet closed.
+
+An adversarial security audit (GLM 5.3, August 2026) found that a single
+crafted message could bring the server down through the exception path rather
+than through resource exhaustion: a request whose failure raised anything other
+than a `GRPCError` escaped the `GRPCError`-only catch in `dispatch_grpc_call`
+and propagated into the transport. The concrete instance found was a `-bin`
+metadata header carrying invalid base64. `Base64.base64decode` threw
+`ArgumentError`, which was never mapped to a gRPC status.
+
+That instance was fixed on 2026-08-14 (`_grpc_context_from_metadata` now fails
+the call with a trailers-only `INVALID_ARGUMENT`), but the shape of the bug is
+general: any non-`GRPCError` exception raised between stream accept and trailer
+send is a potential single-message denial of service. The remaining work is to
+make that impossible by construction rather than by finding each site.
+
+- [x] Map malformed `-bin` metadata to `INVALID_ARGUMENT` instead of a bare 500
+- [x] Move `parse_grpc_timeout` inside the dispatch `try` so a malformed
+      `grpc-timeout` maps to `INVALID_ARGUMENT`
+- [ ] Add a terminal catch in `dispatch_grpc_call` that maps every remaining
+      exception to a trailers-only `INTERNAL` status, logs it with a backtrace,
+      and never rethrows into the transport. Detail in the wire message stays
+      gated on `debug_mode`
+- [ ] Audit every site that decodes client-controlled bytes before the handler
+      runs (path, content-type, metadata, `grpc-encoding`, length prefix,
+      protobuf decode) and give each a unit test asserting the gRPC status it
+      produces on hostile input
+- [ ] Prove the accept loop survives a handler-task exception: a test that
+      throws a non-`GRPCError` from inside each RPC shape and then completes a
+      second call on the same connection and on a new connection
+- [ ] Property-based or fuzz test over the request head (headers, metadata
+      values, timeout strings) asserting the server always answers with a gRPC
+      status and stays up
+- [ ] Record the audit and its outcome in `SECURITY.md`, which still states
+      that no audit has taken place
+
+### 1.2 Streaming RPC hardening
+
+**Status**: Open. Unary is well covered; streaming has the most exposure.
+
+Streaming calls hold a task, a stream, and buffers open for as long as the
+peer wants. The controls that bound unary calls (message caps, the admission
+gate, fail-fast deadlines) exist, but several streaming-specific ones do not.
+
+- [ ] **Mid-execution deadline enforcement.** `grpc-timeout` is enforced only
+      before dispatch and after the handler returns. A streaming handler that
+      ignores `remaining_time(ctx)` runs until the peer goes away. Add a
+      watchdog that marks the context cancelled, unblocks a `recv`/`send`
+      parked on the stream, and sends `DEADLINE_EXCEEDED` trailers
+- [ ] **Server-side default deadline** for calls that arrive without a
+      `grpc-timeout`, configurable on `ServerConfig`, off by default
+- [ ] **Cancellation propagation.** Verify that a client `RST_STREAM` or
+      connection drop reaches `is_cancelled(ctx)` promptly for every RPC shape,
+      releases the admission slot, and does not leave the handler task blocked
+      on a send. Add tests for cancel-during-recv and cancel-during-send
+- [ ] **Slow-reader protection on the send side.** A client that opens a
+      server-streaming call and never reads exhausts its flow-control window
+      and parks the handler on `send` indefinitely. Decide whether this is
+      bounded by `write_timeout`, by a per-stream send deadline, or by a
+      queued-bytes cap, and implement the one that does not also kill
+      legitimately slow consumers
+- [ ] **Bounded client-streaming intake.** `expect_half_close!` bounds unary
+      and server-streaming intake; confirm client- and bidi-streaming have an
+      equivalent cap on buffered-but-unconsumed request messages when the
+      handler is slower than the peer
+- [ ] **Per-connection stream limits.** HTTP.jl allows 100 concurrent streams
+      per connection and exposes no knob. `max_concurrent_requests` bounds the
+      total, but a single connection can still hold 100 slots. Either expose
+      `SETTINGS_MAX_CONCURRENT_STREAMS` upstream or add a per-peer admission
+      cap here
+- [ ] **Drop the Julia 1.12 gates on streaming tests.** `test/test_lifecycle.jl`
+      and `test/test_load.jl` still guard streaming testsets behind
+      `VERSION >= v"1.12"`. That gate existed for libcurl bugs in gRPCClient
+      1.0.x. CI now resolves gRPCClient 1.1.0, so the guards can go; raise the
+      compat lower bound to `1.1` at the same time so the LTS job exercises the
+      streaming paths against a real client
+- [ ] **Stabilize the bidirectional load test on Windows.** The 1.12 Windows
+      job has reset a stream mid-exchange; the upstream deadline and
+      diagnostics were ported, but the root cause is not confirmed
+
+### 1.3 Transport and TLS gaps
+
+**Status**: Open, mostly upstream.
+
+- [ ] `reload_tls!` is not supported on `HTTPjlBackend` because HTTP.jl owns
+      the listener and TLS context. Certificate rotation currently requires a
+      restart or the experimental PureHTTP2 backend. Either land a context-swap
+      hook upstream or document a blue/green restart pattern as the answer
+- [x] mTLS over TLS 1.2 was broken upstream in Reseau 1.1 through 1.4.0 and is
+      fixed in 1.4.1; the compat bound now requires it
+- [ ] Confirm HPACK dynamic-table and CONTINUATION limits are enforced by
+      HTTP.jl at values we are comfortable with. `max_header_bytes` is already
+      a `ServerConfig` knob; document a recommended value alongside the message
+      caps in `SECURITY.md`
+
+## 2. Performance of the HTTP.jl backend
+
+**Status**: Open. Receive-path copies were removed in the 1.0 cycle; the
+remaining cost is dominated by the transport and by the send path.
+
+- [ ] **Refresh the baseline.** `benchmark/BASELINE.md` dates from January 2026
+      and predates the HTTP.jl backend entirely. Re-record it on the current
+      stack and record the Julia version, thread count, and HTTP.jl version
+      alongside every number
+- [ ] **End-to-end numbers against the Go reference server.** The
+      gRPCClientUtils workloads (unary small, unary 1.6 MB, and all three
+      streaming shapes) can run against both this server and gRPCClient.jl's
+      `test/go` server. Publish the comparison in `docs/src/performance.md` so
+      regressions and gaps are visible
+- [ ] **Send-path allocations.** The receive path hands the decoder a view into
+      one reusable buffer; the send path still allocates per message in
+      `grpc_encode_message_iobuffer` plus HTTP.jl's DATA framing. Profile a
+      server-streaming workload with `Profile.Allocs` and remove what is ours
+- [ ] **Small-message streaming throughput.** Each streamed message is one
+      `send` and one DATA frame. Measure whether coalescing messages that are
+      ready at the same time into one write helps on the reference workloads,
+      and stop if it does not
+- [ ] **Upstream: `_server_readbytes!` allocation.** HTTP.jl allocates a fresh
+      temporary per read and copies into the caller's buffer, so every receive
+      pays one allocation we cannot remove here. Propose a fix upstream
+- [ ] **Upstream: flow-control defaults.** `h2_initial_window_size` and
+      `h2_connection_window_size` are honored on this backend, which addresses
+      large uploads over high-latency links. `SETTINGS_MAX_FRAME_SIZE` is still
+      fixed at 16 KiB upstream; measure whether raising it matters before
+      asking for a knob
+- [ ] **TTFX.** Measure time to first served request on a cold session and
+      extend the precompile workload if it is over five seconds
+
+## 3. Release and registration
+
+**Status**: In progress. The repository moved to the JuliaIO organization on
+2026-08-26.
+
+- [x] Transfer the repository to `JuliaIO/gRPCServer.jl` and re-point badges,
+      Documenter, and plugin metadata
+- [ ] Verify the transferred secrets (`DOCUMENTER_KEY`, `CODECOV_TOKEN`) and
+      re-claim the Codecov slug so coverage uploads and the badge resolve
+- [ ] Install the Registrator app for the organization and register 1.0.0 in
+      General
+- [ ] Update `SECURITY.md` supported-versions table once registered
+- [ ] Re-issue the Zenodo DOI against the final home
+
+## 4. Test coverage and interoperability
+
+**Status**: Ongoing.
+
+- [ ] Review coverage on `src/server.jl` error paths specifically; the
+      exception-safety work in 1.1 should drive this above the 80 percent
+      target for non-generated code
+- [ ] Contract tests against the official Go and Python gRPC clients, and a
+      documented interoperability matrix. grpcurl coverage exists today
+
+## 5. Experimental backends
+
+These backends are opt-in package extensions. They are kept building and
+tested in their own CI jobs, but they are not the focus of this roadmap and
+carry known gaps that are tracked in their upstream repositories.
+
+### PureHTTP2Backend (`gRPCServerPureHTTP2Ext`)
+
+Pure-Julia HTTP/2 via [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl).
+Supports all four RPC shapes and is the only backend with live `reload_tls!`.
+
+- A unary request whose body exceeds the 65535-byte initial flow-control
+  window is reset before it reaches the handler. Upstream in PureHTTP2.jl;
+  nothing to do here beyond widening the compat bound when it is fixed
+- `wait_for_message_or_end` drops the frames `process_frame` returns instead of
+  writing them back, which includes flow-control updates. Measured not to be
+  the cause of the large-body failure; still wrong on its own terms
+- Its test suite runs only under `GRPCSERVER_TEST_PUREHTTP2=true` so that it
+  cannot hang the default suite
+
+### Nghttp2Backend (`gRPCServerNghttp2Ext`)
+
+libnghttp2 via [Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl).
+Requires Julia 1.12 (the LTS ships an older `nghttp2_jll`).
+
+- Serves unary and client-streaming only. Server-streaming and bidirectional
+  calls are refused with `UNIMPLEMENTED` because the wrapper's handler is fully
+  buffered. Unblocked by Nghttp2Wrapper's incremental handler milestone
+- Forced `stop!` still waits for a running handler on Nghttp2Wrapper 0.3.0
+  (GOAWAY is submitted under a lock the handler holds). Fixed upstream but
+  unreleased; marked `@test_broken` so CI reports the moment the bound can be
+  raised
+
+## Shipped in 1.0
+
+Core server with all four RPC shapes; pluggable HTTP/2 backends with
+`HTTPjlBackend` as the default; TLS and mTLS via Reseau with real ALPN
+selection and enforced client verification; health and reflection services;
+interceptors; gzip and deflate compression; asymmetric receive and send
+message caps; an admission gate (`max_concurrent_requests`, default 1024) and
+stream-safe timeout defaults; strict `grpc-timeout` parsing with fail-fast
+deadline enforcement; bounded half-close handling; zero-copy receive framing;
+gRPCClient.jl, grpcurl, and TLS interop suites; strict Documenter build;
+component microbenchmarks.
 
 ---
 
-*Last updated: 2026-08-17*
+*Last updated: 2026-08-26*
