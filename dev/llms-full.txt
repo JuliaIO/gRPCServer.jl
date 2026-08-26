@@ -1,0 +1,3074 @@
+# gRPCServer.jl — full documentation
+
+> A production-ready gRPC server in Julia: four RPC patterns, three HTTP/2 backends, one API.
+
+This file concatenates every page of the gRPCServer.jl documentation. Online version: https://juliaio.github.io/gRPCServer.jl/dev/
+
+---
+
+<!-- Page: Home — https://juliaio.github.io/gRPCServer.jl/dev/ -->
+
+## What it is
+
+gRPCServer.jl is a native Julia gRPC server: the default HTTP.jl backend serves
+unary and streaming RPCs out of the box, with TLS/mTLS, interceptors, health,
+and reflection built in. One `protojl` run generates message types, client
+stubs, and server registration functions. PureHTTP2 and nghttp2 are optional
+pluggable backends.
+
+## Getting started
+
+- [Quick Start](quickstart.md) — serve your first RPC in a few lines
+- [Code Generation](code_generation.md) — `protojl` end to end
+- [HTTP/2 Backends](http2-backends.md) — default HTTP.jl, opt-in PureHTTP2/nghttp2
+
+## Related packages
+
+[gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) is the sibling client
+package; load both and a single `protojl` run emits client stubs alongside the
+server registration functions.
+
+## Installation
+
+```julia
+using Pkg
+Pkg.add("gRPCServer")
+```
+
+## License
+
+gRPCServer.jl is licensed under the MIT License — see [LICENSE.md](https://github.com/JuliaIO/gRPCServer.jl/blob/main/LICENSE.md).
+
+---
+
+<!-- Page: Quick Start — https://juliaio.github.io/gRPCServer.jl/dev/quickstart/ -->
+
+# Quick Start
+
+This guide demonstrates how to create a gRPC server in Julia using gRPCServer.jl.
+
+## Prerequisites
+
+- Julia 1.10 or later
+- ProtoBuf.jl for message type generation
+- [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) (optional, for the generated client stubs)
+
+## Installation
+
+```julia
+using Pkg
+Pkg.add("gRPCServer")
+```
+
+## Step 1: Define Your Service
+
+This example is based on `examples/01_hello_world` (basic unary) and `examples/02_hello_stream` (streaming).
+
+Create a `.proto` file defining your service:
+
+```protobuf
+// greeter.proto
+syntax = "proto3";
+
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply);
+  rpc SayHelloStream (HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+```
+
+## Step 2: Generate Julia Types
+
+Use ProtoBuf.jl to generate Julia types directly from the `.proto` file (no external tools needed). Load **both** gRPCServer and gRPCClient first — one `protojl` run then emits the message types, the gRPCClient.jl client stubs, and the gRPCServer.jl registration functions together:
+
+```julia
+using ProtoBuf
+using gRPCServer
+import gRPCClient
+
+# Generate Julia structs from proto file
+# Arguments: proto_file, search_path, output_directory
+protojl("greeter.proto", ".", "generated";
+    always_use_modules = true,
+    add_kwarg_constructors = true
+)
+```
+
+This creates the following file structure:
+
+```
+generated/
+└── helloworld/
+    ├── helloworld.jl      # Module wrapper
+    └── greeter_pb.jl      # Messages + client stubs + registration functions
+```
+
+Within `greeter_pb.jl`, the `# gRPCClient.jl BEGIN`/`END` block defines the
+`Greeter_*_Client` client constructors, and the `# gRPCServer.jl BEGIN`/`END`
+block defines the `Greeter_*_Method` descriptor builders and the
+`register_Greeter_SayHello!`/`register_Greeter_SayHelloStream!`/`register_Greeter!`
+registration functions.
+
+Regenerate whenever you change the `.proto` file.
+
+## Step 3: Implement Handlers
+
+```julia
+using gRPCServer
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+
+# Unary RPC handler
+function say_hello(ctx::ServerContext, request::HelloRequest)::HelloReply
+    name = isempty(request.name) ? "World" : request.name
+    return HelloReply(message = "Hello, $(name)!")
+end
+
+# Server streaming RPC handler
+function say_hello_stream(
+    ctx::ServerContext,
+    request::HelloRequest,
+    stream::ServerStream{HelloReply}
+)::Nothing
+    name = isempty(request.name) ? "World" : request.name
+    for i in 1:5
+        if is_cancelled(ctx)
+            @warn "Stream cancelled by client"
+            return nothing
+        end
+        send!(stream, HelloReply(message = "Hello $(i), $(name)!"))
+        sleep(0.5)  # Simulate work
+    end
+    return nothing
+end
+```
+
+Every handler receives the request context first. The four handler contracts are:
+
+| RPC type | Handler signature |
+|----------|-------------------|
+| Unary | `(ctx::ServerContext, req::TReq) -> TResp` |
+| Server streaming | `(ctx, req::TReq, stream::ServerStream{TResp}) -> Nothing` — send with `send!(stream, msg)` |
+| Client streaming | `(ctx, stream::ClientStream{TReq}) -> TResp` — iterate with `for req in stream` |
+| Bidirectional | `(ctx, stream::BidiStream{TReq, TResp}) -> Nothing` — iterate and `send!(stream, msg)` |
+
+## Step 4: Register Handlers
+
+The generated registration functions replace any hand-written service
+descriptor. Use the per-RPC do-block form:
+
+```julia
+register_Greeter_SayHello!(server) do ctx, req
+    HelloReply(message = "Hello, $(req.name)!")
+end
+
+register_Greeter_SayHelloStream!(server) do ctx, req, stream
+    for i in 1:5
+        send!(stream, HelloReply(message = "Hello $(i), $(req.name)!"))
+    end
+    return nothing
+end
+```
+
+or with named functions:
+
+```julia
+register_Greeter_SayHello!(server, say_hello)
+register_Greeter_SayHelloStream!(server, say_hello_stream)
+```
+
+or register several RPCs of a service at once with the aggregate form:
+
+```julia
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+```
+
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple. Handler signatures are validated at registration time — a mismatched
+shape throws an `ArgumentError`.
+
+## Step 5: Create and Run Server
+
+```julia
+# Create server
+host = "127.0.0.1"
+port = 50051
+server = GRPCServer(host, port)
+
+# Register service
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+
+# Start server (blocking)
+@info "Starting gRPC server" host=host port=port
+run(server)
+```
+
+When the server starts successfully, you'll see:
+
+```
+[ Info: gRPC server starting
+│   host = "127.0.0.1"
+│   port = 50051
+```
+
+The server is now listening for connections. Keep this terminal running.
+
+## Complete Example
+
+Save as `server.jl`:
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+
+# Handlers
+function say_hello(ctx::ServerContext, request::HelloRequest)::HelloReply
+    @info "Received request" name=request.name request_id=ctx.request_id
+    HelloReply(message = "Hello, $(request.name)!")
+end
+
+function say_hello_stream(
+    ctx::ServerContext,
+    request::HelloRequest,
+    stream::ServerStream{HelloReply}
+)::Nothing
+    for i in 1:5
+        if is_cancelled(ctx)
+            @warn "Stream cancelled by client"
+            return nothing
+        end
+        send!(stream, HelloReply(message = "Hello $(i), $(request.name)!"))
+        sleep(0.5)
+    end
+    return nothing
+end
+
+# Run server
+function main()
+    host = "127.0.0.1"  # 0.0.0.0 (risky)
+    port = 50051
+    server = GRPCServer(host, port;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+
+    @info "gRPC server starting" host=host port=port
+    run(server)
+end
+
+main()
+```
+
+Run with:
+```bash
+julia server.jl
+```
+
+## What Happens Under the Hood
+
+The generated `register_Greeter_*!` functions build a
+[`MethodDescriptor`](@ref) for each RPC and call
+[`register_method!`](@ref) on the server's dispatcher. They are thin wrappers
+over the runtime registration interface — see [Code Generation](@ref) for the
+emission details and the [API Reference](api.md) for the underlying types. The
+`raw_request`/`raw_response` keyword flags opt a handler into receiving and/or
+returning undecoded `Vector{UInt8}` payloads instead of typed messages.
+
+## Testing with grpcurl
+
+> **Note**: [grpcurl](https://github.com/fullstorydev/grpcurl) is a command-line tool for interacting with gRPC servers. See the [installation instructions](https://github.com/fullstorydev/grpcurl#installation) for your platform.
+
+```bash
+# List services (requires reflection enabled)
+grpcurl -plaintext localhost:50051 list
+```
+
+Expected output:
+
+```
+grpc.health.v1.Health
+grpc.reflection.v1alpha.ServerReflection
+helloworld.Greeter
+```
+
+```bash
+# Call unary RPC
+grpcurl -plaintext -d '{"name": "Julia"}' \
+  localhost:50051 helloworld.Greeter/SayHello
+```
+
+Expected output:
+
+```json
+{
+  "message": "Hello, Julia!"
+}
+```
+
+```bash
+# Call streaming RPC
+grpcurl -plaintext -d '{"name": "Julia"}' \
+  localhost:50051 helloworld.Greeter/SayHelloStream
+```
+
+Expected output (5 messages streamed):
+
+```json
+{
+  "message": "Hello 1, Julia!"
+}
+{
+  "message": "Hello 2, Julia!"
+}
+{
+  "message": "Hello 3, Julia!"
+}
+{
+  "message": "Hello 4, Julia!"
+}
+{
+  "message": "Hello 5, Julia!"
+}
+```
+
+## Testing with gRPCClient.jl
+
+The same `protojl` run also generated client stubs. Call `gRPCClient.grpc_init()`
+once, then use the generated `Greeter_SayHello_Client` constructor with
+`grpc_sync_request` for unary calls:
+
+```julia
+using gRPCServer
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+import gRPCClient
+
+gRPCClient.grpc_init()
+client = helloworld.Greeter_SayHello_Client("127.0.0.1", 50051)
+
+# Unary RPC
+resp = gRPCClient.grpc_sync_request(client, helloworld.HelloRequest(name = "Julia"))
+println(resp.message)  # "Hello, Julia!"
+```
+
+For server streaming, pass a response `Channel` and iterate it:
+
+```julia
+response_c = Channel{helloworld.HelloReply}(16)
+req = gRPCClient.grpc_async_request(client, helloworld.HelloRequest(name = "Julia"), response_c)
+for reply in response_c
+    println(reply.message)
+end
+gRPCClient.grpc_async_await(req)
+```
+
+For client streaming, send requests through a `Channel` and await the single
+response; for bidirectional streaming, pass request and response channels (see
+[gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) for the full client API).
+
+## Adding Interceptors
+
+```julia
+# Add built-in logging interceptor
+add_interceptor!(server, LoggingInterceptor())
+
+# Add metrics interceptor with callbacks
+add_interceptor!(server, MetricsInterceptor(
+    on_request = (method, size) -> increment_counter("requests"),
+    on_response = (method, status, ms, size) -> record_latency(ms)
+))
+```
+
+Interceptors work the same way whether the service was registered through the
+generated `register_*!` functions or the runtime interface.
+
+## Enabling TLS
+
+```julia
+host = "127.0.0.1"
+port = 50051
+tls_config = TLSConfig(
+    cert_chain = "/path/to/server.crt",
+    private_key = "/path/to/server.key",
+    client_ca = nothing,          # Set for mTLS
+    require_client_cert = false,
+    min_version = :TLSv1_2,
+    alpn_protocols = ["h2"],      # Default; shown for clarity
+)
+
+server = GRPCServer(host, port;
+    tls = tls_config
+)
+```
+
+See the TLS documentation page for a full walkthrough including ALPN behavior,
+mTLS, and certificate reload.
+
+## Error Handling
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    if !is_valid(request)
+        throw(GRPCError(
+            StatusCode.INVALID_ARGUMENT,
+            "Request validation failed",
+            []
+        ))
+    end
+
+    user = find_user(request.user_id)
+    if user === nothing
+        throw(GRPCError(
+            StatusCode.NOT_FOUND,
+            "User not found: $(request.user_id)",
+            []
+        ))
+    end
+
+    return MyResponse(user = user)
+end
+```
+
+## Graceful Shutdown
+
+```julia
+# In a separate task or signal handler
+function shutdown(server::GRPCServer)
+    @info "Initiating graceful shutdown..."
+    stop!(server; timeout = 30.0)  # Wait up to 30s for in-flight requests
+    @info "Server stopped"
+end
+```
+
+---
+
+<!-- Page: Code Generation — https://juliaio.github.io/gRPCServer.jl/dev/code_generation/ -->
+
+# Code Generation
+
+gRPCServer integrates with [ProtoBuf.jl](https://github.com/JuliaIO/ProtoBuf.jl)
+through an external code generation handler. Loading the package registers that
+handler from its `__init__` (via `grpc_register_service_codegen()`), so you do
+not normally call anything by hand — you just run ProtoBuf.jl's `protojl` on
+your `.proto` files.
+
+When [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) is also loaded,
+a single `protojl` run emits the message types, the gRPCClient.jl client
+stubs, and the gRPCServer.jl registration functions into the same generated
+file.
+
+## Running protojl
+
+Load both packages, then run `protojl` (re-exported by gRPCServer) from your
+project directory:
+
+```julia
+using ProtoBuf
+using gRPCServer
+import gRPCClient
+
+protojl("myservice.proto", ".", "generated";
+    always_use_modules = true,
+    add_kwarg_constructors = true
+)
+```
+
+For a `package myservice;` in the proto, this writes:
+
+```
+generated/
+└── myservice/
+    ├── myservice.jl      # module wrapper; include() + using .myservice
+    └── myservice_pb.jl   # messages + client stubs + registration functions
+```
+
+The generated file is delimited into two blocks:
+
+- `# gRPCClient.jl BEGIN` … `# gRPCClient.jl END` — the `<Service>_<Rpc>_Client`
+  client constructors (present only when gRPCClient.jl is loaded).
+- `# gRPCServer.jl BEGIN` … `# gRPCServer.jl END` — the
+  `<Service>_<Rpc>_Method` descriptor builders, the per-RPC
+  `register_<Service>_<Rpc>!` functions, and the aggregate
+  `register_<Service>!` function.
+
+Use the generated module from your server:
+
+```julia
+using gRPCServer
+include("generated/myservice/myservice.jl")
+using .myservice
+```
+
+Regenerate whenever you change the `.proto` file; the output is deterministic
+(no timestamps or machine-specific paths).
+
+## Emitted symbols
+
+For each `service` in the `.proto`, gRPCServer emits the following (exact
+signatures from the generated output):
+
+1. **Typed descriptor builder** — one per RPC:
+
+```
+<Service>_<Rpc>_Method(handler; raw_request=false, raw_response=false) -> gRPCServer.MethodDescriptor
+```
+
+2. **Per-RPC registration** — emitted in both argument orders, so the do-block
+form works:
+
+```
+register_<Service>_<Rpc>!(server::GRPCServer, handler; raw_request=false, raw_response=false) -> server
+register_<Service>_<Rpc>!(handler::Function, server::GRPCServer; kwargs...) -> server
+```
+
+3. **Per-service aggregate** — registers several RPCs at once by keyword:
+
+```
+register_<Service>!(server::GRPCServer; <Rpc>=nothing, ...) -> server
+```
+
+Every non-`nothing` keyword registers its RPC. Each keyword accepts a handler
+or a `(handler, raw_request, raw_response)` tuple (raw flags per method).
+All-nothing is a no-op. It is equivalent to calling the per-RPC
+`register_<Service>_<Rpc>!` functions individually.
+
+## Handler contracts
+
+The registration functions validate the handler signature at registration
+time; a mismatched shape throws `ArgumentError`. The four contracts (context
+first):
+
+| RPC type | Handler signature |
+|----------|-------------------|
+| Unary | `(ctx::gRPCServer.ServerContext, req::TReq) -> TResp` |
+| Server streaming | `(ctx, req::TReq, stream::gRPCServer.ServerStream{TResp}) -> Nothing` — send responses with `gRPCServer.send!(stream, msg)` |
+| Client streaming | `(ctx, stream::gRPCServer.ClientStream{TReq}) -> TResp` — iterate with `for req in stream` |
+| Bidirectional | `(ctx, stream::gRPCServer.BidiStream{TReq, TResp}) -> Nothing` — iterate and `gRPCServer.send!(stream, msg)` |
+
+## Raw request and response buffers
+
+The `raw_request` and `raw_response` flags override a side with
+`Vector{UInt8}`: the handler receives the raw, undecoded protobuf payload
+and/or returns raw response bytes instead of a typed message. The raw buffer
+is the protobuf message body only; the gRPC framing is still handled by the
+library.
+
+```julia
+# Both sides raw
+register_myservice_GetThing!(server, (ctx, raw) -> raw;
+    raw_request = true, raw_response = true)
+```
+
+## Registration-time validation
+
+A handler whose signature does not match the RPC's contract (wrong arity,
+wrong types, or a raw/typed mismatch) raises `ArgumentError` at
+`register_*!` time, before any request is served.
+
+## Under the hood
+
+Each generated `register_<Service>_<Rpc>!` builds a `MethodDescriptor` via the
+`*_Method` builder and calls `gRPCServer.register_method!` on the server's
+dispatcher. The runtime interface — `register_method!`, `MethodDescriptor`,
+`ServiceDescriptor`, `register!` — is documented in the
+[API Reference](api.md); an explicit walkthrough of the underlying layer lives
+in the [Advanced Examples](examples/advanced.md#The-runtime-interface-beneath-the-codegen).
+
+## Next steps
+
+- [Quick Start](quickstart.md) — end-to-end walkthrough
+- [Examples](examples/index.md) — five runnable example servers
+- [TLS](tls.md) — serving codegen-registered services over TLS
+- [API Reference](api.md) — the runtime interface beneath the codegen
+
+---
+
+<!-- Page: TLS — https://juliaio.github.io/gRPCServer.jl/dev/tls/ -->
+
+# TLS
+
+gRPCServer.jl supports TLS-secured gRPC with real server-side ALPN negotiation.
+The TLS path performs genuine `h2` selection during the handshake via OpenSSL's
+`SSL_CTX_set_alpn_select_cb`, reads the negotiated protocol back via
+`SSL_get0_alpn_selected`, and rejects any client that does not offer `h2`
+before any HTTP/2 bytes are exchanged.
+
+This page walks you through setting up a TLS gRPC server in about fifteen
+minutes. The server can serve any codegen-registered service (see
+[Quick Start](@ref)); TLS is configured on the `GRPCServer` itself, so
+registration is unchanged.
+
+## What you need
+
+- A server certificate and private key in PEM format. A self-signed cert is fine
+  for local development; use a real CA-issued cert in production.
+- A gRPC client that negotiates ALPN — `grpcurl`, `grpc-go`, `grpc-java`,
+  `gRPCClient.jl`, and browsers through an Envoy sidecar all qualify.
+- Optionally, a client CA certificate if you want to enable mutual TLS (mTLS).
+
+## The `TLSConfig` type
+
+The full docstring is in the [API Reference](api.md). Fields:
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `cert_chain` | `String` | *(required)* | Path to the server certificate chain (PEM). |
+| `private_key` | `String` | *(required)* | Path to the server private key (PEM). |
+| `client_ca` | `Union{String, Nothing}` | `nothing` | Client CA bundle for mTLS. Required when `require_client_cert = true`. |
+| `require_client_cert` | `Bool` | `false` | Whether to require *and verify* a client certificate. |
+| `min_version` | `Symbol` | `:TLSv1_2` | Minimum TLS version (`:TLSv1_2` or `:TLSv1_3`). |
+| `alpn_protocols` | `Vector{String}` | `["h2"]` | Ordered ALPN preference list. The server selects the first entry in this list that the client also offers. Empty is a construction-time error. |
+| `handshake_timeout_ns` | `Int64` | `0` | Optional per-handshake timeout in nanoseconds. `0` leaves it unset. |
+
+The `alpn_protocols` default of `["h2"]` is what you want for gRPC. The field
+exists mainly so tests can exercise preference-order behavior and so future
+deployments can advertise additional protocols alongside `h2` if needed.
+
+## Step 1 — Generate a self-signed certificate
+
+```bash
+mkdir -p /tmp/grpc-tls
+cd /tmp/grpc-tls
+
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout server.key -out server.crt \
+    -days 30 -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
+
+## Step 2 — Start a TLS-enabled server
+
+```julia
+using gRPCServer
+
+tls = TLSConfig(
+    cert_chain     = "/tmp/grpc-tls/server.crt",
+    private_key    = "/tmp/grpc-tls/server.key",
+    alpn_protocols = ["h2"],
+    min_version    = :TLSv1_2,
+)
+
+server = GRPCServer("127.0.0.1", 50443;
+    tls = tls,
+    enable_health_check = true,
+)
+
+start!(server)
+```
+
+You should see a startup log line with `alpn=["h2"]`. If the cert or key file
+is missing or unreadable, `start!` raises a `TLSHandshakeError` whose `kind` is
+`CONFIG_ERROR` before the server reaches the RUNNING state.
+
+## Step 3 — Issue a successful RPC
+
+```bash
+grpcurl -insecure \
+    -d '{"service": ""}' \
+    localhost:50443 \
+    grpc.health.v1.Health/Check
+```
+
+The server log line for the accepted connection shows `alpn=h2` as a value
+read back directly from the live TLS state.
+
+## Step 4 — Reject a client that does not offer `h2`
+
+```bash
+openssl s_client -connect localhost:50443 -alpn http/1.1 </dev/null
+```
+
+The server logs exactly one line of the form:
+
+```
+TLS handshake rejected  kind=ALPN_MISMATCH peer=127.0.0.1:XXXXX
+```
+
+No HTTP/2 bytes are exchanged, and the accept loop continues serving other
+clients.
+
+## Step 5 — Enable mutual TLS (optional)
+
+```julia
+tls_mtls = TLSConfig(
+    cert_chain          = "/tmp/grpc-tls/server.crt",
+    private_key         = "/tmp/grpc-tls/server.key",
+    client_ca           = "/tmp/grpc-tls/ca.crt",
+    require_client_cert = true,
+)
+```
+
+With `require_client_cert = true`, the server rejects any client that does not
+present a certificate signed by a CA in the `client_ca` bundle. The rejection is
+logged with `kind=PEER_CERT_REJECTED`.
+
+## Step 6 — Reload certificates without restarting
+
+```julia
+# ... later, after writing new cert/key files to the same paths ...
+reload_tls!(server)
+```
+
+`reload_tls!` builds a new underlying TLS configuration, validates it, and
+swaps it atomically. In-flight handshakes that already latched the previous
+configuration complete on the old one; new accepts pick up the new config.
+If the new configuration is invalid, `reload_tls!` raises and the server keeps
+using the previous one.
+
+You can also set up an automatic watcher that reloads when any watched file's
+mtime changes:
+
+```julia
+watcher = gRPCServer.CertificateWatcher(tls, () -> reload_tls!(server))
+gRPCServer.start_watching!(watcher; interval = 60.0)
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `ArgumentError: alpn_protocols must not be empty` | You explicitly passed `alpn_protocols = String[]`. | Pass `["h2"]` or omit the keyword. |
+| `TLSHandshakeError(kind = CONFIG_ERROR, ...)` at `start!` | Cert or key path is wrong, file is unreadable, or the key does not match the cert. | Check the paths in the error. `openssl x509 -in server.crt -text` and `openssl rsa -in server.key -check` validate them independently. |
+| `kind = ALPN_MISMATCH` log lines from a client you trust | Client advertises only `http/1.1`, only `h2c`, or omits ALPN entirely. | Enable ALPN on the client and advertise `h2`. |
+| `kind = PEER_CERT_REJECTED` log lines | `require_client_cert = true` but the client presented no cert, or one not signed by `client_ca`. | Verify the client cert chain and the `client_ca` path. |
+| `kind = HANDSHAKE_IO_ERROR` under load | Handshake timed out or the connection reset mid-handshake. | If persistent, raise `handshake_timeout_ns` or investigate network middleboxes. |
+
+## Error classification
+
+Every TLS-layer failure throws a `TLSHandshakeError` whose `kind` field is one
+of:
+
+- `CONFIG_ERROR` — raised synchronously by `start!` when the TLS configuration
+  cannot be loaded at all (missing files, malformed cert, bind failure).
+- `ALPN_MISMATCH` — the client did not offer any protocol from the server's
+  `alpn_protocols` list. Raised per-handshake during the accept loop.
+- `PEER_CERT_REJECTED` — mTLS verification failed. Raised per-handshake.
+- `HANDSHAKE_IO_ERROR` — handshake timed out, reset, or failed for any other
+  reason. Raised per-handshake.
+
+The three per-handshake kinds produce distinct `@warn` log lines, so operators
+can tell configuration errors from client errors from load-induced timeouts at
+a glance.
+
+---
+
+<!-- Page: HTTP/2 Backends — https://juliaio.github.io/gRPCServer.jl/dev/http2-backends/ -->
+
+# HTTP/2 Backends
+
+gRPCServer.jl uses a pluggable HTTP/2 backend architecture. The HTTP/2
+protocol implementation (frames, HPACK, streams, flow control, connection
+management) is delegated to an external backend package, which is selected
+at server construction time via the `http2_backend` keyword argument.
+
+The **default backend is `HTTPjlBackend`**, which serves gRPC over
+[HTTP.jl](https://github.com/JuliaWeb/HTTP.jl) (≥ 2.1) — cleartext h2c and TLS
+(ALPN `h2`), across all four RPC types plus server reflection. The previous
+backend, `PureHTTP2Backend` (the pure-Julia
+[PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) implementation of
+RFC 7540/7541), remains a fully-supported, opt-in alternative. Observable gRPC
+behavior is identical across backends. The backend choice is orthogonal to the
+codegen interface: services registered through the generated `register_*!`
+functions run identically on every backend.
+
+## Selecting a Backend
+
+```julia
+using gRPCServer
+
+# Default: uses HTTPjlBackend (HTTP.jl)
+server = GRPCServer("127.0.0.1", 50051)
+
+# Opt in to the PureHTTP2 backend (optional dependency: load PureHTTP2 first,
+# which also loads the gRPCServerPureHTTP2Ext extension)
+using PureHTTP2
+server = GRPCServer("127.0.0.1", 50051; http2_backend=PureHTTP2Backend())
+```
+
+### When to choose which
+
+| You need… | Use |
+|-----------|-----|
+| The default, on the widely-used Julia HTTP stack | `HTTPjlBackend` (default) |
+| Any streaming RPC type | `HTTPjlBackend` or `PureHTTP2Backend` |
+| Request bodies larger than ~64 KB | `HTTPjlBackend` — see below |
+| The `nghttp2` C reference implementation | `Nghttp2Backend` — unary and client-streaming only |
+| A configurable per-connection concurrent-stream limit | `HTTPjlBackend` (`max_concurrent_streams`, default 100) |
+| Live TLS certificate reload (`reload_tls!`) | `PureHTTP2Backend` |
+| A pure-Julia HTTP/2 stack with no HTTP.jl dependency at runtime | `PureHTTP2Backend` |
+
+!!! warning "PureHTTP2 does not accept large request bodies"
+    A unary request whose body exceeds the HTTP/2 initial flow-control window
+    (65535 bytes) does not complete on `PureHTTP2Backend`: the stream is reset
+    and the request never reaches the handler. Requests up to ~64 KB are
+    unaffected, as are responses of any size.
+
+    This is the one area where the two backends differ in what they can carry
+    rather than in which features they expose, so weigh it against the
+    capabilities listed above. `HTTPjlBackend` handles request bodies of any
+    size within `max_message_size`.
+
+!!! note "HTTP.jl backend limitations"
+    Because HTTP.jl owns the listener and TLS context, the HTTP.jl backend does
+    not support live TLS certificate reload (`reload_tls!`). mTLS over TLS 1.2
+    is also currently broken upstream in Reseau (it works over TLS 1.3). Select
+    `PureHTTP2Backend()` if you need certificate reload. Setting these keywords
+    explicitly now raises [`UnsupportedFeatureError`](@ref) at construction
+    rather than being silently ignored — see
+    [Capability validation](#capability-validation).
+
+## Capability validation
+
+Backends do not support every feature, and configuration keywords that a
+backend cannot honor used to be silently ignored. `gRPCServer` now detects
+**explicitly-set** keywords and raises [`UnsupportedFeatureError`](@ref) at
+[`GRPCServer`](@ref) construction when the chosen backend cannot honor them.
+Omitted keywords never raise.
+
+Explicitness is detected exactly: the constructor captures the configuration
+keywords in a `kwargs...` splat, so *explicitly re-passing a documented default*
+(e.g. `backlog=128` on `PureHTTP2Backend`) also raises — the signal is that you
+asked for the knob, not that you changed the value.
+
+Per-backend defaults and capabilities are queryable via
+[`backend_defaults`](@ref) and [`backend_capabilities`](@ref). The
+backend-specific constructors — [`GRPCServerHTTPJl`](@ref),
+[`GRPCServerPureHTTP2`](@ref), [`GRPCServerNghttp2`](@ref) — fix the backend
+and document in their docstrings which keywords raise on that backend.
+
+### Per-backend capability matrix
+
+✅ = supported · ❌ = not supported: the keyword raises `UnsupportedFeatureError`
+on that backend (RPC-type rows refuse per request with `UNIMPLEMENTED` instead —
+see the note below). Footnote markers qualify partial or nuanced support.
+
+| Keyword | HTTPjl | PureHTTP2 | Nghttp2 |
+|---|---|---|---|
+| TLS cert/key | ✅ | ✅ | ✅ |
+| mTLS (`client_ca`, `require_client_cert`) | ✅ | ✅ | ❌ |
+| `min_version`, `alpn_protocols`, `handshake_timeout_ns` | ✅ | ✅ | ❌ |
+| `reload_tls!` | ❌ | ✅ | ❌ |
+| `max_receive_message_length` | ✅ | ❌ | ❌ |
+| `max_send_message_length`, `max_concurrent_requests` | ✅ | ✅ | ✅ |
+| `max_connections`, `max_queued_requests`, `keepalive_interval`, `keepalive_timeout` | ❌ | ❌ | ❌ |
+| `max_concurrent_streams` | ✅¹ | ❌ | ❌ |
+| `idle_timeout`, `read_header_timeout`, `read_timeout`, `write_timeout` | ✅ | ❌ | ❌ |
+| `max_header_bytes`, `reuseaddr`, `backlog` | ✅ | ❌ | ❌ |
+| `h2_initial_window_size`, `h2_connection_window_size` | ✅ | ❌ | ❌ |
+| `drain_timeout` (config) | ❌² | ✅ | ❌ |
+| send-side compression (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) | ❌ | ❌ | ❌ |
+| receive-side decompression | ✅³ | ✅³ | ❌³ |
+| server-streaming / bidi RPCs | ✅ | ✅ | ❌ |
+| client-streaming RPCs | ✅ | ✅ | ✅ |
+| `enable_reflection` | ✅ | ✅ | ❌⁴ |
+| `enable_health_check` | ✅ | ✅ | ❌⁵ |
+
+¹ Enforced per connection on HTTPjl (default 100).
+² Pass `stop!(; timeout=)` on HTTPjl instead; the config keyword raises.
+³ Strict on HTTPjl, lenient on PureHTTP2; nghttp2 performs no decompression
+   (raw bytes, `decompression=false`).
+⁴ `ServerReflectionInfo` is a bidi stream, which nghttp2 refuses, so the
+   keyword raises.
+⁵ `Check` works on nghttp2; `Watch` is refused per request.
+
+RPC-type rows (server-/bidi-streaming on `Nghttp2Backend`) are method-level
+refusals (`UNIMPLEMENTED`), not construction errors, so they do not raise.
+`max_message_size` is never gated: it seeds both directions, the send cap is
+enforced on every backend, and the receive cap is gated via the explicit
+`max_receive_message_length` keyword.
+
+## The nghttp2 Backend
+
+`Nghttp2Backend` serves gRPC over the `nghttp2` C library through
+[Nghttp2Wrapper.jl](https://github.com/s-celles/Nghttp2Wrapper.jl), which is an
+**optional** dependency — a package extension, not a hard requirement. Load it
+before constructing the backend:
+
+```julia
+using gRPCServer, Nghttp2Wrapper
+server = GRPCServer("127.0.0.1", 50051; http2_backend = Nghttp2Backend())
+```
+
+Constructing it without `Nghttp2Wrapper` loaded raises an `ArgumentError` naming
+what to load, rather than failing later inside the adapter.
+
+!!! note "Not available on the Julia 1.10 LTS"
+    Nghttp2Wrapper.jl requires Julia 1.12. It calls nghttp2's `size_t` API,
+    introduced in nghttp2 1.57.0, and `nghttp2_jll` is a standard library — so
+    the version of libnghttp2 available is whichever one the Julia sysimage
+    ships, and 1.10 ships 1.52.0.
+
+    On the LTS, `Pkg` simply will not install Nghttp2Wrapper, so the extension
+    never loads and `Nghttp2Backend()` raises. The other two backends are
+    unaffected.
+
+!!! warning "Unary and client-streaming only"
+    Nghttp2Wrapper's server handler is buffered: it receives a complete request
+    and returns a complete response, so a handler cannot emit messages as it
+    produces them.
+
+    Unary and client-streaming calls are served correctly — all request messages
+    are in hand, and the single response is emitted at the end.
+
+    Server-streaming and bidirectional calls are **refused** with
+    `UNIMPLEMENTED` and an explanatory message. They are not served with wrong
+    timing: a bidirectional request/response exchange, such as server
+    reflection, would deadlock waiting for a reply that is only flushed once the
+    handler returns.
+
+    Nghttp2Wrapper's ROADMAP Milestone 7 tracks the incremental handler that
+    would lift this.
+
+## Shutdown Semantics
+
+`stop!` terminates in bounded time on both backends, but the HTTP.jl backend
+needs care because `Base.close(::HTTP.Server)` polls in an unbounded loop until
+every tracked connection reports idle. A client that opens a stream and never
+completes it — HEADERS with no body, or a stream reset mid-call — would block
+that loop forever. `stop!` therefore never relies on it alone:
+
+```julia
+# Immediate: drops in-flight connections via HTTP.forceclose.
+stop!(server; force = true)
+
+# Graceful: lets HTTP.jl drain, then forces after the budget expires.
+stop!(server)                    # budget = HTTPJL_DRAIN_TIMEOUT (10s)
+stop!(server; timeout = 2.0)     # explicit budget
+```
+
+A graceful stop that exhausts its budget logs a warning and forces the close, so
+`stop!` always returns. Pass `force = true` when you do not care about draining —
+in tests, for instance, where it removes the drain wait entirely.
+
+!!! warning "Do not call `close` on the underlying HTTP.jl server"
+    `close(server.backend_handle)` bypasses this bounding and can hang
+    indefinitely. Always go through `stop!`.
+
+## The Backend Interface
+
+There are two contracts. A backend implements whichever suits the library it
+wraps.
+
+### The raised contract: `AbstractGRPCStream` and `serve_grpc`
+
+The preferred one, and what `HTTPjlBackend` uses. The backend owns its listener
+and serve loop, and adapts each in-flight call to a per-call stream handle:
+
+```julia
+serve_grpc(backend, server, on_call)   # start serving; call on_call(stream, peer)
+```
+
+`on_call` receives an `AbstractGRPCStream`, on which the backend implements:
+
+| Direction | Methods |
+|-----------|---------|
+| Request   | `grpc_path`, `request_metadata`, `read_message!`, `is_cancelled` |
+| Response  | `send_response_headers!`, `send_message!`, `send_trailers!`, `reset!` |
+| Teardown  | `drain_request!` (optional; defaults to a no-op) |
+
+This contract carries no assumption about the underlying HTTP/2 types, so a
+backend wrapping a foreign library — a C binding, or another Julia HTTP stack —
+does not have to imitate PureHTTP2.jl's object model.
+
+`read_message!` returns one complete gRPC message, or `nothing` when no complete
+message will arrive. Returning `nothing` for a unary or server-streaming call
+fails it with `INTERNAL`; it is not a silent empty request.
+
+`drain_request!` exists because a backend may treat an unread request body at
+handler return as an abandoned request. It is called only after RPCs that read
+exactly one message, where the client has already half-closed — never on
+client- or bidirectional-streaming calls, where a peer may legitimately hold its
+send side open.
+
+### The connection-factory contract: `create_connection` (legacy)
+
+The original contract. As of 1.0 it is **legacy**: no built-in backend uses
+it (all three — HTTPjl, PureHTTP2, nghttp2 — drive through `serve_grpc`), and
+the frame-loop driver that consumed factory connections moved into the
+PureHTTP2 package extension. It remains documented for custom backends
+written against the old interface. The factory returns a connection object
+compatible with PureHTTP2.jl's `HTTP2Connection` interface — supporting the
+following operations:
+
+| Category         | Methods                                                                 |
+|------------------|-------------------------------------------------------------------------|
+| Lifecycle        | `process_preface`, `process_frame`, `is_open`                           |
+| Stream access    | `get_stream`, `remove_stream`, `can_send_on_stream`                     |
+| Sending          | `send_headers`, `send_data`, `send_trailers`, `send_rst_stream`, `send_goaway` |
+| Frame I/O        | `Frame`, `encode_frame`, `decode_frame_header`                          |
+
+Stream objects returned by `get_stream` must expose field accessors
+(`stream.id`, `stream.state`, `stream.headers_complete`, etc.) and
+accessor functions (`get_path`, `get_header`, `get_content_type`,
+`peek_data`, `can_send`, ...). See the
+[PureHTTP2.jl documentation](https://s-celles.github.io/PureHTTP2.jl) for
+the full interface.
+
+## Implementing a Custom Backend
+
+Define a new subtype of `AbstractHTTP2Backend` and implement
+`create_connection`:
+
+```julia
+using gRPCServer, PureHTTP2
+
+struct MyBackend <: AbstractHTTP2Backend
+    # backend-specific configuration
+end
+
+gRPCServer.create_connection(backend::MyBackend) = begin
+    # Return an HTTP2Connection-compatible object
+    PureHTTP2.HTTP2Connection()
+end
+
+server = GRPCServer("127.0.0.1", 50051; http2_backend=MyBackend())
+```
+
+The connection-factory pattern means gRPCServer.jl calls `create_connection`
+once per client; the returned object is then used directly through
+PureHTTP2.jl's API, so no per-request indirection is added. The cost is that the
+backend must adapt its underlying types to the `HTTP2Connection` field
+interface.
+
+For a backend wrapping a different HTTP/2 library — a C binding such as
+`nghttp2`, or another Julia HTTP stack — prefer the raised contract instead:
+
+```julia
+struct MyBackend <: AbstractHTTP2Backend end
+
+function gRPCServer.serve_grpc(::MyBackend, server, on_call)
+    # Start the library's own listener; for each incoming call, wrap it as an
+    # AbstractGRPCStream and hand it to on_call(stream, peer).
+    # Return whatever handle stop! should close.
+end
+
+# plus the AbstractGRPCStream methods for that stream type
+```
+
+That is how `HTTPjlBackend` is built, and it avoids having to imitate
+PureHTTP2.jl's object model in a library that has its own.
+
+## Future Backends
+
+HTTP.jl was the future backend in earlier versions of this page; its HTTP/2
+support has since landed and it is now the default.
+
+The nghttp2 backend has since landed as `Nghttp2Backend` — see above. It
+implements the raised `AbstractGRPCStream` contract through a package
+extension, and required no change to the dispatch core, which was the point of
+that contract.
+
+What it does not yet cover is streaming, and that gap is upstream: the
+incremental handler is Nghttp2Wrapper.jl's ROADMAP Milestone 7.
+
+## API Reference
+
+See the HTTP/2 Backend Abstraction section of the [API Reference](api.md)
+for docstrings on `AbstractHTTP2Backend`, `PureHTTP2Backend`, and `create_connection`.
+
+---
+
+<!-- Page: Performance — https://juliaio.github.io/gRPCServer.jl/dev/performance/ -->
+
+# Performance
+
+## Zero-copy framing
+
+The framing layer reads request bytes directly into a single reusable buffer and
+hands the decoder a view into it, so a received message is not copied between the
+socket and ProtoBuf decoding.
+
+A throughput and allocation benchmark lives under `benchmark/`:
+
+```
+julia --project=benchmark -e 'using Pkg; Pkg.instantiate()'   # first time
+julia --project=benchmark --threads=auto benchmark/run.jl
+```
+
+See [Advanced Topics — Concurrency model](examples/advanced.md#Concurrency-model)
+for how per-stream tasks and the thread count affect handler parallelism.
+
+## HTTP/2 flow-control window and large uploads
+
+Large client-to-server messages (big request protobufs and client streaming) are
+bounded by the HTTP/2 flow-control window. At the protocol-default 64 KiB stream
+and connection windows, in-flight upload bytes are capped near 64 KiB, so upload
+throughput is limited to roughly window / round-trip-time. On localhost this is
+invisible, but over a network with a 10 ms round trip it caps uploads near 6 MB/s
+regardless of message size. Downloads (server to client) are not affected the
+same way, since HTTP.jl already batches outgoing DATA frames.
+
+`GRPCServer` exposes two keywords that raise the receive windows, forwarded to
+the HTTP/2 backend. All default to the protocol defaults, so behavior is
+unchanged unless set:
+
+- `h2_initial_window_size` (default `65535`): the per-stream receive window the
+  server advertises via `SETTINGS_INITIAL_WINDOW_SIZE`
+- `h2_connection_window_size` (default `65535`): the connection-level receive
+  window, applied with an initial `WINDOW_UPDATE` when above 65535
+
+These keywords are honored only by [`HTTPjlBackend`](@ref). On
+`PureHTTP2Backend` and `Nghttp2Backend`, explicitly setting a non-default (or
+even default) value raises [`UnsupportedFeatureError`](@ref) at construction
+instead of being silently ignored; omit them to use those backends' defaults.
+
+```julia
+# Size the window to the bandwidth-delay product, e.g. 8 MiB for a high-BDP link.
+server = GRPCServer("0.0.0.0", 50051;
+    h2_initial_window_size = 8 * 1024 * 1024,
+    h2_connection_window_size = 8 * 1024 * 1024)
+run(server)
+```
+
+To benefit in both directions, the client must advertise a matching receive
+window, since an endpoint's send throughput is governed by the peer's advertised
+window.
+
+Transport tuning that is sometimes expected but does not apply here: there is no
+TCP send/receive buffer size knob in HTTP.jl 2.0 or its Reseau transport (the
+kernel autotunes), and `TCP_NODELAY` is already enabled by default, so small
+messages are not delayed by Nagle.
+
+---
+
+<!-- Page: API Reference — https://juliaio.github.io/gRPCServer.jl/dev/api/ -->
+
+# API Reference
+
+## Module
+
+```@docs
+gRPCServer
+```
+
+## Server Types
+
+```@docs
+GRPCServer
+ServerConfig
+TLSConfig
+ServerStatus
+```
+
+## Context Types
+
+```@docs
+ServerContext
+PeerInfo
+```
+
+## Service Registration
+
+```@docs
+ServiceDescriptor
+MethodDescriptor
+MethodType
+register!
+register_method!
+services
+service_descriptor
+```
+
+The generated `register_<Service>_<Rpc>!` functions build a
+`MethodDescriptor` for each RPC and call `register_method!` on the server's
+dispatcher; use the generated functions for normal services. The types and
+functions below are the underlying runtime interface the codegen sits on.
+
+Registration-time validation is performed by internal helpers:
+
+```@docs
+gRPCServer._validate_method_handler!
+gRPCServer._expected_handler_tuple
+```
+
+## Stream Types
+
+```@docs
+ServerStream
+ClientStream
+BidiStream
+send!
+close!
+```
+
+## Error Handling
+
+```@docs
+StatusCode
+GRPCError
+BindError
+ServiceAlreadyRegisteredError
+InvalidServerStateError
+MethodSignatureError
+StreamCancelledError
+UnsupportedFeatureError
+status_code_to_http
+exception_to_status_code
+http2_to_grpc_status
+```
+
+## Interceptors
+
+```@docs
+Interceptor
+MethodInfo
+LoggingInterceptor
+MetricsInterceptor
+TimeoutInterceptor
+RecoveryInterceptor
+add_interceptor!
+```
+
+## Health Checking
+
+```@docs
+HealthStatus
+set_health!
+get_health
+```
+
+## Reflection Support
+
+```@docs
+HEALTH_DESCRIPTOR
+REFLECTION_DESCRIPTOR
+has_health_descriptor
+has_reflection_descriptor
+```
+
+## Server Lifecycle
+
+```@docs
+start!
+stop!
+```
+
+## TLS
+
+```@docs
+reload_tls!
+```
+
+## Context Operations
+
+```@docs
+set_header!
+set_trailer!
+get_metadata
+get_metadata_string
+get_metadata_binary
+remaining_time
+is_cancelled
+gRPCServer.cancel!
+```
+
+`cancel!` is not exported — call it as `gRPCServer.cancel!(ctx)`.
+
+## Compression
+
+```@docs
+CompressionCodec
+compress
+decompress
+codec_name
+parse_codec
+negotiate_compression
+```
+
+## ProtoBuf Code Generation
+
+Loading gRPCServer registers its ProtoBuf.jl code generation handler; one
+`protojl` run (with gRPCClient.jl loaded too) emits message types, client
+stubs, and per-service registration functions in a single generated file.
+`protojl` is re-exported from ProtoBuf.jl by gRPCServer. See
+[Code Generation](@ref) for the full walkthrough.
+
+```@docs
+grpc_register_service_codegen
+```
+
+## HTTP/2 Backend Abstraction
+
+gRPCServer.jl supports pluggable HTTP/2 backends via an abstract type and a
+connection-factory method. See [HTTP/2 Backends](@ref) for the full guide.
+
+```@docs
+AbstractHTTP2Backend
+PureHTTP2Backend
+create_connection
+HTTPjlBackend
+Nghttp2Backend
+BackendCapabilities
+backend_capabilities
+backend_defaults
+GRPCServerHTTPJl
+GRPCServerPureHTTP2
+GRPCServerNghttp2
+```
+
+### Raised stream-handler contract (HTTP.jl backend)
+
+The HTTP.jl backend requires a higher-level contract than the connection
+factory: the backend owns the serve loop and presents each gRPC call as an
+[`AbstractGRPCStream`](@ref). This contract is introduced for the HTTP.jl
+backend; the request-path integration is in progress.
+
+```@docs
+AbstractGRPCStream
+serve_grpc
+```
+
+## HTTP/2 Stream State
+
+These functions are used for advanced stream state management, particularly for handling edge cases with client disconnection. As of 1.0 they come from [PureHTTP2.jl](https://github.com/s-celles/PureHTTP2.jl) directly — gRPCServer no longer re-exports them (PureHTTP2 became an optional weak dependency). Load PureHTTP2 and qualify: `PureHTTP2.can_send(stream)`, `PureHTTP2.StreamError`.
+
+- `can_send(stream)` — check whether a stream is in a state that accepts outbound data
+- `StreamError` — exception type for HTTP/2 stream-level errors
+
+---
+
+<!-- Page: Examples / Overview — https://juliaio.github.io/gRPCServer.jl/dev/examples// -->
+
+# Examples
+
+This guide walks you through gRPCServer.jl examples in progressive order, from basic concepts to advanced patterns.
+
+## Learning Path
+
+| Example | RPC Pattern | Concepts | Directory |
+|---------|-------------|----------|-----------|
+| [Hello World](01_hello_world.md) | Unary | Service definition, basic server | `examples/01_hello_world/` |
+| [Hello Stream](02_hello_stream.md) | Server Streaming | Multiple responses, cancellation | `examples/02_hello_stream/` |
+| [Sum Numbers](03_sum_numbers.md) | Client Streaming | Multiple requests, aggregation | `examples/03_sum_numbers/` |
+| [Chat](04_chat.md) | Bidirectional | Real-time messaging | `examples/04_chat/` |
+| [Calculator](05_calculator.md) | Unary (multi-method) | Error handling, multiple methods | `examples/05_calculator/` |
+| [Advanced Topics](advanced.md) | All patterns | Interceptors, TLS, compression | (documentation only) |
+
+## Getting Started
+
+### Prerequisites
+
+1. Install gRPCServer.jl:
+   ```julia
+   using Pkg
+   Pkg.add("gRPCServer")
+   ```
+
+2. Install [grpcurl](https://github.com/fullstorydev/grpcurl) for testing:
+   ```bash
+   # macOS
+   brew install grpcurl
+
+   # Linux (download binary from releases)
+   # Windows (download binary from releases)
+   ```
+
+### Running Examples
+
+Each example directory contains:
+- `*.proto` - Protocol buffer service definition
+- `server.jl` - Julia server implementation
+- `generated/` - Auto-generated Julia types, client stubs, and registration functions
+- `README.md` - Detailed usage instructions
+
+To run any example:
+
+```bash
+cd examples/<example_name>
+julia --project=../.. server.jl
+```
+
+### Example Workflow
+
+1. **Start simple**: Begin with `01_hello_world` to understand basic unary RPC
+2. **Server streaming**: Move to `02_hello_stream` to learn single request → multiple responses
+3. **Client streaming**: Try `03_sum_numbers` for multiple requests → single response
+4. **Bidirectional**: Explore `04_chat` for simultaneous bidirectional streaming
+5. **Multi-method**: See `05_calculator` for multiple methods with error handling
+6. **Production**: Read advanced documentation for interceptors, TLS, compression
+
+## Quick Reference
+
+Every example registers its handlers with the generated codegen registration
+functions (one `protojl` run emits messages, client stubs, and registration
+functions together).
+
+### Unary RPC (01_hello_world)
+
+Single request, single response:
+
+```julia
+function handler(ctx::ServerContext, request::RequestType)::ResponseType
+    return ResponseType(...)
+end
+
+register_Greeter_SayHello!(server) do ctx, req
+    ResponseType(...)
+end
+```
+
+### Server Streaming (02_hello_stream)
+
+Single request, multiple responses:
+
+```julia
+function handler(ctx::ServerContext, request::RequestType, stream::ServerStream{ResponseType})::Nothing
+    for item in items
+        send!(stream, ResponseType(...))
+    end
+    return nothing
+end
+
+register_Greeter_SayHelloStream!(server, handler)
+```
+
+### Client Streaming (03_sum_numbers)
+
+Multiple requests, single response:
+
+```julia
+function handler(ctx::ServerContext, stream::ClientStream{RequestType})
+    for request in stream
+        # Process each request
+    end
+    return ResponseType(...)
+end
+
+register_Math_Sum!(server, handler)
+```
+
+### Bidirectional Streaming (04_chat)
+
+Multiple requests and responses:
+
+```julia
+function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseType})
+    for request in stream
+        send!(stream, ResponseType(...))
+    end
+    close!(stream)
+    return nothing
+end
+
+register_Chat_Chat!(server, handler)
+```
+
+### Error Handling (05_calculator)
+
+Return appropriate gRPC status codes:
+
+```julia
+if invalid_input
+    throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Error message"))
+end
+```
+
+## Port Assignments
+
+Each example uses a different port:
+
+| Example | Port |
+|---------|------|
+| 01_hello_world | 50051 |
+| 02_hello_stream | 50051 |
+| 03_sum_numbers | 50053 |
+| 04_chat | 50054 |
+| 05_calculator | 50052 |
+
+## Next Steps
+
+After completing the examples, explore:
+- [Quick Start](../quickstart.md) - Comprehensive setup guide
+- [API Reference](../api.md) - Detailed API documentation
+
+---
+
+<!-- Page: Examples / Hello World — https://juliaio.github.io/gRPCServer.jl/dev/examples/01_hello_world/ -->
+
+# Hello World - Basic Unary RPC
+
+This is the simplest gRPCServer.jl example, demonstrating a basic unary RPC (single request, single response).
+
+## What You'll Learn
+
+- Defining a proto service with a single RPC method
+- Implementing a unary RPC handler
+- Registering a handler with the generated codegen registration function
+- Starting a gRPC server with health check and reflection
+
+## Proto Definition
+
+```protobuf
+// greeter.proto
+syntax = "proto3";
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+```
+
+This defines:
+- A `Greeter` service in the `helloworld` package
+- A single `SayHello` method that takes a name and returns a greeting
+
+## Generate Julia Types
+
+Load both gRPCServer and gRPCClient so one `protojl` run emits the messages,
+the client stub, and the registration functions together:
+
+```julia
+using ProtoBuf
+using gRPCServer
+import gRPCClient
+
+protojl("greeter.proto", ".", "generated";
+    always_use_modules = true,
+    add_kwarg_constructors = true
+)
+```
+
+This creates the `helloworld` module in `generated/helloworld/` with
+`HelloRequest`/`HelloReply` message types, the `Greeter_SayHello_Client` client
+stub, and `register_Greeter!`/`register_Greeter_SayHello!` registration
+functions.
+
+## Server Implementation
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+
+# Run server
+function main()
+    server = GRPCServer("127.0.0.1", 50051;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Greeter!(server; SayHello = (ctx, req) -> HelloReply("Hello, $(req.name)!"))
+
+    @info "gRPC server starting" host="127.0.0.1" port=50051
+    run(server)
+end
+
+main()
+```
+
+Equivalent form — the per-RPC do-block registration registers the same RPC:
+
+```julia
+register_Greeter_SayHello!(server) do ctx, req
+    HelloReply("Hello, $(req.name)!")
+end
+```
+
+## Key Concepts
+
+### Handler Function
+
+The handler receives:
+- `ctx::ServerContext` - Request context with metadata, deadlines, and cancellation
+- `request::HelloRequest` - The deserialized request message
+
+The handler returns the response type directly.
+
+### Registration
+
+The generated `register_Greeter!` (aggregate form) and
+`register_Greeter_SayHello!` (per-RPC form) build a `MethodDescriptor` and
+call `register_method!` on the server's dispatcher. Handler signatures are
+validated at registration time — a mismatched shape throws `ArgumentError`.
+For the underlying runtime interface (descriptors, `register!`,
+`register_method!`), see the [API Reference](../api.md).
+
+## Testing
+
+### Run the Server
+
+```bash
+cd examples/01_hello_world
+julia --project=../.. server.jl
+```
+
+### Call SayHello from Julia
+
+In a second terminal, same directory, using the generated client stub (call
+`gRPCClient.grpc_init()` once before any call):
+
+```julia
+using gRPCServer
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+import gRPCClient
+
+gRPCClient.grpc_init()
+client = helloworld.Greeter_SayHello_Client("127.0.0.1", 50051)
+resp = gRPCClient.grpc_sync_request(client, helloworld.HelloRequest("Julia"))
+@assert resp.message == "Hello, Julia!"
+println("Got: ", resp.message)
+```
+
+### List Services
+
+```bash
+grpcurl -plaintext localhost:50051 list
+```
+
+Expected output:
+```
+grpc.health.v1.Health
+grpc.reflection.v1alpha.ServerReflection
+helloworld.Greeter
+```
+
+### Call SayHello
+
+```bash
+grpcurl -plaintext -d '{"name": "Julia"}' localhost:50051 helloworld.Greeter/SayHello
+```
+
+Expected output:
+```json
+{
+  "message": "Hello, Julia!"
+}
+```
+
+## Next Steps
+
+Proceed to [Hello Stream](02_hello_stream.md) to learn about server streaming RPC.
+
+---
+
+<!-- Page: Examples / Hello Stream — https://juliaio.github.io/gRPCServer.jl/dev/examples/02_hello_stream/ -->
+
+# Hello Stream - Server Streaming RPC
+
+This example builds on `01_hello_world` by adding server streaming, where a single request receives multiple responses over time.
+
+## What You'll Learn
+
+- Adding a streaming RPC method to a proto service
+- Implementing a server streaming handler
+- Using `ServerStream` to send multiple responses
+- Handling client cancellation
+
+## Proto Definition
+
+```protobuf
+// greeter.proto
+syntax = "proto3";
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply);
+  rpc SayHelloStream (HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+```
+
+The `stream` keyword before `HelloReply` indicates this method returns multiple responses.
+
+## Server Implementation
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/helloworld/helloworld.jl")
+using .helloworld
+
+# Handlers
+function say_hello(ctx::ServerContext, request::HelloRequest)::HelloReply
+    @info "Received request" name=request.name request_id=ctx.request_id
+    HelloReply("Hello, $(request.name)!")
+end
+
+function say_hello_stream(
+    ctx::ServerContext,
+    request::HelloRequest,
+    stream::ServerStream{HelloReply}
+)::Nothing
+    for i in 1:5
+        if is_cancelled(ctx)
+            @warn "Stream cancelled by client"
+            return nothing
+        end
+        send!(stream, HelloReply("Hello $(i), $(request.name)!"))
+        sleep(0.5)
+    end
+    return nothing
+end
+
+# Register the service with the codegen registration function
+function main()
+    host = "127.0.0.1"
+    port = 50051
+    server = GRPCServer(host, port;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+
+    @info "gRPC server starting" host=host port=port
+    run(server)
+end
+
+main()
+```
+
+## Key Concepts
+
+### Streaming Handler Signature
+
+Server streaming handlers receive an additional parameter:
+
+```julia
+function handler(
+    ctx::ServerContext,
+    request::RequestType,
+    stream::ServerStream{ResponseType}
+)::Nothing
+```
+
+The handler returns `Nothing` instead of a response type.
+
+### Sending Responses
+
+Use `send!(stream, response)` to send each response:
+
+```julia
+for item in items
+    send!(stream, ResponseType(...))
+end
+```
+
+### Cancellation Handling
+
+Check `is_cancelled(ctx)` to detect client cancellation:
+
+```julia
+if is_cancelled(ctx)
+    @warn "Client cancelled the stream"
+    return nothing
+end
+```
+
+This is important for long-running streams to avoid wasting resources.
+
+### Registration
+
+The generated `register_Greeter!` registers both RPCs in one call:
+
+```julia
+register_Greeter!(server; SayHello = say_hello, SayHelloStream = say_hello_stream)
+```
+
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple; handler signatures are validated at registration time.
+
+## Testing
+
+### Run the Server
+
+```bash
+cd examples/02_hello_stream
+julia --project=../.. server.jl
+```
+
+### Call Unary RPC
+
+```bash
+grpcurl -plaintext -d '{"name": "Julia"}' localhost:50051 helloworld.Greeter/SayHello
+```
+
+Expected output:
+```json
+{
+  "message": "Hello, Julia!"
+}
+```
+
+### Call Streaming RPC
+
+```bash
+grpcurl -plaintext -d '{"name": "Julia"}' localhost:50051 helloworld.Greeter/SayHelloStream
+```
+
+Expected output (5 messages over ~2.5 seconds):
+```json
+{
+  "message": "Hello 1, Julia!"
+}
+{
+  "message": "Hello 2, Julia!"
+}
+{
+  "message": "Hello 3, Julia!"
+}
+{
+  "message": "Hello 4, Julia!"
+}
+{
+  "message": "Hello 5, Julia!"
+}
+```
+
+## Other Streaming Patterns
+
+### Client Streaming
+
+Single response after receiving multiple requests:
+
+```julia
+function handler(ctx::ServerContext, stream::ClientStream{RequestType})
+    for request in stream
+        # Process each request
+    end
+    return ResponseType(...)
+end
+```
+
+### Bidirectional Streaming
+
+Multiple requests and responses simultaneously:
+
+```julia
+function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseType})
+    for request in stream
+        send!(stream, ResponseType(...))
+    end
+    close!(stream)
+    return nothing
+end
+```
+
+Both patterns are registered the same way through the generated functions —
+see `03_sum_numbers` and `04_chat`.
+
+## Next Steps
+
+Proceed to [Sum Numbers](03_sum_numbers.md) to learn about client streaming, where multiple requests produce a single response.
+
+---
+
+<!-- Page: Examples / Sum Numbers — https://juliaio.github.io/gRPCServer.jl/dev/examples/03_sum_numbers/ -->
+
+# Sum Numbers - Client Streaming RPC
+
+This example demonstrates client streaming RPC, where the client sends multiple requests and receives a single response after all requests are processed.
+
+## What You'll Learn
+
+- Defining a proto service with client streaming RPC
+- Implementing a client streaming handler using `ClientStream{T}`
+- Iterating over incoming requests
+- Returning a single aggregated response
+
+## Proto Definition
+
+```protobuf
+// sum.proto
+syntax = "proto3";
+package math;
+
+service Math {
+  // Client streaming: stream of requests → single response
+  rpc Sum (stream SumRequest) returns (SumResponse);
+}
+
+message SumRequest {
+  double value = 1;
+}
+
+message SumResponse {
+  double total = 1;
+  int32 count = 2;
+}
+```
+
+The `stream` keyword before `SumRequest` indicates the client sends multiple messages.
+
+## Server Implementation
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/math/math.jl")
+using .math
+
+# Client streaming handler - receives multiple requests, returns single response
+function sum_handler(ctx::ServerContext, stream::ClientStream{SumRequest})
+    total = 0.0
+    count = 0
+
+    @info "Starting to receive numbers" request_id=ctx.request_id
+
+    for request in stream
+        if is_cancelled(ctx)
+            @warn "Stream cancelled by client"
+            break
+        end
+        total += request.value
+        count += 1
+        @debug "Received value" value=request.value running_total=total
+    end
+
+    @info "Sum complete" total=total count=count request_id=ctx.request_id
+    return SumResponse(total, count)
+end
+
+# Register the service with the codegen registration function
+function main()
+    host = "127.0.0.1"
+    port = 50053
+    server = GRPCServer(host, port;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Math!(server; Sum = sum_handler)
+
+    @info "gRPC server starting (client streaming example)" host=host port=port
+    run(server)
+end
+
+main()
+```
+
+Equivalent form — the per-RPC do-block registration:
+
+```julia
+register_Math_Sum!(server) do ctx, stream
+    total = 0.0
+    for request in stream
+        total += request.value
+    end
+    SumResponse(total, 0)
+end
+```
+
+## Key Concepts
+
+### Client Streaming Handler Signature
+
+```julia
+function handler(ctx::ServerContext, stream::ClientStream{RequestType})
+    for request in stream
+        # Process each request
+    end
+    return ResponseType(...)  # Single response
+end
+```
+
+- Receives `ClientStream{T}` instead of a single request
+- Iterates over stream with `for request in stream`
+- Returns response directly (not via stream)
+- Check `is_cancelled(ctx)` to stop early if the client disconnects
+
+### Registration
+
+The generated `register_Math!` accepts the handler as `Sum = sum_handler`;
+handler signatures are validated at registration time. The generated client
+stub for this RPC is `Math_Sum_Client`.
+
+## Testing
+
+### Run the Server
+
+```bash
+cd examples/03_sum_numbers
+julia --project=../.. server.jl
+```
+
+### Stream Numbers with grpcurl
+
+Client streaming requires stdin piping:
+
+```bash
+echo '{"value": 1}
+{"value": 2}
+{"value": 3}
+{"value": 4}
+{"value": 5}' | grpcurl -plaintext -d @ localhost:50053 math.Math/Sum
+```
+
+Expected output:
+```json
+{
+  "total": 15,
+  "count": 5
+}
+```
+
+### Empty Stream
+
+```bash
+echo '' | grpcurl -plaintext -d @ localhost:50053 math.Math/Sum
+```
+
+Returns `{"total": 0, "count": 0}`.
+
+## Use Cases
+
+Client streaming is ideal for:
+- **Batch uploads**: Sending multiple records and getting a summary
+- **Aggregation**: Computing statistics over streamed data
+- **File uploads**: Streaming file chunks and getting confirmation
+- **Sensor data**: Collecting measurements and returning analysis
+
+## Next Steps
+
+Proceed to [Chat](04_chat.md) to learn about bidirectional streaming, where both client and server send multiple messages.
+
+---
+
+<!-- Page: Examples / Chat — https://juliaio.github.io/gRPCServer.jl/dev/examples/04_chat/ -->
+
+# Chat - Bidirectional Streaming RPC
+
+This example demonstrates bidirectional streaming RPC, where both client and server can send multiple messages simultaneously.
+
+## What You'll Learn
+
+- Defining a proto service with bidirectional streaming RPC
+- Implementing a bidirectional handler using `BidiStream{TIn, TOut}`
+- Receiving and sending messages concurrently
+- Properly closing bidirectional streams
+
+## Proto Definition
+
+```protobuf
+// chat.proto
+syntax = "proto3";
+package chat;
+
+service Chat {
+  // Bidirectional streaming: stream of requests ↔ stream of responses
+  rpc Chat (stream ChatMessage) returns (stream ChatMessage);
+}
+
+message ChatMessage {
+  string user = 1;
+  string text = 2;
+}
+```
+
+The `stream` keyword on BOTH request AND response indicates bidirectional streaming.
+
+## Server Implementation
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/chat/chat.jl")
+using .chat
+
+# Bidirectional streaming handler - receives and sends multiple messages
+function chat_handler(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMessage})
+    @info "Chat session started" request_id=ctx.request_id
+
+    for message in stream
+        if is_cancelled(ctx)
+            @warn "Chat cancelled by client"
+            break
+        end
+
+        @info "Received message" user=message.user text=message.text
+
+        # Echo back with server prefix
+        response = ChatMessage("Server", "You said: $(message.text)")
+        send!(stream, response)
+    end
+
+    close!(stream)
+    @info "Chat session ended" request_id=ctx.request_id
+    return nothing
+end
+
+# Register the service with the codegen registration function
+function main()
+    host = "127.0.0.1"
+    port = 50054
+    server = GRPCServer(host, port;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Chat!(server; Chat = chat_handler)
+
+    @info "gRPC server starting (bidirectional streaming example)" host=host port=port
+    run(server)
+end
+
+main()
+```
+
+Equivalent form — the per-RPC do-block registration:
+
+```julia
+register_Chat_Chat!(server) do ctx, stream
+    for message in stream
+        send!(stream, ChatMessage("Server", "You said: $(message.text)"))
+    end
+    close!(stream)
+    return nothing
+end
+```
+
+## Key Concepts
+
+### Bidirectional Handler Signature
+
+```julia
+function handler(ctx::ServerContext, stream::BidiStream{RequestType, ResponseType})
+    for message in stream
+        # Process incoming message
+        send!(stream, response)  # Send response
+    end
+    close!(stream)
+    return nothing
+end
+```
+
+- Receives `BidiStream{TIn, TOut}` for bidirectional communication
+- Iterates over incoming messages with `for message in stream`
+- Sends responses with `send!(stream, response)`
+- **Must** close the stream with `close!(stream)`
+- Returns `nothing` (responses sent via stream)
+- Check `is_cancelled(ctx)` to stop early if the client disconnects
+
+### Registration
+
+The generated `register_Chat!` accepts the handler as `Chat = chat_handler`;
+handler signatures are validated at registration time. The generated client
+stub for this RPC is `Chat_Chat_Client`.
+
+## Testing
+
+### Run the Server
+
+```bash
+cd examples/04_chat
+julia --project=../.. server.jl
+```
+
+### Send Chat Messages with grpcurl
+
+```bash
+echo '{"user": "Alice", "text": "Hello"}
+{"user": "Alice", "text": "How are you?"}
+{"user": "Alice", "text": "Goodbye"}' | grpcurl -plaintext -d @ localhost:50054 chat.Chat/Chat
+```
+
+Expected output:
+```json
+{
+  "user": "Server",
+  "text": "You said: Hello"
+}
+{
+  "user": "Server",
+  "text": "You said: How are you?"
+}
+{
+  "user": "Server",
+  "text": "You said: Goodbye"
+}
+```
+
+## All Four RPC Patterns
+
+You've now seen all gRPC streaming patterns:
+
+| Pattern | Handler Signature | Return | Registration |
+|---------|------------------|--------|--------------|
+| Unary | `(ctx, request::T)` | Response | `register_Greeter_SayHello!(server, handler)` |
+| Server Streaming | `(ctx, request::T, stream::ServerStream{R})` | nothing | `register_Greeter_SayHelloStream!(server, handler)` |
+| Client Streaming | `(ctx, stream::ClientStream{T})` | Response | `register_Math_Sum!(server, handler)` |
+| Bidirectional | `(ctx, stream::BidiStream{T, R})` | nothing | `register_Chat_Chat!(server, handler)` |
+
+## Use Cases
+
+Bidirectional streaming is ideal for:
+- **Chat applications**: Real-time messaging
+- **Collaborative editing**: Multiple users editing simultaneously
+- **Gaming**: Real-time game state updates
+- **Voice/video**: Streaming media in both directions
+- **Monitoring**: Bidirectional telemetry and control
+
+## Next Steps
+
+- See [Calculator](05_calculator.md) for a multi-method service example
+- See [Advanced Topics](advanced.md) for interceptors, TLS, and compression
+
+---
+
+<!-- Page: Examples / Calculator — https://juliaio.github.io/gRPCServer.jl/dev/examples/05_calculator/ -->
+
+# Calculator - Multi-Method Service
+
+This example demonstrates a gRPC service with multiple methods and proper error handling.
+
+## What You'll Learn
+
+- Defining a service with multiple RPC methods
+- Implementing multiple handlers
+- Using gRPC status codes for error handling
+- Working with numeric proto types
+
+## Proto Definition
+
+```protobuf
+// calculator.proto
+syntax = "proto3";
+package calculator;
+
+service Calculator {
+  rpc Add (CalculatorRequest) returns (CalculatorResponse);
+  rpc Subtract (CalculatorRequest) returns (CalculatorResponse);
+  rpc Multiply (CalculatorRequest) returns (CalculatorResponse);
+  rpc Divide (CalculatorRequest) returns (CalculatorResponse);
+}
+
+message CalculatorRequest {
+  double first_number = 1;
+  double second_number = 2;
+}
+
+message CalculatorResponse {
+  double result = 1;
+}
+```
+
+## Server Implementation
+
+```julia
+using gRPCServer
+
+# Include generated types
+include("generated/calculator/calculator.jl")
+using .calculator
+
+# Handlers
+function add(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
+    @info "Add" a=request.first_number b=request.second_number request_id=ctx.request_id
+    CalculatorResponse(request.first_number + request.second_number)
+end
+
+function subtract(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
+    @info "Subtract" a=request.first_number b=request.second_number request_id=ctx.request_id
+    CalculatorResponse(request.first_number - request.second_number)
+end
+
+function multiply(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
+    @info "Multiply" a=request.first_number b=request.second_number request_id=ctx.request_id
+    CalculatorResponse(request.first_number * request.second_number)
+end
+
+function divide(ctx::ServerContext, request::CalculatorRequest)::CalculatorResponse
+    @info "Divide" a=request.first_number b=request.second_number request_id=ctx.request_id
+    if request.second_number == 0.0
+        throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Division by zero"))
+    end
+    CalculatorResponse(request.first_number / request.second_number)
+end
+
+# Register the service with the codegen registration function
+function main()
+    server = GRPCServer("127.0.0.1", 50052;
+        enable_health_check = true,
+        enable_reflection = true
+    )
+
+    register_Calculator!(server;
+        Add = add,
+        Subtract = subtract,
+        Multiply = multiply,
+        Divide = divide
+    )
+
+    @info "Calculator gRPC server starting" host="127.0.0.1" port=50052
+    run(server)
+end
+
+main()
+```
+
+## Key Concepts
+
+### Error Handling with Status Codes
+
+Throw `GRPCError` to return appropriate status codes:
+
+```julia
+throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Division by zero"))
+```
+
+Common status codes:
+- `INVALID_ARGUMENT` - Client provided invalid input
+- `NOT_FOUND` - Requested resource doesn't exist
+- `PERMISSION_DENIED` - Client lacks permission
+- `INTERNAL` - Server-side error
+- `UNAUTHENTICATED` - Missing or invalid authentication
+
+### Multiple Methods in One Service
+
+Register all four handlers with the generated aggregate function:
+
+```julia
+register_Calculator!(server;
+    Add = add,
+    Subtract = subtract,
+    Multiply = multiply,
+    Divide = divide
+)
+```
+
+Each keyword accepts a handler or a `(handler, raw_request, raw_response)`
+tuple; handler signatures are validated at registration time.
+
+### Numeric Types
+
+Proto `double` maps to Julia `Float64`. The generated types handle serialization automatically.
+
+## Testing
+
+### Run the Server
+
+```bash
+cd examples/05_calculator
+julia --project=../.. server.jl
+```
+
+Note: This example uses port 50052 (different from hello world examples).
+
+### Call Add from Julia
+
+In a second terminal, same directory, using the generated client stub (call
+`gRPCClient.grpc_init()` once before any call):
+
+```julia
+using gRPCServer
+include("generated/calculator/calculator.jl")
+using .calculator
+import gRPCClient
+
+gRPCClient.grpc_init()
+client = calculator.Calculator_Add_Client("127.0.0.1", 50052)
+resp = gRPCClient.grpc_sync_request(client, calculator.CalculatorRequest(first_number=5, second_number=3))
+@assert resp.result == 8
+println("Got: ", resp.result)
+```
+
+### Test Add
+
+```bash
+grpcurl -plaintext -d '{"first_number": 10, "second_number": 5}' \
+  localhost:50052 calculator.Calculator/Add
+```
+
+Expected output:
+```json
+{
+  "result": 15
+}
+```
+
+### Test Subtract
+
+```bash
+grpcurl -plaintext -d '{"first_number": 10, "second_number": 3}' \
+  localhost:50052 calculator.Calculator/Subtract
+```
+
+Expected output:
+```json
+{
+  "result": 7
+}
+```
+
+### Test Multiply
+
+```bash
+grpcurl -plaintext -d '{"first_number": 7, "second_number": 6}' \
+  localhost:50052 calculator.Calculator/Multiply
+```
+
+Expected output:
+```json
+{
+  "result": 42
+}
+```
+
+### Test Divide
+
+```bash
+grpcurl -plaintext -d '{"first_number": 20, "second_number": 4}' \
+  localhost:50052 calculator.Calculator/Divide
+```
+
+Expected output:
+```json
+{
+  "result": 5
+}
+```
+
+### Test Error Handling (Division by Zero)
+
+```bash
+grpcurl -plaintext -d '{"first_number": 10, "second_number": 0}' \
+  localhost:50052 calculator.Calculator/Divide
+```
+
+Expected output:
+```
+ERROR:
+  Code: InvalidArgument
+  Message: Division by zero
+```
+
+## Best Practices
+
+### Input Validation
+
+Always validate inputs before processing:
+
+```julia
+function handler(ctx::ServerContext, request::RequestType)
+    if !is_valid(request)
+        throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Invalid input: ..."))
+    end
+    # Process valid request
+end
+```
+
+### Consistent Error Messages
+
+Provide clear, actionable error messages:
+
+```julia
+# Good
+throw(GRPCError(StatusCode.INVALID_ARGUMENT, "Division by zero"))
+
+# Better
+throw(GRPCError(StatusCode.INVALID_ARGUMENT,
+    "Cannot divide $(request.first_number) by zero"))
+```
+
+### Logging
+
+Log request details for debugging:
+
+```julia
+@info "Operation" a=request.first_number b=request.second_number request_id=ctx.request_id
+```
+
+## Next Steps
+
+For production features, see [Advanced Topics](advanced.md) covering:
+- Interceptors for logging, authentication, and rate limiting
+- TLS configuration for secure connections
+- Compression for large messages
+- Health checking for load balancers
+
+---
+
+<!-- Page: Examples / Advanced — https://juliaio.github.io/gRPCServer.jl/dev/examples/advanced/ -->
+
+# Advanced Topics
+
+This page covers production-ready features for gRPCServer.jl: interceptors, TLS, compression, and more.
+
+Ordinary servers are built on the codegen interface: one `protojl` run emits
+the message types and per-service registration functions, and you register
+handlers with the generated `register_<Service>!` / `register_<Service>_<Rpc>!`
+functions. The last section of this page, "The runtime interface beneath the
+codegen", explains the descriptor-based layer those generated functions sit
+on — reach for it only when you need to build or inspect services manually.
+
+## Interceptors
+
+Interceptors allow you to add cross-cutting concerns like logging, authentication, and rate limiting. They work the same way whether the service was registered through the generated `register_*!` functions or the runtime interface.
+
+### Logging Interceptor
+
+```julia
+host = "127.0.0.1"
+port = 50051
+server = GRPCServer(host, port)
+
+add_interceptor!(server, LoggingInterceptor(
+    log_requests = true,
+    log_responses = true,
+    log_errors = true
+))
+```
+
+### Metrics Interceptor
+
+```julia
+request_counter = Ref(0)
+latencies = Float64[]
+
+add_interceptor!(server, MetricsInterceptor(
+    on_request = (method, size) -> begin
+        request_counter[] += 1
+    end,
+    on_response = (method, status, duration_ms, size) -> begin
+        push!(latencies, duration_ms)
+    end
+))
+```
+
+### Custom Authentication Interceptor
+
+```julia
+struct AuthInterceptor <: Interceptor
+    valid_tokens::Set{String}
+end
+
+function (auth::AuthInterceptor)(
+    ctx::ServerContext,
+    request::Any,
+    info::MethodInfo,
+    next::Function
+)
+    token = get_metadata_string(ctx, "authorization")
+
+    if token === nothing || !(token in auth.valid_tokens)
+        throw(GRPCError(
+            StatusCode.UNAUTHENTICATED,
+            "Invalid or missing authentication token"
+        ))
+    end
+
+    return next(ctx, request)
+end
+
+add_interceptor!(server, AuthInterceptor(Set(["token123", "token456"])))
+```
+
+### Rate Limiting Interceptor
+
+```julia
+mutable struct RateLimitInterceptor <: Interceptor
+    requests_per_second::Int
+    window_start::Float64
+    request_count::Int
+end
+
+RateLimitInterceptor(rps::Int) = RateLimitInterceptor(rps, time(), 0)
+
+function (rl::RateLimitInterceptor)(
+    ctx::ServerContext,
+    request::Any,
+    info::MethodInfo,
+    next::Function
+)
+    now = time()
+
+    if now - rl.window_start >= 1.0
+        rl.window_start = now
+        rl.request_count = 0
+    end
+
+    rl.request_count += 1
+
+    if rl.request_count > rl.requests_per_second
+        throw(GRPCError(
+            StatusCode.RESOURCE_EXHAUSTED,
+            "Rate limit exceeded"
+        ))
+    end
+
+    return next(ctx, request)
+end
+
+add_interceptor!(server, RateLimitInterceptor(100))
+```
+
+## Health Checking
+
+Health checks allow load balancers and orchestrators to monitor server status.
+
+```julia
+server = GRPCServer(host, port;
+    enable_health_check = true
+)
+
+# Set overall server health
+set_health!(server, HealthStatus.SERVING)
+
+# Set health for specific service
+set_health!(server, "my.Service", HealthStatus.SERVING)
+
+# Mark service as not ready (e.g., during maintenance)
+set_health!(server, "my.Service", HealthStatus.NOT_SERVING)
+```
+
+### Testing Health Check
+
+```bash
+grpcurl -plaintext -d '{"service": ""}' localhost:50051 grpc.health.v1.Health/Check
+```
+
+Expected output:
+```json
+{
+  "status": "SERVING"
+}
+```
+
+## TLS Configuration
+
+### Basic TLS
+
+```julia
+tls_config = TLSConfig(
+    cert_chain = "server.crt",
+    private_key = "server.key"
+)
+
+server = GRPCServer(host, port; tls = tls_config)
+```
+
+### Mutual TLS (mTLS)
+
+```julia
+tls_config = TLSConfig(
+    cert_chain = "server.crt",
+    private_key = "server.key",
+    client_ca = "ca.crt",
+    require_client_cert = true
+)
+
+server = GRPCServer(host, port; tls = tls_config)
+```
+
+### Hot Reloading Certificates
+
+```julia
+# Reload certificates without restarting server
+reload_tls!(server)
+```
+
+See the [TLS](../tls.md) page for a full walkthrough.
+
+## Compression
+
+### Server-side Compression (not yet implemented)
+
+Send-side response compression is not yet implemented on any backend: responses
+are always sent with `grpc-encoding: identity`. The configuration keywords for
+it (`compression_enabled=true`, `compression_threshold`, `supported_codecs`) are
+recognized but inert, so setting them explicitly now raises
+[`UnsupportedFeatureError`](@ref) at construction instead of being silently
+ignored:
+
+```julia
+# Raises UnsupportedFeatureError on every backend — send-side compression
+# is not implemented yet.
+server = GRPCServer(host, port;
+    supported_codecs = [CompressionCodec.GZIP, CompressionCodec.DEFLATE]
+)
+```
+
+Omit those keywords for now. **Receive-side decompression works**: the server
+accepts `grpc-encoding: gzip`/`deflate` requests and decompresses them (strictly
+on `HTTPjlBackend`, leniently on `PureHTTP2Backend`), so compressed clients are
+fully supported.
+
+### Manual Compression
+
+```julia
+using gRPCServer: compress, decompress, CompressionCodec
+
+data = Vector{UInt8}("Large data to compress...")
+
+# Compress with GZIP
+compressed = compress(data, CompressionCodec.GZIP)
+
+# Decompress
+original = decompress(compressed, CompressionCodec.GZIP)
+```
+
+## Error Handling
+
+### Returning Specific Status Codes
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    if request.id < 0
+        throw(GRPCError(
+            StatusCode.INVALID_ARGUMENT,
+            "ID must be non-negative"
+        ))
+    end
+
+    item = find_item(request.id)
+    if item === nothing
+        throw(GRPCError(
+            StatusCode.NOT_FOUND,
+            "Item not found: $(request.id)"
+        ))
+    end
+
+    if !has_permission(ctx, item)
+        throw(GRPCError(
+            StatusCode.PERMISSION_DENIED,
+            "Access denied to item $(request.id)"
+        ))
+    end
+
+    return item
+end
+```
+
+### Error Details
+
+```julia
+throw(GRPCError(
+    StatusCode.INVALID_ARGUMENT,
+    "Multiple validation errors",
+    Any[
+        Dict("field" => "email", "error" => "Invalid email format"),
+        Dict("field" => "age", "error" => "Must be positive")
+    ]
+))
+```
+
+## Context Usage
+
+### Accessing Metadata
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    # Get string metadata
+    auth = get_metadata_string(ctx, "authorization")
+
+    # Get binary metadata (keys ending in -bin)
+    trace = get_metadata_binary(ctx, "x-trace-bin")
+
+    # Check remaining time before deadline
+    remaining = remaining_time(ctx)
+    if remaining !== nothing && remaining < 1.0
+        @warn "Less than 1 second remaining"
+    end
+
+    return response
+end
+```
+
+### Setting Response Headers and Trailers
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    # Set response header
+    set_header!(ctx, "x-request-id", string(ctx.request_id))
+
+    # Set trailer (sent at end of response)
+    set_trailer!(ctx, "x-processing-time", "50ms")
+
+    return response
+end
+```
+
+## Client Streaming
+
+A service that receives multiple requests and returns a single response,
+registered with the generated codegen function:
+
+```julia
+function sum_numbers(ctx::ServerContext, stream::ClientStream{NumberRequest})
+    total = 0
+    for request in stream
+        total += request.value
+    end
+    return SumResponse(total = total)
+end
+
+# do-block per-RPC form
+register_Math_Sum!(server) do ctx, stream
+    total = 0
+    for request in stream
+        total += request.value
+    end
+    SumResponse(total = total)
+end
+```
+
+## Bidirectional Streaming
+
+A chat-like service with two-way streaming:
+
+```julia
+function chat(ctx::ServerContext, stream::BidiStream{ChatMessage, ChatMessage})
+    for message in stream
+        if is_cancelled(ctx)
+            break
+        end
+        # Echo back with prefix
+        response = ChatMessage(
+            user = "Server",
+            text = "You said: $(message.text)"
+        )
+        send!(stream, response)
+    end
+    close!(stream)
+    return nothing
+end
+
+# do-block per-RPC form
+register_Chat_Chat!(server) do ctx, stream
+    for message in stream
+        send!(stream, ChatMessage("Server", "You said: $(message.text)"))
+    end
+    close!(stream)
+    return nothing
+end
+```
+
+## Passing Application State
+
+Attach application state to the server and read it from any handler through
+`ctx.payload`:
+
+```julia
+struct AppState
+    db
+end
+
+server = GRPCServer("127.0.0.1", 50051; context = AppState(open_db()))
+
+register_MyService_GetThing!(server) do ctx, req
+    Thing(query(ctx.payload.db, req.id))
+end
+```
+
+The `context` keyword accepts any value; it is threaded untouched into every
+request's `ServerContext.payload`. Handlers never construct the state
+themselves, which makes them easy to test in isolation.
+
+## Concurrency Model
+
+The server is built on HTTP.jl, which spawns one task per inbound HTTP/2
+stream. That per-stream task is where your handler runs. Because each
+connection and each stream is independent, many RPCs are served concurrently
+as a matter of course.
+
+The `max_concurrent_requests` keyword on `GRPCServer` (default `1024`) caps
+how many RPCs run at once. When the cap is
+reached, additional requests are shed immediately with a trailers-only
+`StatusCode.RESOURCE_EXHAUSTED` status — there is no queue and no waiting.
+Pass `nothing` or `0` for an unlimited cap (the legacy csvance behavior).
+
+```julia
+server = GRPCServer("127.0.0.1", 50051;
+    max_concurrent_requests = 256
+)
+```
+
+Handler thread safety is the application's responsibility: two handlers can
+execute simultaneously on different threads and share whatever you attached as
+`context`. Guard mutable shared state (database connection pools, caches,
+counters) with the appropriate locks or atomics. For CPU-bound work, launch
+Julia with `--threads=auto`; with a single thread, tasks still interleave
+cooperatively at I/O boundaries, but CPU-bound handlers will not run in
+parallel.
+
+## Production Hardening
+
+### Authentication and authorization
+
+Authentication and authorization are the application's responsibility. The
+server does not authenticate callers. A handler reads credentials from request
+metadata and rejects the call with the appropriate status:
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    token = get_metadata_string(ctx, "authorization")
+    if token === nothing || !is_valid(token)
+        throw(GRPCError(StatusCode.UNAUTHENTICATED, "Missing or invalid credentials"))
+    end
+    if !authorized(token, request)
+        throw(GRPCError(StatusCode.PERMISSION_DENIED, "Access denied"))
+    end
+    return response
+end
+```
+
+### Transport
+
+Use TLS in production. The default is cleartext HTTP/2 (h2c); pass
+`tls = TLSConfig(...)` to serve h2. Cleartext should only be used behind a
+trusted boundary, for example a localhost sidecar or a TLS-terminating proxy.
+See [TLS](../tls.md).
+
+### Concurrency cap
+
+`max_concurrent_requests` ships enabled with a conservative default of `1024`
+(HTTP.jl allows 100 concurrent streams per connection, so without a cap N
+connections imply 100·N concurrent handler tasks). Still size it explicitly to
+the host's memory and the configured `max_message_size` in production; a cap
+that is too small sheds legitimate load with `RESOURCE_EXHAUSTED`, while one
+that is too large lets a flood consume all available memory.
+
+### Connection timeouts
+
+Connection timeouts default to `read_header_timeout = 30` seconds, which reaps
+slow-header connections without disturbing established streams, and
+`idle_timeout = 300` seconds, which closes connections that stop sending bytes
+(including one holding a partial request body, bounding slow-body memory
+accrual). `read_timeout` and `write_timeout` are disabled by default; enabling
+them defends against a peer that trickles or never finishes a request or
+response body, but a non-zero `read_timeout` also terminates legitimately
+idle long-lived streaming RPCs, so set it only for unary or short-lived
+workloads.
+
+### Deadlines and cancellation
+
+The `grpc-timeout` header is parsed strictly into `ctx.deadline` (a malformed
+value fails the call with `INVALID_ARGUMENT`). The deadline is enforced at two
+points, and **never while your handler is running**:
+
+- **Pre-dispatch**: if the deadline has already passed when the request reaches
+the handler (a zero timeout, or queueing delay past the deadline), the call
+fails fast with a trailers-only `DEADLINE_EXCEEDED` and your handler is never
+invoked.
+- **Post-return**: once your handler returns, a deadline that has since passed
+maps the result to `DEADLINE_EXCEEDED` (a status your handler already produced
+as `DEADLINE_EXCEEDED`/`CANCELLED` is left untouched).
+
+A handler that runs past its deadline is **not interrupted** — it runs to
+completion, and only then is its result mapped. There is no watchdog-based
+cancellation yet. Handlers that must bound their own runtime should check
+`remaining_time(ctx)` / `is_cancelled(ctx)` cooperatively (the gRPC
+interceptors work here too — see `TimeoutInterceptor`, which is also
+pre-check-only):
+
+```julia
+function my_handler(ctx::ServerContext, request)
+    remaining = remaining_time(ctx)
+    if remaining !== nothing && remaining <= 0
+        throw(GRPCError(StatusCode.DEADLINE_EXCEEDED, "Deadline exceeded"))
+    end
+    # ... work, checking is_cancelled(ctx) between long steps
+end
+```
+
+A long-running handler that ignores the deadline is a resource-exhaustion
+vector: it ties up a stream (and memory) for as long as it runs. Pair
+cooperative deadline checks with a `max_concurrent_requests` cap sized to your
+workload, and keep `idle_timeout` enabled, so that a flood of slow or
+never-completing calls cannot pile up unbounded handlers.
+
+## The Runtime Interface Beneath the Codegen
+
+The generated `register_<Service>_<Rpc>!` functions build a `MethodDescriptor`
+and call `register_method!` on the server's dispatcher. You normally never do
+this by hand, but the pieces are public so custom registration flows are
+possible.
+
+### Descriptor builders
+
+Each `*_Method` builder creates a `MethodDescriptor` for one RPC:
+
+```julia
+method = MyService_GetThing_Method((ctx, req) -> Thing(req.id))
+
+# raw variants: receive/return undecoded Vector{UInt8} payloads
+method = MyService_GetThing_Method((ctx, raw) -> raw; raw_request = true, raw_response = true)
+```
+
+### Manual service registration
+
+Build a `ServiceDescriptor` and register it with `register!`, or register a
+single method with `register_method!`:
+
+```julia
+struct MyService end
+
+function gRPCServer.service_descriptor(::MyService)
+    ServiceDescriptor(
+        "pkg.MyService",
+        Dict(
+            "GetThing" => MyService_GetThing_Method((ctx, req) -> Thing(req.id))
+        ),
+        nothing
+    )
+end
+
+register!(server, MyService())
+
+# or, for a single method:
+register_method!(server.dispatcher, "pkg.MyService",
+    MyService_GetThing_Method((ctx, req) -> Thing(req.id)))
+```
+
+`register_method!` is what the generated `register_*!` functions call
+internally. See the [API Reference](../api.md) for the full surface
+(`MethodDescriptor`, `ServiceDescriptor`, `register!`, `register_method!`).
+
+## Graceful Shutdown
+
+```julia
+server = GRPCServer(host, port)
+register_Greeter!(server; SayHello = say_hello)
+
+# Run in background task
+server_task = @async run(server; block = true)
+
+# Later, initiate graceful shutdown
+@info "Shutting down..."
+stop!(server; timeout = 30.0)
+
+# Wait for server to stop
+wait(server_task)
+@info "Server stopped"
+```
+
+## Next Steps
+
+- [API Reference](../api.md) - Complete API documentation
+- [Quick Start](../quickstart.md) - Getting started guide
+- [Code Generation](../code_generation.md) - The codegen interface in detail

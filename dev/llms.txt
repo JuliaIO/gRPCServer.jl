@@ -1,0 +1,22 @@
+# gRPCServer.jl
+
+> A production-ready gRPC server in Julia: four RPC patterns, three HTTP/2 backends, one API.
+
+The full documentation is also available as a single Markdown file: https://juliaio.github.io/gRPCServer.jl/dev/llms-full.txt
+
+## Documentation
+
+- [Home](https://juliaio.github.io/gRPCServer.jl/dev/): gRPCServer.jl is a native Julia gRPC server: the default HTTP.jl backend serves unary and streaming RPCs out of the box, with TLS/mTLS, interceptors, health, and reflection built in.
+- [Quick Start](https://juliaio.github.io/gRPCServer.jl/dev/quickstart/): This guide demonstrates how to create a gRPC server in Julia using gRPCServer.jl.
+- [Code Generation](https://juliaio.github.io/gRPCServer.jl/dev/code_generation/): gRPCServer integrates with ProtoBuf.jl through an external code generation handler.
+- [TLS](https://juliaio.github.io/gRPCServer.jl/dev/tls/): gRPCServer.jl supports TLS-secured gRPC with real server-side ALPN negotiation.
+- [HTTP/2 Backends](https://juliaio.github.io/gRPCServer.jl/dev/http2-backends/): gRPCServer.jl uses a pluggable HTTP/2 backend architecture.
+- [Performance](https://juliaio.github.io/gRPCServer.jl/dev/performance/): The framing layer reads request bytes directly into a single reusable buffer and hands the decoder a view into it, so a received message is not copied between the socket and ProtoBuf decoding.
+- [API Reference](https://juliaio.github.io/gRPCServer.jl/dev/api/): The generated register_<Service>_<Rpc>! functions build a MethodDescriptor for each RPC and call register_method! on the server's dispatcher; use the generated functions for normal services.
+- [Examples / Overview](https://juliaio.github.io/gRPCServer.jl/dev/examples//): This guide walks you through gRPCServer.jl examples in progressive order, from basic concepts to advanced patterns.
+- [Examples / Hello World](https://juliaio.github.io/gRPCServer.jl/dev/examples/01_hello_world/): This is the simplest gRPCServer.jl example, demonstrating a basic unary RPC (single request, single response).
+- [Examples / Hello Stream](https://juliaio.github.io/gRPCServer.jl/dev/examples/02_hello_stream/): This example builds on 01_hello_world by adding server streaming, where a single request receives multiple responses over time.
+- [Examples / Sum Numbers](https://juliaio.github.io/gRPCServer.jl/dev/examples/03_sum_numbers/): This example demonstrates client streaming RPC, where the client sends multiple requests and receives a single response after all requests are processed.
+- [Examples / Chat](https://juliaio.github.io/gRPCServer.jl/dev/examples/04_chat/): This example demonstrates bidirectional streaming RPC, where both client and server can send multiple messages simultaneously.
+- [Examples / Calculator](https://juliaio.github.io/gRPCServer.jl/dev/examples/05_calculator/): This example demonstrates a gRPC service with multiple methods and proper error handling.
+- [Examples / Advanced](https://juliaio.github.io/gRPCServer.jl/dev/examples/advanced/): This page covers production-ready features for gRPCServer.jl: interceptors, TLS, compression, and more.
