@@ -1,6 +1,5 @@
 # gRPCServer.jl
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/csvance/gRPCServer.jl)
 [![Build Status](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/csvance/gRPCServer.jl/actions/workflows/CI.yml)
 [![Coverage](https://codecov.io/gh/csvance/gRPCServer.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/csvance/gRPCServer.jl)
 [![Documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://csvance.github.io/gRPCServer.jl/dev)
@@ -27,7 +26,3 @@ Full documentation is available at [csvance.github.io/gRPCServer.jl](https://csv
 
 - [gRPCClient.jl](https://github.com/JuliaIO/gRPCClient.jl) - gRPC client for Julia
 - [ProtoBuf.jl](https://github.com/JuliaIO/ProtoBuf.jl) - Protocol buffer support for Julia
-
-## License
-
-MIT License - see LICENSE file for details.
