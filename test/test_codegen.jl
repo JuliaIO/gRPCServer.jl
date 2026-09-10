@@ -69,3 +69,48 @@
         @test contains(generated, "TestService_TestRPC_Client(")
     end
 end
+
+# Regression: a .proto with NO `package` declaration.
+#
+# The service registration used to interpolate the (empty) namespace
+# unconditionally, so the fully-qualified service name came out as
+# ".NoPackageService" and the server registered "/.NoPackageService/NoPackageRPC".
+# Clients request "/NoPackageService/NoPackageRPC", so every call failed with
+# UNIMPLEMENTED "Method not found" even though the server logged the service as
+# registered. The generated docstrings carried the same leading dot, which is why
+# nothing internal caught it.
+#
+# The assertions are scoped to the block gRPCServer.jl emits: gRPCClient.jl,
+# whose handler writes into the same file, has the same leading-dot bug in its
+# client stub path, and that is not this package's to fix here.
+@testset "Code Generation (no package declaration)" begin
+    mktempdir() do tmpdir
+        @test isnothing(
+            protojl("proto/nopackage.proto", @__DIR__, tmpdir; always_use_modules = true, add_kwarg_constructors = true),
+        )
+        generated = read(joinpath(tmpdir, "nopackage_pb.jl"), String)
+        server_block = split(split(generated, "# gRPCServer.jl BEGIN")[2], "# gRPCServer.jl END")[1]
+
+        # The registered service name is the bare service name, with no leading dot.
+        @test contains(
+            server_block,
+            "gRPCServer.register_method!(server.dispatcher, \"NoPackageService\", NoPackageService_NoPackageRPC_Method(handler; raw_request=raw_request, raw_response=raw_response))",
+        )
+
+        # The gRPC path in the docstrings must match what a client requests.
+        @test contains(server_block, "`/NoPackageService/NoPackageRPC`")
+
+        # No leading dot anywhere in the emitted server block.
+        @test !contains(server_block, ".NoPackageService")
+
+        # Message type references stay unqualified for a package-less proto.
+        @test contains(
+            server_block,
+            "gRPCServer.MethodDescriptor(\"NoPackageRPC\", gRPCServer.MethodType.UNARY, NoPackageRequest, NoPackageResponse, handler; raw_request=raw_request, raw_response=raw_response)",
+        )
+
+        # The emitted file must be syntactically valid Julia; a leading dot in a
+        # type position would be a parse error.
+        @test Meta.parseall(generated) isa Expr
+    end
+end
