@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Services from a `.proto` with no `package` declaration are registered under
+  their bare name, not `.Service`.** The generated registration interpolated the
+  (empty) package namespace unconditionally, so the fully-qualified service name
+  came out as `".Service"` and the server registered the path
+  `/.Service/Rpc`. Clients request `/Service/Rpc`, so every call failed with
+  `UNIMPLEMENTED "Method not found: /Service/Rpc"` while the server started
+  cleanly and logged the service as registered. The generated docstrings carried
+  the same leading dot, so the emission was self-consistently wrong.
+
 ## [0.1.0] - Unreleased
 
 First public release, registered in General under the `JuliaIO` organization.

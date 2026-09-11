@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+// No `package` declaration: the generated service must register the bare
+// service name, not a name with a leading dot.
+
+service NoPackageService {
+  rpc NoPackageRPC(NoPackageRequest) returns (NoPackageResponse) {}
+}
+
+message NoPackageRequest {
+  uint64 value = 1;
+}
+
+message NoPackageResponse {
+  uint64 value = 1;
+}

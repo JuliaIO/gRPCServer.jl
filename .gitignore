@@ -56,6 +56,10 @@
 !test/fixtures/
 !test/fixtures/*.jl
 
+# Codegen .proto fixtures (test/proto/test.proto predates the deny-by-default
+# whitelist and was tracked before it; new fixtures need an explicit rule)
+!test/proto/*.proto
+
 # Examples
 !examples/
 !examples/**

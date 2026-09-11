@@ -24,7 +24,9 @@
 
 function _resolve_type_name(ref::CodeGenerators.ReferencedType)
     name = ref.name
-    if ref.package_namespace !== nothing
+    # An absent namespace is `nothing`, but guard the empty string too: joining
+    # it would emit a leading dot (".Msg"), which is not a valid Julia name.
+    if ref.package_namespace !== nothing && !isempty(ref.package_namespace)
         name = join([ref.package_namespace, name], ".")
     end
     return name
@@ -176,7 +178,12 @@ end
 function service_cb(io, t::CodeGenerators.ServiceType, ctx::CodeGenerators.Context)
     namespace = join(ctx.proto_file.preamble.namespace, ".")
     service_name = t.name
-    service_full = "$namespace.$service_name"
+    # A .proto with no `package` declaration has an empty namespace; the
+    # fully-qualified service name is then the bare service name. Interpolating
+    # the empty namespace unconditionally would emit ".Service", so the server
+    # would register "/.Service/Rpc" while every client requests "/Service/Rpc"
+    # (UNIMPLEMENTED: "Method not found").
+    service_full = isempty(namespace) ? service_name : "$namespace.$service_name"
 
     do_export =
         CodeGenerators.is_namespaced(ctx.proto_file) || ctx.options.always_use_modules
