@@ -145,6 +145,10 @@ function serve_grpc(::gRPCServer.Nghttp2Backend, server, on_call)
     return Nghttp2Wrapper.HTTP2Server(handler, server.port; host = server.host)
 end
 
+# The listener's real port, so an ephemeral (port 0) request resolves.
+gRPCServer.backend_bound_port(::gRPCServer.Nghttp2Backend, handle) =
+    Nghttp2Wrapper.listener_port(handle)
+
 """
     stop_serving!(::Nghttp2Backend, server; force, timeout)
 

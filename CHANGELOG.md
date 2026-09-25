@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ephemeral ports: `GRPCServer(host, 0)` binds an OS-chosen port, and the new
+  `bound_port(server)` reports it** ([#4](https://github.com/JuliaIO/gRPCServer.jl/issues/4)).
+  The constructor used to reject port 0, so callers that needed a race-free
+  listener either mutated `server.port = 0` before `start!` or probed for a free
+  port and rebound it, which leaves a window for another process to take it.
+  `bound_port` is read back from the listener after it is accepting, for the
+  HTTP.jl, PureHTTP2, and nghttp2 backends, with and without TLS. It returns
+  `nothing` before `start!`, after `stop!`, and after a failed `start!`, so a
+  configured port is never reported as bound. `HTTP.port(server)`,
+  `address(server)`, and `show` now use the bound port while the server is
+  listening. Backends signal their port through the new `backend_bound_port`
+  hook, whose default reads `HTTP.port(handle)`.
+
 ### Fixed
 
 - **Services from a `.proto` with no `package` declaration are registered under

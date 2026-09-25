@@ -26,6 +26,7 @@
 using Test
 using gRPCServer
 using Nghttp2Wrapper
+using Sockets
 using gRPCClient
 
 const GRPCCLIENT_DIR = joinpath(@__DIR__, "..", "integration", "grpcclient")
@@ -69,6 +70,21 @@ include(joinpath(GRPCCLIENT_DIR, "remote_harness.jl"))
             "127.0.0.1", 50215;
             tls=TLSConfig(cert_chain="/fake/server.crt", private_key="/fake/server.key")) isa GRPCServer
         @test GRPCServerNghttp2("127.0.0.1", 50216; enable_health_check=true) isa GRPCServer
+    end
+
+    @testset "port 0 binds an ephemeral port that bound_port reports" begin
+        server = GRPCServerNghttp2("127.0.0.1", 0)
+        @test bound_port(server) === nothing
+        start!(server)
+        try
+            port = bound_port(server)
+            @test port isa Int && port > 0
+            @test gRPCServer.HTTP.port(server) == port
+            close(Sockets.connect("127.0.0.1", port))
+        finally
+            stop!(server; force = true)
+        end
+        @test bound_port(server) === nothing
     end
 
     grpc_init()

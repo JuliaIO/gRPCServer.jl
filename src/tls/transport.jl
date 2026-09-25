@@ -140,6 +140,18 @@ end
 
 Base.isopen(t::TLSTransport)::Bool = isopen(t.listener)
 
+"""
+    listener_port(t::TLSTransport) -> Int
+
+The TCP port the transport's listener is bound to (the real port when it was
+created with port `0`).
+"""
+function listener_port(t::TLSTransport)::Int
+    laddr = Reseau.TLS.addr(t.listener)
+    laddr === nothing && throw(ErrorException("TLS listener has no bound address"))
+    return Int(laddr.port)
+end
+
 function Base.close(t::TLSTransport)
     try
         close(t.listener)

@@ -18,8 +18,7 @@ gRPCClient.grpc_init()
     # as INTERNAL with a generic message (no handler internals leaked), an explicit
     # GRPCError must pass its status and message through verbatim, and a normal
     # value must still round-trip.
-    server = gRPCServer.GRPCServer("127.0.0.1", 1)
-    server.port = 0  # ephemeral (GRPCServer rejects port 0; HTTP.port reads the bound port)
+    server = gRPCServer.GRPCServer("127.0.0.1", 0)  # ephemeral; HTTP.port reads the bound port
     register_TestService_TestRPC!(server) do ctx, req
         if req.test_response_sz == 1
             error("internal handler detail that must not leak")

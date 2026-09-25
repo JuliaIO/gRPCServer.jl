@@ -55,11 +55,10 @@
 
         # Ephemeral port: the constructor rejects 0, so construct with a
         # placeholder and mutate before start! (the testservice.jl trick).
-        server = GRPCServer("127.0.0.1", 1)
+        server = GRPCServer("127.0.0.1", 0)
         register_TestService_TestServerStreamRPC!(server, typed_ss)
         register_TestService_TestClientStreamRPC!(server, typed_cs)
         register_TestService_TestBidirectionalStreamRPC!(server, typed_bidi)
-        server.port = 0
         start!(server)
         port = gRPCServer.HTTP.port(server)
         sleep(0.3)
@@ -115,11 +114,10 @@
         # stop! used to return before notifying shutdown_event on the serve_grpc
         # path, leaving a task blocked in run(block=true) waiting on a signal
         # that never fired.
-        server = GRPCServer("127.0.0.1", 1)
+        server = GRPCServer("127.0.0.1", 0)
         register_TestService_TestRPC!(server) do ctx, req
             TestResponse(collect(UInt64, 1:req.test_response_sz))
         end
-        server.port = 0
         server_task = @async run(server; block = true)
         sleep(0.5)  # let run() start the server
 

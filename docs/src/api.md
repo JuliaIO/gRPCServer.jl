@@ -106,6 +106,7 @@ has_reflection_descriptor
 ```@docs
 start!
 stop!
+bound_port
 ```
 
 ## TLS

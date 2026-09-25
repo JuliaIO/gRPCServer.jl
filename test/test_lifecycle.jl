@@ -154,13 +154,10 @@ end
 # (with their handler closures) must be registered BEFORE start! — registering
 # after start! hits a Julia world-age MethodError ("method too new to be called
 # from this world context") because the dispatch path was compiled before the
-# closure type existed. GRPCServer's constructor rejects port 0, so construct
-# with a placeholder and mutate (the legacy serve! trick); HTTP.port(server)
-# reports the real bound port after start!.
+# closure type existed. Port 0 is ephemeral; HTTP.port(server) reports the
+# real bound port after start!.
 function _new_custom_server(; kwargs...)
-    server = GRPCServer("127.0.0.1", 1; kwargs...)
-    server.port = 0
-    return server
+    return GRPCServer("127.0.0.1", 0; kwargs...)
 end
 
 _unary_echo = (ctx, req) -> TestResponse(collect(UInt64, 1:req.test_response_sz))

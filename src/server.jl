@@ -29,7 +29,7 @@ The main gRPC server managing connections, services, and lifecycle.
 
 # Fields
 - `host::String`: Server bind address
-- `port::Int`: Server port
+- `port::Int`: Configured port (`0` requests an ephemeral port; see [`bound_port`](@ref))
 - `config::ServerConfig`: Server configuration
 - `status::ServerStatus.T`: Current lifecycle state
 - `dispatcher::RequestDispatcher`: Request dispatcher
@@ -106,6 +106,11 @@ mutable struct GRPCServer
     # (feature 6). Not touched by the transport.
     context::Any
 
+    # Port the listener actually bound, read back from the backend once
+    # serve_grpc returns (so it is set only while the listener is ready) and
+    # cleared on stop! or a failed start!. Differs from `port` when `port == 0`.
+    bound_port::Union{Int, Nothing}
+
     function GRPCServer(
         host::String,
         port::Int;
@@ -113,9 +118,10 @@ mutable struct GRPCServer
         context::Any=nothing,
         kwargs...
     )
-        # Validate host and port
-        if port < 1 || port > 65535
-            throw(ArgumentError("Port must be between 1 and 65535: $port"))
+        # Validate host and port. 0 asks the OS for an ephemeral port; the
+        # real one is available from `bound_port(server)` after start!.
+        if port < 0 || port > 65535
+            throw(ArgumentError("Port must be between 0 and 65535 (0 requests an ephemeral port): $port"))
         end
 
         # The configuration keywords are captured by `kwargs...` (none are
@@ -164,6 +170,7 @@ mutable struct GRPCServer
             Base.Threads.Atomic{Int}(0),  # inflight (load-shedding counter)
             Base.Threads.Atomic{Int}(0),  # shed_total (load-shedding counter)
             context,                      # threaded into ServerContext.payload
+            nothing,                      # bound_port - set in start!()
         )
 
         # Add logging interceptor if requested
@@ -280,6 +287,7 @@ function start!(server::GRPCServer)
 
     server.status = ServerStatus.STARTING
     server.last_error = nothing
+    server.bound_port = nothing
     # Base.Event is level-triggered; clear any signal from a previous stop so
     # run(block=true) blocks until the NEXT stop instead of waking instantly.
     Base.reset(server.shutdown_event)
@@ -303,8 +311,9 @@ function start!(server::GRPCServer)
                 server.http2_backend, server,
                 (gs, peer) -> dispatch_grpc_call(server, gs, peer),
             )
+            server.bound_port = backend_bound_port(server.http2_backend, server.backend_handle)
             server.status = ServerStatus.RUNNING
-            @info "gRPC server started" host=server.host port=server.port tls=(server.config.tls !== nothing) backend=nameof(typeof(server.http2_backend))
+            @info "gRPC server started" host=server.host port=server.bound_port tls=(server.config.tls !== nothing) backend=nameof(typeof(server.http2_backend))
             return
         end
 
@@ -350,6 +359,16 @@ function start!(server::GRPCServer)
             "instead."))
 
     catch e
+        # A listener that came up before the failure (e.g. its bound port could
+        # not be read back) must not outlive a start! that reports failure.
+        if server.backend_handle !== nothing
+            try
+                stop_serving!(server.http2_backend, server.backend_handle; force = true)
+            catch
+            end
+            server.backend_handle = nothing
+        end
+        server.bound_port = nothing
         server.status = ServerStatus.STOPPED
         server.last_error = e
         if e isa TLSHandshakeError
@@ -428,6 +447,7 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
         stop_serving!(server.http2_backend, server.backend_handle;
                       force = force, timeout = timeout)
         server.backend_handle = nothing
+        server.bound_port = nothing
         server.status = ServerStatus.STOPPED
         @info "gRPC server stopped"
         notify(server.shutdown_event)
@@ -530,17 +550,36 @@ function HTTP.forceclose(server::GRPCServer)
 end
 
 """
-    HTTP.port(server::GRPCServer)
+    bound_port(server::GRPCServer) -> Union{Int, Nothing}
 
-Bound port. With `port=0` (ephemeral — construct with a placeholder and mutate
-before `start!`) the real port lives on the HTTP.jl backend handle after
-`start!`.
+The port the server's listener is bound to, or `nothing` when it is not
+listening (before [`start!`](@ref), after [`stop!`](@ref), or after a failed
+`start!`). With every built-in backend and with or without TLS, the value is
+set only once the listener is accepting, so a client may connect to it as soon
+as `start!` returns.
+
+Construct with port `0` to have the OS pick a free port, which avoids the race
+of probing for a free port and binding it later:
+
+```julia
+server = GRPCServer("127.0.0.1", 0)
+register!(server, GreeterService())
+start!(server)
+port = bound_port(server)
+```
 """
-function HTTP.port(server::GRPCServer)
-    if server.port == 0 && server.backend_handle !== nothing
-        return HTTP.port(server.backend_handle)
-    end
-    return server.port
+bound_port(server::GRPCServer)::Union{Int, Nothing} = server.bound_port
+
+"""
+    HTTP.port(server::GRPCServer) -> Int
+
+The bound port while the server is listening, otherwise the configured port
+(`0` for an ephemeral request), matching `HTTP.port(::HTTP.Server)`. Use
+[`bound_port`](@ref) to tell the two cases apart.
+"""
+function HTTP.port(server::GRPCServer)::Int
+    bp = server.bound_port
+    return bp === nothing ? server.port : bp
 end
 
 """
@@ -1459,7 +1498,7 @@ end
 # Base method overloads
 
 function Base.show(io::IO, server::GRPCServer)
-    print(io, "GRPCServer($(server.host):$(server.port), status=$(server.status)")
+    print(io, "GRPCServer($(server.host):$(HTTP.port(server)), status=$(server.status)")
     print(io, ", services=$(length(services(server)))")
     if server.config.tls !== nothing
         # "active" once TLS is actually serving: PureHTTP2 sets tls_transport,
@@ -1487,8 +1526,9 @@ end
 """
     address(server::GRPCServer) -> String
 
-Get the server address as "host:port".
+Get the server address as "host:port", using the bound port while the server is
+listening (see [`bound_port`](@ref)).
 """
 function address(server::GRPCServer)::String
-    return "$(server.host):$(server.port)"
+    return "$(server.host):$(HTTP.port(server))"
 end

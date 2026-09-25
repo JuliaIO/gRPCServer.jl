@@ -26,12 +26,10 @@ function _pb_encode(msg)
 end
 _pb_decode(::Type{T}, bytes) where {T} = decode(ProtoDecoder(IOBuffer(bytes)), T)
 
-# Start a server with the given descriptor on an ephemeral port (GRPCServer
-# rejects port 0, so construct with a placeholder and mutate — the legacy serve!
-# trick; HTTP.port reads the bound port after start!). The caller stops it.
+# Start a server with the given descriptor on an ephemeral port (port 0;
+# HTTP.port reads the bound port after start!). The caller stops it.
 function _start_raw_server(descriptor::ServiceDescriptor)
-    server = GRPCServer("127.0.0.1", 1)
-    server.port = 0
+    server = GRPCServer("127.0.0.1", 0)
     gRPCServer.register_service!(server.dispatcher, descriptor)
     start!(server)
     return server, HTTP.port(server)
@@ -161,10 +159,8 @@ end
 # generated *_Client constructor's TRequest/TResponse type-override kwargs, as
 # emitted into gen/test/test_pb.jl.
 @testset "Raw codegen stubs end-to-end" begin
-    # Port 0 = ephemeral: GRPCServer's constructor rejects 0, so construct with a
-    # placeholder and mutate, exactly as the legacy serve! does.
-    server = gRPCServer.GRPCServer("127.0.0.1", 50000)
-    server.port = 0
+    # Port 0 = ephemeral; HTTP.port reads the bound port after start!.
+    server = gRPCServer.GRPCServer("127.0.0.1", 0)
     register_TestService_TestRPC!(server; raw_request = true, raw_response = true) do ctx, req::Vector{UInt8}
         decoded = _pb_decode(TestRequest, req)
         return _pb_encode(TestResponse(collect(UInt64, 1:decoded.test_response_sz)))
@@ -201,8 +197,7 @@ end
 
     # recv cap small (4 KiB), send cap large (1 MiB): a big response passes,
     # a big request is rejected with RESOURCE_EXHAUSTED before dispatch.
-    server = GRPCServer("127.0.0.1", 1; max_receive_message_length = 4096, max_send_message_length = 1 * 1024 * 1024)
-    server.port = 0
+    server = GRPCServer("127.0.0.1", 0; max_receive_message_length = 4096, max_send_message_length = 1 * 1024 * 1024)
     register_TestService_TestRPC!(server) do ctx, req
         TestResponse(collect(UInt64, 1:req.test_response_sz))
     end
@@ -227,8 +222,7 @@ end
 
     # recv cap large (1 MiB), send cap small (4 KiB): a big request passes
     # through the recv cap, but the ~5.9 KiB response is rejected on the send side.
-    server = GRPCServer("127.0.0.1", 1; max_receive_message_length = 1 * 1024 * 1024, max_send_message_length = 4096)
-    server.port = 0
+    server = GRPCServer("127.0.0.1", 0; max_receive_message_length = 1 * 1024 * 1024, max_send_message_length = 4096)
     register_TestService_TestRPC!(server) do ctx, req
         TestResponse(collect(UInt64, 1:req.test_response_sz))
     end

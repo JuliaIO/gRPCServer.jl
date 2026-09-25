@@ -252,6 +252,20 @@ working unchanged.
 uses_serve_grpc(::AbstractHTTP2Backend) = false
 
 """
+    backend_bound_port(backend, handle) -> Int
+
+The port the listener behind `handle` (the value [`serve_grpc`](@ref) returned)
+is bound to. `start!` calls it once `serve_grpc` returns to resolve an
+ephemeral (`port = 0`) request into the real port reported by
+[`bound_port`](@ref).
+
+The default asks `HTTP.port(handle)`, which covers `HTTP.Server`. A backend
+whose handle is something else overrides this; a failure here fails `start!`
+and shuts the listener down.
+"""
+backend_bound_port(::AbstractHTTP2Backend, handle)::Int = HTTP.port(handle)
+
+"""
     stop_serving!(backend, handle; force, timeout)
 
 Shut down the handle returned by [`serve_grpc`](@ref).
