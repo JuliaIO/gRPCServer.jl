@@ -140,8 +140,7 @@ end
     # Build manually so the custom handler is registered BEFORE start! (new
     # closure types cannot be registered after the dispatch path is compiled)
     # and the payload is threaded through the GRPCServer constructor.
-    server = gRPCServer.GRPCServer("127.0.0.1", 1; context = CtxProbe(3))
-    server.port = 0
+    server = gRPCServer.GRPCServer("127.0.0.1", 0; context = CtxProbe(3))
     register_TestService_TestRPC!(server) do ctx, req
         @test ctx.payload isa CtxProbe
         TestResponse(collect(UInt64, 1:(req.test_response_sz + ctx.payload.bump)))

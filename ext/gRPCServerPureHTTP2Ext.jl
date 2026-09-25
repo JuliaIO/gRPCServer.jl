@@ -354,17 +354,14 @@ mutable struct PureHTTP2ServeHandle
     end
 end
 
-# Bound port for the HTTP.port(server) bridge: HTTPjl's handle is an HTTP.Server
-# with its own HTTP.port method; the PureHTTP2 handle reports the listener's
-# bound port (relevant for ephemeral ports where server.port was mutated to 0).
+# Bound port of the cleartext socket or TLS listener, read back from the OS so
+# an ephemeral (port 0) request resolves to the real port.
 function HTTP.port(handle::PureHTTP2ServeHandle)
     if handle.socket !== nothing
         return Int(getsockname(handle.socket)[2])
     end
     if handle.transport !== nothing
-        # TLSTransport wraps a Reseau listener; fall back to the configured port
-        # (ephemeral TLS ports would need a getsockname on the Reseau listener).
-        return handle.server === nothing ? 0 : handle.server.port
+        return gRPCServer.listener_port(handle.transport)
     end
     return 0
 end

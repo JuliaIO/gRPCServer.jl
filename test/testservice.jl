@@ -18,7 +18,7 @@ RPC types with echo semantics) registered through the generated
 `register_TestService_<Rpc>!` functions. `kwargs...` go to the `GRPCServer`
 constructor (max_message_size, max_concurrent_requests, idle_timeout, ...).
 """
-function build_test_server(; port::Int=1, kwargs...)
+function build_test_server(; port::Int=0, kwargs...)
     server = gRPCServer.GRPCServer("127.0.0.1", port; kwargs...)
 
     register_TestService_TestRPC!(server) do ctx, req
@@ -56,14 +56,10 @@ end
     start_test_server(host="127.0.0.1", port=0; context=nothing, kwargs...) -> GRPCServer
 
 Build ([`build_test_server`](@ref)) and start a TestService server. `port=0`
-binds an ephemeral port — `GRPCServer`'s constructor rejects 0, so construct
-with a placeholder port and mutate before `start!` (the same trick the legacy
-`serve!` used); `HTTP.port(server)` then reports the real bound port.
+binds an ephemeral port; `HTTP.port(server)` then reports the real bound port.
 """
 function start_test_server(host="127.0.0.1", port=0; context=nothing, kwargs...)
-    construct_port = port == 0 ? 1 : Int(port)
-    server = build_test_server(; port=construct_port, context=context, kwargs...)
-    port == 0 && (server.port = 0)
+    server = build_test_server(; port=Int(port), context=context, kwargs...)
     gRPCServer.start!(server)
     return server
 end

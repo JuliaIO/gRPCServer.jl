@@ -80,6 +80,7 @@ const PUREHTTP2_TESTS = get(ENV, "GRPCSERVER_TEST_PUREHTTP2", "false") in ("true
     include("integration/test_health.jl")
     include("integration/test_tls.jl")
     include("integration/test_tls_interop.jl")
+    include("integration/test_ephemeral_port.jl")
 
     # gRPCClient integration tests
     include("integration/test_grpcclient.jl")

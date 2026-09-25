@@ -141,7 +141,7 @@ export Interceptor, MethodInfo
 export LoggingInterceptor, MetricsInterceptor, TimeoutInterceptor, RecoveryInterceptor
 
 # Server Lifecycle
-export start!, stop!
+export start!, stop!, bound_port
 # Note: run is extended from Base, no need to export
 
 # Service Registration
