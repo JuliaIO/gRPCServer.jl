@@ -69,6 +69,26 @@ end
         end
     end
 
+    # A fixed, non-zero port must keep working unchanged: bound_port reports the
+    # configured port while listening, and HTTP.port falls back to it when stopped.
+    @testset "HTTPjl fixed port" begin
+        port = rand(53300:53399)
+        server = GRPCServer("127.0.0.1", port; http2_backend = HTTPjlBackend())
+        @test bound_port(server) === nothing
+        @test HTTP.port(server) == port
+        start!(server)
+        try
+            @test bound_port(server) == port
+            @test HTTP.port(server) == port
+            @test gRPCServer.address(server) == "127.0.0.1:$port"
+            close(Sockets.connect("127.0.0.1", port))
+        finally
+            stop!(server; force = true)
+        end
+        @test bound_port(server) === nothing
+        @test HTTP.port(server) == port
+    end
+
     @testset "two ephemeral servers get distinct ports" begin
         a = GRPCServer("127.0.0.1", 0)
         b = GRPCServer("127.0.0.1", 0)
