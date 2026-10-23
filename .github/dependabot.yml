@@ -1,13 +1,22 @@
-# Keeps the GitHub Actions used by CI current.
-#
-# Without this the pinned actions silently fall behind until GitHub deprecates
-# their Node runtime and every job starts printing a warning — which is exactly
-# what happened with the node20 deprecation.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "monthly"
-    commit-message:
-      prefix: "ci"
+      interval: "weekly"
+    groups:
+      all-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "julia"
+    directories:
+      - "/"
+      - "/docs"
+      - "/benchmark"
+    schedule:
+      interval: "weekly"
+    groups:
+      all-julia-packages:
+        patterns:
+          - "*"
