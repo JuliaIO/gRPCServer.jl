@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly and logged the service as registered. The generated docstrings carried
   the same leading dot, so the emission was self-consistently wrong.
 
+### Changed
+
+- **Dependabot now raises `[compat]` bounds and replaces CompatHelper.** It
+  covers the package, `docs/` and `benchmark/` projects, with all Julia updates
+  grouped into one weekly PR. GitHub Actions updates move from monthly to weekly
+  and are grouped into one PR as well. This matches the gRPCClient.jl setup.
+
 ## [0.1.0] - Unreleased
 
 First public release, registered in General under the `JuliaIO` organization.
