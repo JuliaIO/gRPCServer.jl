@@ -441,16 +441,20 @@ end
     dispatch_unary(
         dispatcher::RequestDispatcher,
         ctx::ServerContext,
-        request_data::Vector{UInt8}
+        request_data::Union{AbstractVector{UInt8}, IO};
+        owned::Bool = false
     ) -> Tuple{StatusCode.T, String, Vector{UInt8}}
 
 Dispatch a unary RPC request.
-Returns (status_code, status_message, response_data).
+Returns (status_code, status_message, response_data). `owned=true` says
+`request_data` is a `Vector{UInt8}` handed over to the call (see
+`take_message!`), which a raw handler then receives without a copy.
 """
 function dispatch_unary(
     dispatcher::RequestDispatcher,
     ctx::ServerContext,
-    request_data::Union{AbstractVector{UInt8}, IO}
+    request_data::Union{AbstractVector{UInt8}, IO};
+    owned::Bool = false
 )::Tuple{StatusCode.T, String, Vector{UInt8}}
     path = ctx.method
 
@@ -468,7 +472,7 @@ function dispatch_unary(
 
     try
         # Deserialize request (per-method raw passthrough honored)
-        request = deserialize_message(request_data, method.input_type; raw=method.raw_request)
+        request = deserialize_message(request_data, method.input_type; raw=method.raw_request, owned=owned)
 
         # Build interceptor chain
         info = MethodInfo(service.name, method.name, method.method_type)
@@ -614,9 +618,12 @@ by the time this function is called. This function receives raw protobuf bytes.
 When `raw=true` (per-method `raw_request`), the type registry is skipped and the
 raw bytes are returned as a fresh copy — `data` may be a borrowed buffer (valid
 only until the next read), so a raw handler must receive storage it can hold onto.
+`owned=true` says `data` is a `Vector{UInt8}` the caller has handed over (see
+`take_message!`), which is then returned as is.
 """
-function deserialize_message(data, type_name::String; raw::Bool=false)
+function deserialize_message(data, type_name::String; raw::Bool=false, owned::Bool=false)
     if raw
+        owned && data isa Vector{UInt8} && return data
         # Raw-bytes passthrough: no type registry, no ProtoBuf decode. Copy
         # semantics identical to the unknown-type fallback below: the input may
         # be a borrowed IOBuffer view, so read into a fresh vector.
