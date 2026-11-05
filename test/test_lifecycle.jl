@@ -73,10 +73,12 @@ using gRPCServer: FrameReader, read_message!, _FRAME_READ_CHUNK
     end
 end
 
-@testset "FrameReader does not preallocate from the length prefix" begin
+@testset "FrameReader allocates a declared length only once it passes the limit" begin
     # A bare 5-byte header declaring a near-max message, with no payload bytes:
-    # the reader must fail on the truncated frame as a client fault without ever
-    # allocating the declared size.
+    # the frame fails as a truncated client fault. The reader sizes its buffer to
+    # the declared length in one allocation once that length has passed
+    # max_receive_message_length, which is what bounds it; a deployment that must
+    # not allocate that much on a header alone sets a lower limit.
     declared = UInt32(4 * 1024 * 1024 - 100)
     header = UInt8[0x00]
     append!(header, reinterpret(UInt8, [hton(declared)]))
@@ -89,7 +91,21 @@ end
     end
     @test err isa GRPCError
     @test err.code == StatusCode.INVALID_ARGUMENT
-    @test length(fr.buf) <= 4 * _FRAME_READ_CHUNK
+    @test length(fr.buf) == declared
+
+    # Past the limit, nothing is allocated for it.
+    over = UInt8[0x00]
+    append!(over, reinterpret(UInt8, [hton(UInt32(4 * 1024 * 1024 + 1))]))
+    fr = FrameReader(IOBuffer(over), 4 * 1024 * 1024)
+    err = try
+        read_message!(fr)
+        nothing
+    catch e
+        e
+    end
+    @test err isa GRPCError
+    @test err.code == StatusCode.RESOURCE_EXHAUSTED
+    @test length(fr.buf) <= _FRAME_READ_CHUNK
 end
 
 @testset "showerror renders the status name and message" begin

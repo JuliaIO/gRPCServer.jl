@@ -136,16 +136,23 @@ function _reserve!(fr::FrameReader, need::Int)
         fr.r = 0
         fr.w = remaining
     end
-    # Grow toward `need` geometrically rather than in one jump: `need` comes
-    # from the attacker-controlled length prefix, and a bare 5-byte header
-    # declaring max_receive_message_length must not force a max-size allocation
-    # before any payload bytes actually arrive. The buffer only reaches the
-    # declared size as real bytes come in; doubling keeps resize cost amortized
-    # O(n) for a large message.
-    full = fr.r + need
-    if length(fr.buf) < full
-        target = min(full, max(fr.w + _FRAME_READ_CHUNK, 2 * length(fr.buf)))
-        resize!(fr.buf, target)
+    # The message does not fit past the read offset. If it fits the buffer once
+    # the unconsumed bytes are moved to the front, compact in place: in a stream
+    # of large messages the next message's header usually sits at the front, and
+    # reallocating for those few bytes would cost a whole buffer per message.
+    # Otherwise grow to the whole message in one exact allocation, unconsumed
+    # bytes first. `need` was already checked against max_receive_message_length.
+    if length(fr.buf) < fr.r + need
+        remaining = fr.w - fr.r
+        if length(fr.buf) >= need
+            remaining > 0 && copyto!(fr.buf, 1, fr.buf, fr.r + 1, remaining)
+        else
+            buf = Vector{UInt8}(undef, max(need, _FRAME_READ_CHUNK))
+            remaining > 0 && copyto!(buf, 1, fr.buf, fr.r + 1, remaining)
+            fr.buf = buf
+        end
+        fr.r = 0
+        fr.w = remaining
     end
     return nothing
 end
@@ -239,6 +246,38 @@ function read_message!(fr::FrameReader)::Union{Nothing,_FrameBuffer}
     end
 
     return IOBuffer(payload)
+end
+
+"""
+    take_message!(fr, msg) -> Vector{UInt8}
+
+Take ownership of `msg`, the message `read_message!` last returned, as a vector
+the caller may keep. A message that fills most of the reader's buffer (one that
+needed the buffer grown to fit it) is handed over without a copy: the reader
+gives up its buffer, trimmed to the message, and starts a new one if it is read
+again. A small message is copied, so the caller does not keep the reader's
+whole buffer alive for a few bytes. A decompressed message already has storage
+of its own and is returned as is.
+
+Only for the last message read through `fr`: a unary or server-streaming
+request after its half-close, where nothing else reads the reader's buffer.
+"""
+function take_message!(fr::FrameReader, msg::_FrameBuffer)::Vector{UInt8}
+    v = msg.data
+    p = parent(v)
+    rng = first(parentindices(v))
+    len = length(rng)
+    if p !== fr.buf
+        # Decompressed into storage of its own (see `read_message!`).
+        return (first(rng) == 1 && len == length(p)) ? p : p[rng]
+    end
+    2 * len < length(p) && return p[rng]
+    fr.buf = UInt8[]
+    fr.r = 0
+    fr.w = 0
+    first(rng) > 1 && deleteat!(p, 1:(first(rng) - 1))   # moves the array's start; no bytes move
+    resize!(p, len)
+    return p
 end
 
 # Resolve the codec negotiated by the request's `grpc-encoding` header. `nothing`
