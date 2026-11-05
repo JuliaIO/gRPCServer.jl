@@ -136,13 +136,21 @@ function _reserve!(fr::FrameReader, need::Int)
         fr.r = 0
         fr.w = remaining
     end
-    # Grow to the whole message in one exact allocation, unconsumed bytes first.
-    # `need` was already checked against max_receive_message_length.
+    # The message does not fit past the read offset. If it fits the buffer once
+    # the unconsumed bytes are moved to the front, compact in place: in a stream
+    # of large messages the next message's header usually sits at the front, and
+    # reallocating for those few bytes would cost a whole buffer per message.
+    # Otherwise grow to the whole message in one exact allocation, unconsumed
+    # bytes first. `need` was already checked against max_receive_message_length.
     if length(fr.buf) < fr.r + need
-        buf = Vector{UInt8}(undef, max(need, _FRAME_READ_CHUNK))
         remaining = fr.w - fr.r
-        remaining > 0 && copyto!(buf, 1, fr.buf, fr.r + 1, remaining)
-        fr.buf = buf
+        if length(fr.buf) >= need
+            remaining > 0 && copyto!(fr.buf, 1, fr.buf, fr.r + 1, remaining)
+        else
+            buf = Vector{UInt8}(undef, max(need, _FRAME_READ_CHUNK))
+            remaining > 0 && copyto!(buf, 1, fr.buf, fr.r + 1, remaining)
+            fr.buf = buf
+        end
         fr.r = 0
         fr.w = remaining
     end

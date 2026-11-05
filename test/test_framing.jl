@@ -176,6 +176,22 @@
     got = take_message!(fr, msg)
     @test got == mid && length(got) == length(mid)
 
+    # A stream of large messages reuses one buffer. After the first message grows
+    # it, each later message's header sits at the front with its payload behind;
+    # the reader must compact rather than reallocate for those few header bytes,
+    # or a client-streaming call allocates a whole buffer per message.
+    msgs = [rand(UInt8, 1_000_000) for _ in 1:8]
+    io = IOBuffer()
+    foreach(m -> write(io, take!(grpc_encode_message_iobuffer(m))), msgs)
+    fr = FrameReader(IOBuffer(take!(io)), 4 * 1024 * 1024)
+    buffers = Set{UInt}()
+    for m in msgs
+        @test read(read_message!(fr)) == m
+        push!(buffers, objectid(fr.buf))
+    end
+    @test read_message!(fr) === nothing
+    @test length(buffers) == 1
+
     # A declared length is validated before anything is allocated for it.
     huge_header = vcat(UInt8[0x00], reinterpret(UInt8, [hton(UInt32(5_000_000))]))
     fr = FrameReader(IOBuffer(huge_header), 4 * 1024 * 1024)
