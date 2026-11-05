@@ -44,6 +44,53 @@ using Sockets: IPv4
         # Buffer drained.
         @test gRPCServer.read_message!(s) === nothing
     end
+
+    # The adapter's `read_message!` returns a `Vector{UInt8}`, not an `IOBuffer`.
+    # A raw unary request is handed over with `take_message!` after the
+    # half-close, which once assumed an `IO` and threw a MethodError here, so the
+    # call never answered. Server-streaming is checked alongside it.
+    @testset "raw request dispatches through the adapter" begin
+        # Concatenated payloads of the DATA frames written to the adapter's IO.
+        function data_payload(bytes::Vector{UInt8})
+            out = UInt8[]
+            i = 1
+            while i + 8 <= length(bytes)
+                len = (Int(bytes[i]) << 16) | (Int(bytes[i+1]) << 8) | Int(bytes[i+2])
+                bytes[i+3] == 0x00 && append!(out, bytes[(i+9):(i+8+len)])
+                i += 9 + len
+            end
+            return out
+        end
+
+        payload = UInt8[0x0a, 0x03, 0x61, 0x62, 0x63]
+        received = Ref{Any}(nothing)
+        for (name, mt, handler) in (
+                ("Unary", MethodType.UNARY, (ctx, req) -> (received[] = req; req)),
+                ("Stream", MethodType.SERVER_STREAMING,
+                 (ctx, req, stream) -> (received[] = req; send!(stream, req); nothing)))
+            @testset "$name" begin
+                server = GRPCServer("127.0.0.1", 50051)
+                gRPCServer.register_service!(server.dispatcher, ServiceDescriptor("raw.Svc",
+                    Dict(name => MethodDescriptor(name, mt, Vector{UInt8}, Vector{UInt8}, handler;
+                                                  raw_request = true, raw_response = true)),
+                    nothing))
+                # A stream registered with the connection, so it has a send window.
+                conn = HTTP2Connection()
+                stream = PureHTTP2.create_stream(conn, UInt32(1))
+                stream.request_headers = [(":method", "POST"), (":path", "/raw.Svc/$name"),
+                                          ("content-type", "application/grpc"), ("te", "trailers")]
+                stream.headers_complete = true
+                stream.end_stream_received = true
+                write(stream.data_buffer, gRPCServer.encode_grpc_message(payload))
+                out = IOBuffer()
+                received[] = nothing
+                gRPCServer.dispatch_grpc_call(server, P2Ext.PureHTTP2GRPCStream(conn, out, stream),
+                                              PeerInfo(IPv4(0), 0))
+                @test received[] == payload
+                @test data_payload(take!(out)) == gRPCServer.encode_grpc_message(payload)
+            end
+        end
+    end
 end
 
 # Protobuf types for the truncation test below. Guarded because

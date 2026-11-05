@@ -162,7 +162,8 @@ function read_message!(s::HTTPjlGRPCStream)
 end
 
 # Hand the last message read over without a copy (see FrameReader `take_message!`).
-take_message!(s::HTTPjlGRPCStream, msg) =
+# `msg::IO` keeps this strictly more specific than the generic `IO` fallback.
+take_message!(s::HTTPjlGRPCStream, msg::IO) =
     s.fr === nothing ? read(seekstart(msg)) : take_message!(s.fr, msg)
 
 function expect_half_close!(s::HTTPjlGRPCStream)
