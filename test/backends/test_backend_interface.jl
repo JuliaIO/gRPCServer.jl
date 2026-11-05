@@ -46,9 +46,9 @@ using Sockets: IPv4
     end
 
     # The adapter's `read_message!` returns a `Vector{UInt8}`, not an `IOBuffer`.
-    # A raw unary request is handed over with `take_message!` after the
-    # half-close, which once assumed an `IO` and threw a MethodError here, so the
-    # call never answered. Server-streaming is checked alongside it.
+    # A raw request (unary or server-streaming) is handed over with
+    # `take_message!` after the half-close, which once assumed an `IO` and threw
+    # a MethodError here, so the call never answered.
     @testset "raw request dispatches through the adapter" begin
         # Concatenated payloads of the DATA frames written to the adapter's IO.
         function data_payload(bytes::Vector{UInt8})

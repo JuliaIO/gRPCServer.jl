@@ -716,20 +716,24 @@ end
     dispatch_server_streaming(
         dispatcher::RequestDispatcher,
         ctx::ServerContext,
-        request_data::Vector{UInt8},
+        request_data::Union{AbstractVector{UInt8}, IO},
         send_callback::Function,
-        close_callback::Function
+        close_callback::Function;
+        owned::Bool = false
     ) -> Tuple{StatusCode.T, String}
 
 Dispatch a server streaming RPC request.
-Returns (status_code, status_message) after streaming completes.
+Returns (status_code, status_message) after streaming completes. `owned=true`
+says `request_data` is a `Vector{UInt8}` handed over to the call (see
+`take_message!`), which a raw handler then receives without a copy.
 """
 function dispatch_server_streaming(
     dispatcher::RequestDispatcher,
     ctx::ServerContext,
     request_data::Union{AbstractVector{UInt8}, IO},
     send_callback::Function,
-    close_callback::Function
+    close_callback::Function;
+    owned::Bool = false
 )::Tuple{StatusCode.T, String}
     path = ctx.method
 
@@ -747,7 +751,7 @@ function dispatch_server_streaming(
 
     try
         # Deserialize request (per-method raw passthrough honored)
-        request = deserialize_message(request_data, method.input_type; raw=method.raw_request)
+        request = deserialize_message(request_data, method.input_type; raw=method.raw_request, owned=owned)
 
         # Create server stream with the correct output type (matches
         # _expected_handler_tuple, so typed handlers are callable)

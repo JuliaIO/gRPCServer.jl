@@ -310,6 +310,15 @@ using gRPCServer
         @test received[] isa Vector{UInt8}
         @test received[] == payload
         @test received[] !== payload
+
+        # A request handed over to the call (`owned`, after `take_message!`) reaches
+        # the raw handler as the same vector, with no copy.
+        owned_payload = copy(payload)
+        status, _ = gRPCServer.dispatch_server_streaming(
+            dispatcher, ctx, owned_payload, send_cb, close_cb; owned = true,
+        )
+        @test status == StatusCode.OK
+        @test received[] === owned_payload
     end
 
     @testset "raw_response honored through dispatch_client_streaming" begin
