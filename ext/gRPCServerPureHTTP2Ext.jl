@@ -606,8 +606,8 @@ function stop_serving!(::gRPCServer.PureHTTP2Backend, handle;
     server = handle.server
     budget = timeout > 0.0 ? timeout : (server !== nothing ?
                                         server.config.drain_timeout : 10.0)
-    t0 = time()
-    while !isempty(handle.connections) && time() - t0 < budget
+    t0 = time_ns()
+    while !isempty(handle.connections) && (time_ns() - t0) / 1e9 < budget
         sleep(0.05)
     end
     if !isempty(handle.connections)
