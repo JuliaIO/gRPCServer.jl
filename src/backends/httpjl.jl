@@ -329,8 +329,8 @@ function stop_serving!(::HTTPjlBackend, httpjl; force::Bool = false,
         catch
         end
     end
-    t0 = time()
-    while !istaskdone(draining) && time() - t0 < budget
+    t0 = time_ns()
+    while !istaskdone(draining) && (time_ns() - t0) / 1e9 < budget
         sleep(0.05)
     end
     if !istaskdone(draining)

@@ -451,8 +451,11 @@ workloads.
 ### Deadlines and cancellation
 
 The `grpc-timeout` header is parsed strictly into `ctx.deadline` (a malformed
-value fails the call with `INVALID_ARGUMENT`). The deadline is enforced at two
-points, and **never while your handler is running**:
+value fails the call with `INVALID_ARGUMENT`). Deadlines are measured on the
+monotonic clock (`ctx.deadline_ns`, a `time_ns()` reading; `ctx.deadline` is a
+`DateTime` view of it), so changing the system time does not shorten or extend
+them. The deadline is enforced at two points, and **never while your handler is
+running**:
 
 - **Pre-dispatch**: if the deadline has already passed when the request reaches
 the handler (a zero timeout, or queueing delay past the deadline), the call

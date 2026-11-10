@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-10
+
+### Fixed
+
+- **Request deadlines are measured on the monotonic clock, so changing the
+  system time no longer shortens or extends them**
+  ([#10](https://github.com/JuliaIO/gRPCServer.jl/issues/10)). The
+  `grpc-timeout` header was turned into a wall-clock `DateTime` and checked
+  against `now()`, so an NTP step, a manual clock change, or a VM resume moved
+  every in-flight deadline by the size of the step: a backward step could expire
+  a call before its handler ran, and a forward step could let a late handler's
+  `OK` through. `ServerContext` now stores the deadline as a `time_ns()` reading
+  in the new `deadline_ns` field, and `remaining_time`, the pre-dispatch check,
+  the post-return `DEADLINE_EXCEEDED` mapping, and `TimeoutInterceptor` all
+  compare against it. `ctx.deadline` still reads and writes a `DateTime`,
+  converted at access time, so existing handlers are unaffected. The shutdown
+  drain loops and the `LoggingInterceptor`/`MetricsInterceptor` durations
+  moved to the monotonic clock as well.
+
+### Changed
+
+- **Dependabot now raises `[compat]` bounds and replaces CompatHelper.** It
+  covers the package, `docs/` and `benchmark/` projects, with all Julia updates
+  grouped into one weekly PR. GitHub Actions updates move from monthly to weekly
+  and are grouped into one PR as well. This matches the gRPCClient.jl setup.
+
+## [0.1.1] - 2026-09-25
+
 ### Added
 
 - **Ephemeral ports: `GRPCServer(host, 0)` binds an OS-chosen port, and the new
@@ -33,14 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly and logged the service as registered. The generated docstrings carried
   the same leading dot, so the emission was self-consistently wrong.
 
-### Changed
-
-- **Dependabot now raises `[compat]` bounds and replaces CompatHelper.** It
-  covers the package, `docs/` and `benchmark/` projects, with all Julia updates
-  grouped into one weekly PR. GitHub Actions updates move from monthly to weekly
-  and are grouped into one PR as well. This matches the gRPCClient.jl setup.
-
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-08-29
 
 First public release, registered in General under the `JuliaIO` organization.
 The package was developed as 1.0.0 before registration; the number was reset to
@@ -410,5 +431,7 @@ tag 0.2.0, 2026-07-30). Those tags were never pushed and do not exist on the
 public repository. Every change from both lines that is still present is
 described under [0.1.0] above.
 
-[Unreleased]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/JuliaIO/gRPCServer.jl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/JuliaIO/gRPCServer.jl/releases/tag/v0.1.0
