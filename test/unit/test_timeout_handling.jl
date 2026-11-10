@@ -240,6 +240,75 @@ using .ConformanceData
     end  # T045
 
     # =========================================================================
+    # T045c: Deadlines live on the monotonic clock (issue #10)
+    #
+    # A wall-clock step (NTP sync, manual change, VM resume) must not shorten
+    # or extend a request deadline. The authoritative value is `deadline_ns`, a
+    # time_ns() reading; `ctx.deadline` is only a DateTime view of it.
+    # =========================================================================
+
+    @testset "T045c: monotonic deadline (issue #10)" begin
+        mono = gRPCServer._monotonic_ns
+
+        @testset "wire paths anchor the deadline to time_ns()" begin
+            before = mono()
+            peer = gRPCServer.PeerInfo(Sockets.IPv4("127.0.0.1"), 12345)
+            ctx = gRPCServer._grpc_context_from_metadata(
+                [("grpc-timeout", "30S")], peer, "/test/Method")
+            @test ctx.deadline_ns isa Int64
+            @test before + 30_000_000_000 <= ctx.deadline_ns <= mono() + 30_000_000_000
+
+            ctx2 = gRPCServer.create_context_from_headers(
+                [(":path", "/test/Method"), ("grpc-timeout", "500m")], peer)
+            @test ctx2.deadline_ns isa Int64
+            @test 0 < ctx2.deadline_ns - mono() <= 500_000_000
+
+            @test gRPCServer._parse_grpc_timeout_ns("") === nothing
+            @test_throws gRPCServer.GRPCError gRPCServer._parse_grpc_timeout_ns("99999999H")
+        end
+
+        @testset "enforcement reads deadline_ns" begin
+            ctx = gRPCServer.ServerContext()
+            ctx.deadline_ns = mono() + 2_000_000_000
+            remaining = gRPCServer.remaining_time(ctx)
+            @test 1.9 < remaining <= 2.0
+            @test gRPCServer._apply_deadline(ctx, StatusCode.OK, "") == (StatusCode.OK, "")
+
+            ctx.deadline_ns = mono() - 1
+            @test gRPCServer.remaining_time(ctx) < 0
+            @test gRPCServer._apply_deadline(ctx, StatusCode.OK, "")[1] == StatusCode.DEADLINE_EXCEEDED
+        end
+
+        @testset "ctx.deadline is a DateTime view backed by deadline_ns" begin
+            ctx = gRPCServer.ServerContext(deadline_ns = mono() + 10_000_000_000)
+            @test ctx.deadline isa DateTime
+            @test abs(Dates.value(ctx.deadline - (now() + Second(10)))) <= 100
+
+            ctx.deadline = now() + Second(60)
+            @test abs((ctx.deadline_ns - mono()) - 60_000_000_000) <= 100_000_000
+
+            ctx.deadline = nothing
+            @test ctx.deadline_ns === nothing
+            @test ctx.deadline === nothing
+            @test gRPCServer.remaining_time(ctx) === nothing
+
+            @test :deadline in propertynames(ctx)
+            @test :deadline_ns in propertynames(ctx)
+            # Ordinary fields still go through the default path, with conversion.
+            ctx.cancelled = true
+            @test ctx.cancelled === true
+        end
+
+        @testset "TimeoutInterceptor sets a monotonic default" begin
+            ctx = gRPCServer.ServerContext()
+            info = gRPCServer.MethodInfo("svc", "M", gRPCServer.MethodType.UNARY)
+            before = mono()
+            TimeoutInterceptor(default_timeout_ms = 5000)(ctx, nothing, info, (c, r) -> :ok)
+            @test before + 5_000_000_000 <= ctx.deadline_ns <= mono() + 5_000_000_000
+        end
+    end  # T045c
+
+    # =========================================================================
     # T045b: _apply_deadline post-return mapping
     #
     # The deadline is enforced only *after* the handler returns (plus the
