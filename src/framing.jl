@@ -126,34 +126,30 @@ FrameReader(stream::IO, max_receive_message_length::Integer, request_encoding::U
 @inline _avail(fr::FrameReader) = fr.w - fr.r
 
 # Make room to read more bytes while keeping `need` unconsumed bytes reachable.
-# Compaction (shifting the unconsumed tail to the front) is done only when the
-# consumed prefix has grown large or the buffer is full, rather than on every
-# call, so streaming many frames does not pay an O(remaining) memmove per frame.
+# Every case ends the same way: the unconsumed bytes moved to the front of the
+# buffer, copied once.
 function _reserve!(fr::FrameReader, need::Int)
     remaining = fr.w - fr.r
-    if fr.r > 0 && (fr.r >= remaining || length(fr.buf) == fr.w)
-        remaining > 0 && copyto!(fr.buf, 1, fr.buf, fr.r + 1, remaining)
-        fr.r = 0
-        fr.w = remaining
-    end
-    # The message does not fit past the read offset. If it fits the buffer once
-    # the unconsumed bytes are moved to the front, compact in place: in a stream
-    # of large messages the next message's header usually sits at the front, and
-    # reallocating for those few bytes would cost a whole buffer per message.
-    # Otherwise grow to the whole message in one exact allocation, unconsumed
-    # bytes first. `need` was already checked against max_receive_message_length.
     if length(fr.buf) < fr.r + need
-        remaining = fr.w - fr.r
-        if length(fr.buf) >= need
-            remaining > 0 && copyto!(fr.buf, 1, fr.buf, fr.r + 1, remaining)
-        else
-            buf = Vector{UInt8}(undef, max(need, _FRAME_READ_CHUNK))
-            remaining > 0 && copyto!(buf, 1, fr.buf, fr.r + 1, remaining)
-            fr.buf = buf
-        end
-        fr.r = 0
-        fr.w = remaining
+        # The message does not fit past the read offset. Reuse this buffer if it
+        # holds the whole message: in a stream of large messages the next header
+        # usually sits near the end, and reallocating for those few bytes would
+        # cost a whole buffer per message. Otherwise grow to the whole message in
+        # one exact allocation; `need` was already checked against
+        # max_receive_message_length.
+        dest = length(fr.buf) >= need ? fr.buf : Vector{UInt8}(undef, max(need, _FRAME_READ_CHUNK))
+    elseif fr.r > 0 && (fr.r >= remaining || length(fr.buf) == fr.w)
+        # It fits, but the consumed prefix has grown large or the free tail is
+        # gone. Compacting only then, rather than on every call, keeps streaming
+        # many small frames from paying a memmove per frame.
+        dest = fr.buf
+    else
+        return nothing
     end
+    remaining > 0 && copyto!(dest, 1, fr.buf, fr.r + 1, remaining)
+    fr.buf = dest
+    fr.r = 0
+    fr.w = remaining
     return nothing
 end
 
