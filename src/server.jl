@@ -979,7 +979,11 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
             # body to end-of-stream (no abandoned-request reset) and rejects extra
             # frames (bounded drain).
             expect_half_close!(gs)
-            status, message, resp = dispatch_unary(server.dispatcher, ctx, data)
+            # A raw handler keeps the request bytes, so hand it the reader's buffer
+            # rather than a copy (the half-close above was the last read).
+            owned = method_desc.raw_request
+            owned && (data = take_message!(gs, data))
+            status, message, resp = dispatch_unary(server.dispatcher, ctx, data; owned = owned)
             status, message = _apply_deadline(ctx, status, message)
             headers_sent = true
             send_grpc_response_generic(gs, status, message, resp; content_type=content_type, max_send_message_length=max_send, ctx=ctx)
@@ -993,6 +997,10 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 return nothing
             end
             expect_half_close!(gs)
+            # As in the unary branch: the half-close was the last read, so a raw
+            # handler gets the reader's buffer rather than a copy.
+            owned = method_desc.raw_request
+            owned && (data = take_message!(gs, data))
             encode_buf = IOBuffer()
             # Response headers are deferred until the first response message so
             # handler-set initial metadata (ctx.response_headers) reaches the
@@ -1008,7 +1016,7 @@ function dispatch_grpc_call(server::GRPCServer, gs::AbstractGRPCStream, peer::Pe
                 send_message!(gs, take!(encode_buf))
             end
             close_cb = () -> nothing
-            status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb)
+            status, message = dispatch_server_streaming(server.dispatcher, ctx, data, send_cb, close_cb; owned = owned)
             status, message = _apply_deadline(ctx, status, message)
             # A successful stream with zero messages still needs a headers block
             # (a trailers-only response is reserved for non-OK status).

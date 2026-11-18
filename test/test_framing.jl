@@ -9,7 +9,7 @@
 
 @testset "Framing" begin
     using gRPCServer: grpc_encode_message_iobuffer, GRPC_HEADER_SIZE
-    using gRPCServer: FrameReader, read_message!, expect_half_close!
+    using gRPCServer: FrameReader, read_message!, expect_half_close!, take_message!
     using gRPCServer: deserialize_message
     using ProtoBuf: ProtoDecoder, decode
 
@@ -141,4 +141,60 @@
         @test got == body
         @test got !== body  # fresh copy, not a view into reader storage
     end
+
+    # A message larger than the reader's initial buffer grows it once, to exactly
+    # the message (no doubling, no over-allocation), and `take_message!` hands that
+    # buffer over without a copy after the half-close.
+    big = rand(UInt8, 300_000)
+    fr = FrameReader(IOBuffer(take!(grpc_encode_message_iobuffer(big))), 4 * 1024 * 1024)
+    msg = read_message!(fr)
+    @test length(fr.buf) == length(big)
+    expect_half_close!(fr)
+    storage = fr.buf
+    got = take_message!(fr, msg)
+    @test got === storage && got == big
+    @test isempty(fr.buf)                       # the reader gave its buffer up
+    @test deserialize_message(got, "Vector{UInt8}"; raw = true, owned = true) === got
+    @test deserialize_message(got, "Vector{UInt8}"; raw = true) !== got   # not owned: a copy
+
+    # A small message is copied out, so the caller does not keep the reader's whole
+    # buffer alive for a few bytes; the reader keeps its buffer.
+    small = rand(UInt8, 100)
+    fr = FrameReader(IOBuffer(take!(grpc_encode_message_iobuffer(small))), 4 * 1024 * 1024)
+    msg = read_message!(fr)
+    expect_half_close!(fr)
+    storage = fr.buf
+    got = take_message!(fr, msg)
+    @test got == small && got !== storage && fr.buf === storage
+
+    # A message that nearly fills the initial buffer is handed over, trimmed to the
+    # payload (the header in front of it dropped without moving the bytes).
+    mid = rand(UInt8, 40_000)
+    fr = FrameReader(IOBuffer(take!(grpc_encode_message_iobuffer(mid))), 4 * 1024 * 1024)
+    msg = read_message!(fr)
+    expect_half_close!(fr)
+    got = take_message!(fr, msg)
+    @test got == mid && length(got) == length(mid)
+
+    # A stream of large messages reuses one buffer. After the first message grows
+    # it, each later message's header sits at the front with its payload behind;
+    # the reader must compact rather than reallocate for those few header bytes,
+    # or a client-streaming call allocates a whole buffer per message.
+    msgs = [rand(UInt8, 1_000_000) for _ in 1:8]
+    io = IOBuffer()
+    foreach(m -> write(io, take!(grpc_encode_message_iobuffer(m))), msgs)
+    fr = FrameReader(IOBuffer(take!(io)), 4 * 1024 * 1024)
+    buffers = Set{UInt}()
+    for m in msgs
+        @test read(read_message!(fr)) == m
+        push!(buffers, objectid(fr.buf))
+    end
+    @test read_message!(fr) === nothing
+    @test length(buffers) == 1
+
+    # A declared length is validated before anything is allocated for it.
+    huge_header = vcat(UInt8[0x00], reinterpret(UInt8, [hton(UInt32(5_000_000))]))
+    fr = FrameReader(IOBuffer(huge_header), 4 * 1024 * 1024)
+    @test _grpc_error_code(() -> read_message!(fr)) == StatusCode.RESOURCE_EXHAUSTED
+    @test length(fr.buf) < 5_000_000
 end

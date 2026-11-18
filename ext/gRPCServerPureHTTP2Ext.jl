@@ -15,7 +15,7 @@ using Sockets: IPv4, IPv6, getaddrinfo, listen, accept, getpeername, getsockname
 import HTTP
 
 import gRPCServer: serve_grpc, stop_serving!, grpc_path, grpc_method,
-                   request_metadata, read_message!, is_cancelled,
+                   request_metadata, read_message!, take_message!, is_cancelled,
                    send_response_headers!, send_message!, send_trailers!, reset!
 
 # --- Adapter: PureHTTP2 (connection, io, stream) triple as an AbstractGRPCStream ---
@@ -137,6 +137,11 @@ function read_message!(s::PureHTTP2GRPCStream)
         yield()
     end
 end
+
+# `read_grpc_message!` returns a slice (`data[6:end_of_message]`) or a freshly
+# decompressed vector, never a view of the stream's buffer, so the message is
+# already the caller's to keep: hand it over as is.
+take_message!(::PureHTTP2GRPCStream, msg::Vector{UInt8}) = msg
 
 # --- Frame-loop helpers (moved out of src/server.jl with the PureHTTP2 serve path) ---
 

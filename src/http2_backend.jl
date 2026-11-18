@@ -176,6 +176,19 @@ before END_STREAM, like the HTTPjl adapter.
 """
 function read_message! end
 
+"""
+    take_message!(s::AbstractGRPCStream, msg) -> Vector{UInt8}
+
+Take ownership of `msg`, the message `read_message!` last returned, as a vector
+the caller may keep, after the request's last message has been read (a unary or
+server-streaming request after its half-close). A backend whose buffer can be
+handed over does so without a copy; these fallbacks copy. `read_message!` may
+return either an `IO` or a byte vector (the PureHTTP2 adapter returns a
+`Vector{UInt8}`), so both are accepted.
+"""
+take_message!(::AbstractGRPCStream, msg::IO) = read(seekstart(msg))
+take_message!(::AbstractGRPCStream, msg::AbstractVector{UInt8}) = Vector{UInt8}(msg)
+
 # `is_cancelled(s::AbstractGRPCStream)` reuses the existing exported `is_cancelled`
 # generic (see context.jl); backends add a method for their stream handle.
 
