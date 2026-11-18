@@ -483,9 +483,11 @@ function stop!(server::GRPCServer; force::Bool=false, timeout::Float64=0.0)
 
         # Wait for in-flight requests
         drain_time = timeout > 0 ? timeout : server.config.drain_timeout
-        drain_deadline = time() + drain_time
+        # Elapsed time on the monotonic clock, so a wall-clock step cannot cut
+        # the drain short or stall it (and an Inf timeout still waits forever).
+        drain_start = time_ns()
 
-        while !isempty(server.connections) && time() < drain_deadline
+        while !isempty(server.connections) && (time_ns() - drain_start) / 1e9 < drain_time
             sleep(0.1)
         end
 
@@ -738,8 +740,8 @@ function _grpc_context_from_metadata(metadata, peer::PeerInfo, method::String;
             md[name] = value
         end
     end
-    deadline = timeout_header !== nothing ? parse_grpc_timeout(timeout_header) : nothing
-    return ServerContext(; method=method, peer=peer, deadline=deadline, metadata=md,
+    deadline_ns = timeout_header !== nothing ? _parse_grpc_timeout_ns(timeout_header) : nothing
+    return ServerContext(; method=method, peer=peer, deadline_ns=deadline_ns, metadata=md,
                          payload=payload)
 end
 
@@ -780,7 +782,8 @@ end
 # (also pre-check-only). Watchdog-based cancellation is future work; see the
 # ServerConfig docstring on deadline semantics.
 function _apply_deadline(ctx::ServerContext, status::StatusCode.T, message::String)::Tuple{StatusCode.T, String}
-    if ctx.deadline !== nothing && now() >= ctx.deadline
+    d = ctx.deadline_ns
+    if d !== nothing && _monotonic_ns() >= d
         if status in (StatusCode.DEADLINE_EXCEEDED, StatusCode.CANCELLED)
             return (status, message)
         end

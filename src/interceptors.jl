@@ -118,7 +118,7 @@ struct LoggingInterceptor <: Interceptor
 end
 
 function (i::LoggingInterceptor)(ctx::ServerContext, request, info::MethodInfo, next::Function)
-    start_time = time()
+    start_time = time_ns()
 
     if i.log_requests
         @info "gRPC request" request_id=ctx.request_id method="$(info.service_name)/$(info.method_name)" peer=ctx.peer.address
@@ -126,7 +126,7 @@ function (i::LoggingInterceptor)(ctx::ServerContext, request, info::MethodInfo, 
 
     try
         response = next(ctx, request)
-        duration_ms = (time() - start_time) * 1000
+        duration_ms = (time_ns() - start_time) / 1e6
 
         if i.log_responses
             @info "gRPC response" request_id=ctx.request_id duration_ms=round(duration_ms, digits=2)
@@ -134,7 +134,7 @@ function (i::LoggingInterceptor)(ctx::ServerContext, request, info::MethodInfo, 
 
         return response
     catch e
-        duration_ms = (time() - start_time) * 1000
+        duration_ms = (time_ns() - start_time) / 1e6
 
         if i.log_errors
             if e isa GRPCError
@@ -178,7 +178,7 @@ end
 
 function (i::MetricsInterceptor)(ctx::ServerContext, request, info::MethodInfo, next::Function)
     method = "$(info.service_name)/$(info.method_name)"
-    start_time = time()
+    start_time = time_ns()
 
     # Estimate request size (simplified)
     request_size = 0
@@ -196,7 +196,7 @@ function (i::MetricsInterceptor)(ctx::ServerContext, request, info::MethodInfo, 
 
     try
         response = next(ctx, request)
-        duration_ms = (time() - start_time) * 1000
+        duration_ms = (time_ns() - start_time) / 1e6
 
         if response !== nothing && hasmethod(sizeof, (typeof(response),))
             try
@@ -208,7 +208,7 @@ function (i::MetricsInterceptor)(ctx::ServerContext, request, info::MethodInfo, 
         i.on_response(method, status, duration_ms, response_size)
         return response
     catch e
-        duration_ms = (time() - start_time) * 1000
+        duration_ms = (time_ns() - start_time) / 1e6
 
         if e isa GRPCError
             status = e.code
@@ -243,8 +243,8 @@ end
 
 function (i::TimeoutInterceptor)(ctx::ServerContext, request, info::MethodInfo, next::Function)
     # Set default deadline if none specified
-    if ctx.deadline === nothing && i.default_timeout_ms !== nothing
-        ctx.deadline = now() + Millisecond(i.default_timeout_ms)
+    if ctx.deadline_ns === nothing && i.default_timeout_ms !== nothing
+        ctx.deadline_ns = _monotonic_ns() + Int64(i.default_timeout_ms) * 1_000_000
     end
 
     # Check if already expired

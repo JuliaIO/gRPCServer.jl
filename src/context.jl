@@ -50,7 +50,8 @@ Request-scoped context provided to handler functions.
 - `metadata::Dict{String, Union{String, Vector{UInt8}}}`: Request metadata
 - `response_headers::Dict{String, Union{String, Vector{UInt8}}}`: Response headers to send
 - `trailers::Dict{String, Union{String, Vector{UInt8}}}`: Trailing metadata to send
-- `deadline::Union{DateTime, Nothing}`: Request deadline (nothing = no deadline). The server does **not** interrupt a handler when the deadline passes — it is enforced only before dispatch (fail-fast) and after the handler returns (see [`ServerConfig`](@ref) deadline semantics); handlers should check [`remaining_time`](@ref)/[`is_cancelled`](@ref) cooperatively to bound their own runtime.
+- `deadline::Union{DateTime, Nothing}`: Request deadline as a wall-clock `DateTime` (nothing = no deadline). This is a view of `deadline_ns`, recomputed from the current wall clock on each read; assigning a `DateTime` (or `nothing`) to it updates `deadline_ns`. The server does **not** interrupt a handler when the deadline passes — it is enforced only before dispatch (fail-fast) and after the handler returns (see [`ServerConfig`](@ref) deadline semantics); handlers should check [`remaining_time`](@ref)/[`is_cancelled`](@ref) cooperatively to bound their own runtime.
+- `deadline_ns::Union{Int64, Nothing}`: The authoritative deadline, as a `time_ns()` reading. All enforcement (`remaining_time`, the pre-dispatch check, the post-return `DEADLINE_EXCEEDED` mapping, `TimeoutInterceptor`) compares against the monotonic clock, so stepping the system clock (NTP, manual change, VM resume) neither shortens nor extends a deadline.
 - `cancelled::Bool`: Whether the request has been cancelled
 - `peer::PeerInfo`: Client connection information
 - `trace_context::Union{Vector{UInt8}, Nothing}`: Distributed tracing context
@@ -86,7 +87,7 @@ mutable struct ServerContext
     metadata::Dict{String, Union{String, Vector{UInt8}}}
     response_headers::Dict{String, Union{String, Vector{UInt8}}}
     trailers::Dict{String, Union{String, Vector{UInt8}}}
-    deadline::Union{DateTime, Nothing}
+    deadline_ns::Union{Int64, Nothing}
     cancelled::Bool
     peer::PeerInfo
     trace_context::Union{Vector{UInt8}, Nothing}
@@ -97,6 +98,7 @@ mutable struct ServerContext
         authority::String="",
         metadata::Dict{String, Union{String, Vector{UInt8}}}=Dict{String, Union{String, Vector{UInt8}}}(),
         deadline::Union{DateTime, Nothing}=nothing,
+        deadline_ns::Union{Int64, Nothing}=deadline === nothing ? nothing : _datetime_to_monotonic(deadline),
         peer::PeerInfo=PeerInfo(IPv4("0.0.0.0"), 0),
         trace_context::Union{Vector{UInt8}, Nothing}=nothing,
         payload::Any=nothing
@@ -108,7 +110,7 @@ mutable struct ServerContext
             metadata,
             Dict{String, Union{String, Vector{UInt8}}}(),
             Dict{String, Union{String, Vector{UInt8}}}(),
-            deadline,
+            deadline_ns,
             false,
             peer,
             trace_context,
@@ -116,6 +118,28 @@ mutable struct ServerContext
         )
     end
 end
+
+# `deadline` is kept as a DateTime property for API compatibility, backed by the
+# monotonic `deadline_ns` field (issue #10).
+function Base.getproperty(ctx::ServerContext, name::Symbol)
+    if name === :deadline
+        d = getfield(ctx, :deadline_ns)
+        return d === nothing ? nothing : _monotonic_to_datetime(d)
+    end
+    return getfield(ctx, name)
+end
+
+function Base.setproperty!(ctx::ServerContext, name::Symbol, value)
+    if name === :deadline
+        d = value === nothing ? nothing : _datetime_to_monotonic(convert(DateTime, value))
+        setfield!(ctx, :deadline_ns, d)
+        return value
+    end
+    return setfield!(ctx, name, convert(fieldtype(ServerContext, name), value))
+end
+
+Base.propertynames(::ServerContext, private::Bool=false) =
+    (fieldnames(ServerContext)..., :deadline)
 
 """
     set_header!(ctx::ServerContext, key::String, value::String)
@@ -215,6 +239,9 @@ Get the remaining time until the deadline in seconds.
 Returns `nothing` if no deadline is set.
 Returns negative value if deadline has passed.
 
+Measured on the monotonic clock, so it is unaffected by changes to the system
+time.
+
 # Example
 ```julia
 remaining = remaining_time(ctx)
@@ -224,10 +251,9 @@ end
 ```
 """
 function remaining_time(ctx::ServerContext)::Union{Float64, Nothing}
-    if ctx.deadline === nothing
-        return nothing
-    end
-    return Dates.value(ctx.deadline - now()) / 1000.0  # Convert ms to seconds
+    d = ctx.deadline_ns
+    d === nothing && return nothing
+    return (d - _monotonic_ns()) / 1e9
 end
 
 """
@@ -255,10 +281,10 @@ function cancel!(ctx::ServerContext)
     ctx.cancelled = true
 end
 
-# parse_grpc_timeout is defined in strict.jl (included before this file):
-# strict spec-validated parsing (1-8 digits + unit, checked arithmetic) that
-# returns a DateTime deadline and throws GRPCError(StatusCode.INVALID_ARGUMENT)
-# on malformed non-empty values (empty = absent -> nothing).
+# parse_grpc_timeout / _parse_grpc_timeout_ns are defined in strict.jl
+# (included before this file): strict spec-validated parsing (1-8 digits + unit,
+# checked arithmetic) that throws GRPCError(StatusCode.INVALID_ARGUMENT) on
+# malformed non-empty values (empty = absent -> nothing).
 
 """
     format_grpc_timeout(deadline::DateTime) -> String
@@ -297,7 +323,7 @@ function create_context_from_headers(
     metadata = Dict{String, Union{String, Vector{UInt8}}}()
     method = ""
     authority = ""
-    deadline = nothing
+    deadline_ns = nothing
     trace_context = nothing
 
     for (name, value) in headers
@@ -308,7 +334,7 @@ function create_context_from_headers(
         elseif name_lower == ":authority"
             authority = value
         elseif name_lower == "grpc-timeout"
-            deadline = parse_grpc_timeout(value)
+            deadline_ns = _parse_grpc_timeout_ns(value)
         elseif name_lower == "grpc-trace-bin"
             # Binary header - should be base64 decoded
             trace_context = try
@@ -335,7 +361,7 @@ function create_context_from_headers(
         method=method,
         authority=authority,
         metadata=metadata,
-        deadline=deadline,
+        deadline_ns=deadline_ns,
         peer=peer,
         trace_context=trace_context
     )
